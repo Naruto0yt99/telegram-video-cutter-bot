@@ -1,0 +1,253 @@
+from pathlib import Path
+import sqlite3
+from datetime import datetime, timezone
+
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+DB_PATH = DATA_DIR / "library.db"
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def get_connection():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def init_db():
+    with get_connection() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS library (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                anime TEXT NOT NULL,
+                content_type TEXT NOT NULL DEFAULT 'episode',
+                season TEXT DEFAULT '',
+                episode TEXT DEFAULT '',
+                title TEXT DEFAULT '',
+                language TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                telegram_chat_id INTEGER,
+                telegram_message_id INTEGER,
+                drive_file_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_library_anime
+            ON library(anime)
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_library_episode
+            ON library(anime, season, episode, language)
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_library_content_type
+            ON library(content_type)
+        """)
+
+        conn.commit()
+
+
+def add_library_item(
+    anime,
+    content_type,
+    season,
+    episode,
+    title,
+    language,
+    source_type,
+    source_url,
+    telegram_chat_id=None,
+    telegram_message_id=None,
+    drive_file_id=None,
+):
+    timestamp = now_iso()
+
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO library (
+                anime,
+                content_type,
+                season,
+                episode,
+                title,
+                language,
+                source_type,
+                source_url,
+                telegram_chat_id,
+                telegram_message_id,
+                drive_file_id,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                anime,
+                content_type,
+                season,
+                episode,
+                title,
+                language,
+                source_type,
+                source_url,
+                telegram_chat_id,
+                telegram_message_id,
+                drive_file_id,
+                timestamp,
+                timestamp,
+            ),
+        )
+
+        conn.commit()
+        return cursor.lastrowid
+
+
+def find_episode(anime, season, episode, language=None):
+    with get_connection() as conn:
+        if language:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM library
+                WHERE LOWER(anime) = LOWER(?)
+                  AND season = ?
+                  AND episode = ?
+                  AND LOWER(language) = LOWER(?)
+                  AND content_type = 'episode'
+                LIMIT 1
+                """,
+                (anime, str(season), str(episode), language),
+            ).fetchone()
+
+            return row
+
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM library
+            WHERE LOWER(anime) = LOWER(?)
+              AND season = ?
+              AND episode = ?
+              AND content_type = 'episode'
+            ORDER BY language
+            """,
+            (anime, str(season), str(episode)),
+        ).fetchall()
+
+        return rows
+
+
+def search_library(anime):
+    with get_connection() as conn:
+        return conn.execute(
+            """
+            SELECT *
+            FROM library
+            WHERE LOWER(anime) LIKE LOWER(?)
+            ORDER BY
+                CASE
+                    WHEN season GLOB '[0-9]*'
+                    THEN CAST(season AS INTEGER)
+                    ELSE 999999
+                END,
+                CASE
+                    WHEN episode GLOB '[0-9]*'
+                    THEN CAST(episode AS INTEGER)
+                    ELSE 999999
+                END,
+                language
+            """,
+            (f"%{anime}%",),
+        ).fetchall()
+
+
+def list_seasons(anime):
+    with get_connection() as conn:
+        return conn.execute(
+            """
+            SELECT DISTINCT season
+            FROM library
+            WHERE LOWER(anime) = LOWER(?)
+              AND content_type = 'episode'
+            ORDER BY
+                CASE
+                    WHEN season GLOB '[0-9]*'
+                    THEN CAST(season AS INTEGER)
+                    ELSE 999999
+                END
+            """,
+            (anime,),
+        ).fetchall()
+
+
+def list_episodes(anime, season):
+    with get_connection() as conn:
+        return conn.execute(
+            """
+            SELECT *
+            FROM library
+            WHERE LOWER(anime) = LOWER(?)
+              AND season = ?
+              AND content_type = 'episode'
+            ORDER BY
+                CASE
+                    WHEN episode GLOB '[0-9]*'
+                    THEN CAST(episode AS INTEGER)
+                    ELSE 999999
+                END,
+                language
+            """,
+            (anime, str(season)),
+        ).fetchall()
+
+
+def get_stats():
+    with get_connection() as conn:
+        stats = {}
+
+        stats["anime"] = conn.execute(
+            "SELECT COUNT(DISTINCT anime) FROM library"
+        ).fetchone()[0]
+
+        stats["seasons"] = conn.execute(
+            """
+            SELECT COUNT(DISTINCT anime || '|' || season)
+            FROM library
+            WHERE content_type = 'episode'
+            """
+        ).fetchone()[0]
+
+        stats["episodes"] = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM library
+            WHERE content_type = 'episode'
+            """
+        ).fetchone()[0]
+
+        stats["movies"] = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM library
+            WHERE content_type = 'movie'
+            """
+        ).fetchone()[0]
+
+        stats["languages"] = conn.execute(
+            "SELECT COUNT(DISTINCT language) FROM library"
+        ).fetchone()[0]
+
+        return stats

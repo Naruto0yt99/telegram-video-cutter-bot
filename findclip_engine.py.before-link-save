@@ -1,0 +1,353 @@
+import asyncio
+import hashlib
+import json
+import math
+import shutil
+import subprocess
+from pathlib import Path
+
+import numpy as np
+from PIL import Image
+
+from config import DATA_DIR, INDEX_DIR, TEMP_DIR, FFMPEG_BIN, FFPROBE_BIN
+
+
+SOURCE_DIR = DATA_DIR / "sources"
+SOURCE_DIR.mkdir(parents=True, exist_ok=True)
+INDEX_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def run_cmd(cmd):
+    return subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def duration(path):
+    r = run_cmd([
+        FFPROBE_BIN,
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ])
+    try:
+        return float(r.stdout.strip())
+    except Exception:
+        return 0.0
+
+
+def make_frame(path, timestamp, width=160, height=90):
+    r = run_cmd([
+        FFMPEG_BIN,
+        "-hide_banner",
+        "-loglevel", "error",
+        "-ss", str(timestamp),
+        "-i", str(path),
+        "-frames:v", "1",
+        "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+               f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
+        "-f", "image2pipe",
+        "-vcodec", "png",
+        "pipe:1",
+    ])
+
+    if r.returncode != 0 or not r.stdout:
+        return None
+
+    # subprocess text mode cannot safely carry PNG bytes.
+    return None
+
+
+def extract_frame(path, timestamp, output):
+    r = subprocess.run(
+        [
+            FFMPEG_BIN,
+            "-hide_banner",
+            "-loglevel", "error",
+            "-ss", str(timestamp),
+            "-i", str(path),
+            "-frames:v", "1",
+            "-vf", "scale=160:90:force_original_aspect_ratio=decrease,"
+                   "pad=160:90:(ow-iw)/2:(oh-ih)/2",
+            "-y",
+            str(output),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    return r.returncode == 0 and output.exists()
+
+
+def visual_hash(image_path):
+    try:
+        img = Image.open(image_path).convert("L").resize((32, 18))
+        arr = np.asarray(img, dtype=np.float32)
+
+        # Normalize brightness so overlays/brightness changes matter less.
+        arr -= arr.mean()
+        std = arr.std()
+        if std > 1e-6:
+            arr /= std
+
+        return arr.astype(np.float16)
+    except Exception:
+        return None
+
+
+def visual_distance(a, b):
+    if a is None or b is None:
+        return 999.0
+
+    return float(np.mean(np.abs(a.astype(np.float32) -
+                               b.astype(np.float32))))
+
+
+def make_index(source_path, index_path, sample_every=2.0, progress=None):
+    source_path = Path(source_path)
+    total = duration(source_path)
+
+    if total <= 0:
+        raise RuntimeError("Video duration read nahi ho paya.")
+
+    work = TEMP_DIR / ("index_" + hashlib.md5(
+        str(source_path).encode()
+    ).hexdigest())
+
+    if work.exists():
+        shutil.rmtree(work)
+
+    work.mkdir(parents=True, exist_ok=True)
+
+    frames = []
+    t = 0.0
+
+    while t < total:
+        frame_path = work / f"{t:.3f}.jpg"
+
+        if extract_frame(source_path, t, frame_path):
+            h = visual_hash(frame_path)
+
+            if h is not None:
+                frames.append({
+                    "time": round(t, 3),
+                    "hash": h.tolist(),
+                })
+
+        t += sample_every
+
+        if progress:
+            progress(min(99, int((t / total) * 100)))
+
+    data = {
+        "version": 1,
+        "source": str(source_path),
+        "duration": total,
+        "sample_every": sample_every,
+        "frames": frames,
+    }
+
+    index_path = Path(index_path)
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    index_path.write_text(
+        json.dumps(data),
+        encoding="utf-8",
+    )
+
+    shutil.rmtree(work, ignore_errors=True)
+    return data
+
+
+def load_index(index_path):
+    return json.loads(Path(index_path).read_text(encoding="utf-8"))
+
+
+def index_name(anime, season, episode):
+    raw = f"{anime}|S{season}|E{episode}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def index_path_for(anime, season, episode):
+    return INDEX_DIR / f"{index_name(anime, season, episode)}.json"
+
+
+def source_path_for(anime, season, episode, extension=".mp4"):
+    safe = "".join(
+        c if c.isalnum() or c in "._-" else "_"
+        for c in f"{anime}_S{season}_E{episode}"
+    )
+    return SOURCE_DIR / f"{safe}{extension}"
+
+
+def find_visual_candidates(query_path, index_data, sample_every=1.0):
+    total = duration(query_path)
+
+    if total <= 0:
+        return []
+
+    query_dir = TEMP_DIR / (
+        "query_" + hashlib.md5(str(query_path).encode()).hexdigest()
+    )
+
+    if query_dir.exists():
+        shutil.rmtree(query_dir)
+
+    query_dir.mkdir(parents=True, exist_ok=True)
+
+    source_frames = index_data.get("frames", [])
+    if not source_frames:
+        return []
+
+    source_hashes = [
+        np.asarray(x["hash"], dtype=np.float16)
+        for x in source_frames
+    ]
+    source_times = [float(x["time"]) for x in source_frames]
+
+    results = []
+
+    t = 0.0
+    while t < total:
+        frame = query_dir / f"{t:.3f}.jpg"
+
+        if extract_frame(query_path, t, frame):
+            q = visual_hash(frame)
+
+            if q is not None:
+                best_distance = 999.0
+                best_time = None
+
+                # Coarse nearest-frame search.
+                for h, st in zip(source_hashes, source_times):
+                    d = visual_distance(q, h)
+                    if d < best_distance:
+                        best_distance = d
+                        best_time = st
+
+                if best_time is not None:
+                    results.append({
+                        "query_time": round(t, 3),
+                        "source_time": best_time,
+                        "distance": best_distance,
+                    })
+
+        t += sample_every
+
+    shutil.rmtree(query_dir, ignore_errors=True)
+    return results
+
+
+def continuous_match(results, query_duration):
+    if len(results) < 3:
+        return None
+
+    # Convert source/query positions into offsets.
+    offsets = [
+        r["source_time"] - r["query_time"]
+        for r in results
+        if r.get("source_time") is not None
+    ]
+
+    if len(offsets) < 3:
+        return None
+
+    offsets.sort()
+    median_offset = offsets[len(offsets) // 2]
+
+    # Keep frames close to the dominant offset.
+    good = [
+        r for r in results
+        if abs(
+            (r["source_time"] - r["query_time"]) - median_offset
+        ) <= 3.0
+    ]
+
+    # Continuous coverage requirement.
+    if len(good) < max(3, int(query_duration / 2)):
+        return None
+
+    good.sort(key=lambda x: x["query_time"])
+
+    start_q = good[0]["query_time"]
+    end_q = good[-1]["query_time"]
+
+    if end_q - start_q < 4.0:
+        return None
+
+    source_start = good[0]["source_time"]
+    source_end = good[-1]["source_time"]
+
+    distances = [x["distance"] for x in good]
+    avg_distance = sum(distances) / len(distances)
+
+    confidence = max(
+        0.0,
+        min(
+            100.0,
+            100.0 * (1.0 - avg_distance / 3.0)
+        )
+    )
+
+    return {
+        "source_start": max(0.0, source_start),
+        "source_end": source_end,
+        "query_start": start_q,
+        "query_end": end_q,
+        "confidence": round(confidence, 1),
+        "frames": len(good),
+    }
+
+
+def create_clip(source, start, end, output):
+    length = max(0.1, end - start)
+
+    r = subprocess.run(
+        [
+            FFMPEG_BIN,
+            "-hide_banner",
+            "-loglevel", "error",
+            "-ss", str(start),
+            "-i", str(source),
+            "-t", str(length),
+            "-map", "0",
+            "-c", "copy",
+            "-y",
+            str(output),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+
+    return r.returncode == 0 and output.exists()
+
+
+async def build_index_async(source_path, index_path, progress=None):
+    return await asyncio.to_thread(
+        make_index,
+        source_path,
+        index_path,
+        2.0,
+        progress,
+    )
+
+
+async def search_index_async(query_path, index_data):
+    return await asyncio.to_thread(
+        find_visual_candidates,
+        query_path,
+        index_data,
+        1.0,
+    )
+
+
+async def create_clip_async(source, start, end, output):
+    return await asyncio.to_thread(
+        create_clip,
+        source,
+        start,
+        end,
+        output,
+    )
