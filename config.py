@@ -5,13 +5,11 @@ BASE_DIR = Path(__file__).resolve().parent
 
 DATA_DIR = BASE_DIR / "data"
 TEMP_DIR = BASE_DIR / "temp"
-INDEX_DIR = DATA_DIR / "indexes"
 
 DB_PATH = DATA_DIR / "library.db"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
-INDEX_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def env(name: str, default=None):
@@ -36,15 +34,7 @@ TELEGRAM_SESSION = env(
     str(DATA_DIR / "telegram_user_session")
 )
 
-GOOGLE_CLIENT_SECRET = env(
-    "GOOGLE_CLIENT_SECRET",
-    str(BASE_DIR / "client_secret.json")
-)
-
-GOOGLE_TOKEN = env(
-    "GOOGLE_TOKEN",
-    str(DATA_DIR / "token.json")
-)
+GEMINI_API_KEY = env("GEMINI_API_KEY")
 
 TELEGRAM_MAX_MB = int(env("TELEGRAM_MAX_MB", "50"))
 TELEGRAM_MAX_BYTES = TELEGRAM_MAX_MB * 1024 * 1024
@@ -68,11 +58,3 @@ def validate_bot_config():
         raise RuntimeError(
             "Missing configuration: " + ", ".join(missing)
         )
-
-
-def telegram_user_configured():
-    return bool(TG_API_ID and TG_API_HASH)
-
-
-def google_configured():
-    return Path(GOOGLE_CLIENT_SECRET).exists()
