@@ -1,307 +1,182 @@
+"""
+Library navigation module - text and deep-link based browsing.
+No fingerprints or indexes needed.
+"""
+
 from database import (
-    add_library_item,
-    find_episode,
-    get_connection,
-    get_stats,
-    list_episodes,
-    list_seasons,
-    search_library,
+    get_animes,
+    get_seasons,
+    get_episodes,
+    get_qualities,
+    get_source_url,
+    get_all_sources_for_episode,
+    add_source,
+    edit_source,
+    delete_source,
 )
 
 
-def normalize(value: str) -> str:
-    return " ".join((value or "").strip().split())
+def format_anime_list(animes: list) -> str:
+    """Format list of anime for Telegram."""
+    if not animes:
+        return "📚 No anime in library yet."
+    
+    lines = ["📚 ANIME LIBRARY\n"]
+    for i, anime in enumerate(animes, 1):
+        lines.append(f"{i}. {anime}")
+    return "\n".join(lines)
 
 
-def save_episode(
+def format_season_list(anime: str, seasons: list) -> str:
+    """Format seasons for an anime."""
+    if not seasons:
+        return f"❌ No seasons found for {anime}"
+    
+    lines = [f"📺 {anime} - SEASONS\n"]
+    for season in seasons:
+        lines.append(f"🎬 Season {season}")
+    return "\n".join(lines)
+
+
+def format_episode_list(anime: str, season: str, episodes: list) -> str:
+    """Format episodes for a season."""
+    if not episodes:
+        return f"❌ No episodes found for {anime} S{season}"
+    
+    lines = [f"🎬 {anime} Season {season} - EPISODES\n"]
+    for ep in episodes:
+        lines.append(f"🎞 Episode {ep}")
+    return "\n".join(lines)
+
+
+def format_quality_list(anime: str, season: str, episode: str, qualities: list) -> str:
+    """Format quality options for an episode."""
+    if not qualities:
+        return f"❌ No sources for {anime} S{season}E{episode}"
+    
+    lines = [f"🎞 {anime} S{season}E{episode} - QUALITIES\n"]
+    for quality in qualities:
+        lines.append(f"📹 {quality}")
+    return "\n".join(lines)
+
+
+def format_source_links(anime: str, season: str, episode: str, sources: dict) -> str:
+    """Format source links for download/display."""
+    if not sources:
+        return f"❌ No sources for {anime} S{season}E{episode}"
+    
+    lines = [f"🎞 {anime} S{season}E{episode} - SOURCES\n"]
+    for quality, url in sources.items():
+        lines.append(f"📹 {quality}: {url}")
+    return "\n".join(lines)
+
+
+def save_episode_sources(
     anime: str,
     season: str,
-    episode: str,
-    language: str,
-    source_url: str,
-    source_type: str = "telegram",
-    telegram_chat_id=None,
-    telegram_message_id=None,
-    drive_file_id=None,
-):
-    anime = normalize(anime)
-    season = normalize(season)
-    episode = normalize(episode)
-    language = normalize(language)
-    source_url = source_url.strip()
-
-    if not anime:
-        raise ValueError("Anime name is required.")
-
-    if not season:
-        raise ValueError("Season is required.")
-
-    if not episode:
-        raise ValueError("Episode is required.")
-
-    if not language:
-        raise ValueError("Language is required.")
-
-    if not source_url:
-        raise ValueError("Source link is required.")
-
-    existing = find_episode(
-        anime,
-        season,
-        episode,
-        language,
-    )
-
-    return {
-        "existing": existing,
-        "id": None,
-        "saved": False,
-        "data": {
-            "anime": anime,
-            "season": season,
-            "episode": episode,
-            "language": language,
-            "source_url": source_url,
-            "source_type": source_type,
-            "telegram_chat_id": telegram_chat_id,
-            "telegram_message_id": telegram_message_id,
-            "drive_file_id": drive_file_id,
-        },
+    num_seasons: int,
+    quality_sources: dict,
+) -> dict:
+    """
+    Save batch episode sources.
+    
+    quality_sources = {
+        "480p": ["url1", "url2", ...],  # one URL per episode
+        "720p": ["url1", "url2", ...],
+        "1080p": ["url1", "url2", ...],
     }
+    """
+    results = {"success": 0, "failed": 0, "errors": []}
+    
+    # Determine how many episodes per season
+    # Rough estimate: assume episodes are distributed across seasons
+    total_sources = len(next(iter(quality_sources.values())))
+    episodes_per_season = total_sources // int(num_seasons)
+    
+    episode_idx = 1
+    for season_num in range(1, int(num_seasons) + 1):
+        for quality, urls in quality_sources.items():
+            for _ in range(episodes_per_season):
+                if episode_idx > len(urls):
+                    break
+                
+                try:
+                    add_source(
+                        anime=anime,
+                        season=str(season_num),
+                        episode=str(episode_idx % (episodes_per_season + 1) or 1),
+                        quality=quality,
+                        source_url=urls[episode_idx - 1],
+                    )
+                    results["success"] += 1
+                except Exception as e:
+                    results["failed"] += 1
+                    results["errors"].append(f"S{season_num}E{episode_idx} {quality}: {e}")
+                
+                episode_idx += 1
+    
+    return results
 
 
-def replace_episode(
+def edit_episode_source(
     anime: str,
     season: str,
     episode: str,
-    language: str,
-    source_url: str,
-    source_type: str = "telegram",
-    telegram_chat_id=None,
-    telegram_message_id=None,
-    drive_file_id=None,
-):
-    timestamp_data = {
-        "anime": anime,
-        "season": str(season),
-        "episode": str(episode),
-        "language": language,
-    }
-
-    with get_connection() as conn:
-        existing = conn.execute(
-            """
-            SELECT id
-            FROM library
-            WHERE LOWER(anime) = LOWER(?)
-              AND season = ?
-              AND episode = ?
-              AND LOWER(language) = LOWER(?)
-              AND content_type = 'episode'
-            LIMIT 1
-            """,
-            (
-                timestamp_data["anime"],
-                timestamp_data["season"],
-                timestamp_data["episode"],
-                timestamp_data["language"],
-            ),
-        ).fetchone()
-
-        if not existing:
-            return add_library_item(
-                anime=anime,
-                content_type="episode",
-                season=str(season),
-                episode=str(episode),
-                title="",
-                language=language,
-                source_type=source_type,
-                source_url=source_url,
-                telegram_chat_id=telegram_chat_id,
-                telegram_message_id=telegram_message_id,
-                drive_file_id=drive_file_id,
-            )
-
-        conn.execute(
-            """
-            UPDATE library
-            SET source_type = ?,
-                source_url = ?,
-                telegram_chat_id = ?,
-                telegram_message_id = ?,
-                drive_file_id = ?,
-                updated_at = datetime('now')
-            WHERE id = ?
-            """,
-            (
-                source_type,
-                source_url,
-                telegram_chat_id,
-                telegram_message_id,
-                drive_file_id,
-                existing["id"],
-            ),
-        )
-
-        conn.commit()
-
-        return existing["id"]
+    quality: str,
+    new_url: str,
+) -> bool:
+    """Edit a single source link."""
+    try:
+        edit_source(anime, season, episode, quality, new_url)
+        return True
+    except Exception:
+        return False
 
 
-def create_episode(
+def delete_episode_source(
     anime: str,
     season: str,
     episode: str,
-    language: str,
-    source_url: str,
-    source_type: str = "telegram",
-    telegram_chat_id=None,
-    telegram_message_id=None,
-    drive_file_id=None,
-):
-    return add_library_item(
-        anime=anime,
-        content_type="episode",
-        season=str(season),
-        episode=str(episode),
-        title="",
-        language=language,
-        source_type=source_type,
-        source_url=source_url,
-        telegram_chat_id=telegram_chat_id,
-        telegram_message_id=telegram_message_id,
-        drive_file_id=drive_file_id,
-    )
+    quality: str,
+) -> bool:
+    """Delete a source link."""
+    try:
+        delete_source(anime, season, episode, quality)
+        return True
+    except Exception:
+        return False
 
 
-def save_movie(
-    anime: str,
-    title: str,
-    language: str,
-    source_url: str,
-    source_type: str = "telegram",
-    drive_file_id=None,
-):
-    anime = normalize(anime)
-    title = normalize(title)
-    language = normalize(language)
+# Deep-link helpers for navigation state
 
-    if not anime:
-        raise ValueError("Anime name is required.")
-
-    if not title:
-        raise ValueError("Movie title is required.")
-
-    if not language:
-        raise ValueError("Language is required.")
-
-    if not source_url:
-        raise ValueError("Source link is required.")
-
-    return add_library_item(
-        anime=anime,
-        content_type="movie",
-        season="",
-        episode="",
-        title=title,
-        language=language,
-        source_type=source_type,
-        source_url=source_url,
-        drive_file_id=drive_file_id,
-    )
-
-
-def get_episode(anime, season, episode, language=None):
-    return find_episode(
-        anime,
-        str(season),
-        str(episode),
-        language,
-    )
-
-
-def get_anime_seasons(anime):
-    return list_seasons(anime)
-
-
-def get_season_episodes(anime, season):
-    return list_episodes(anime, str(season))
-
-
-def search_anime(anime):
-    return search_library(anime)
-
-
-def library_stats():
-    return get_stats()
-
-
-def delete_episode(anime, season, episode):
-    with get_connection() as conn:
-        cursor = conn.execute(
-            """
-            DELETE FROM library
-            WHERE LOWER(anime) = LOWER(?)
-              AND season = ?
-              AND episode = ?
-              AND content_type = 'episode'
-            """,
-            (
-                anime,
-                str(season),
-                str(episode),
-            ),
-        )
-
-        conn.commit()
-        return cursor.rowcount
-
-
-def delete_season(anime, season):
-    with get_connection() as conn:
-        cursor = conn.execute(
-            """
-            DELETE FROM library
-            WHERE LOWER(anime) = LOWER(?)
-              AND season = ?
-              AND content_type = 'episode'
-            """,
-            (
-                anime,
-                str(season),
-            ),
-        )
-
-        conn.commit()
-        return cursor.rowcount
-
-
-def delete_anime(anime):
-    with get_connection() as conn:
-        cursor = conn.execute(
-            """
-            DELETE FROM library
-            WHERE LOWER(anime) = LOWER(?)
-            """,
-            (anime,),
-        )
-
-        conn.commit()
-        return cursor.rowcount
-
-
-def delete_movie(anime, title):
-    with get_connection() as conn:
-        cursor = conn.execute(
-            """
-            DELETE FROM library
-            WHERE LOWER(anime) = LOWER(?)
-              AND LOWER(title) = LOWER(?)
-              AND content_type = 'movie'
-            """,
-            (anime, title),
-        )
-
-        conn.commit()
-        return cursor.rowcount
+class LibraryNavigation:
+    """Manage library navigation state for deep-link browsing."""
+    
+    def __init__(self):
+        self.current_anime = None
+        self.current_season = None
+        self.current_episode = None
+    
+    def set_anime(self, anime: str):
+        self.current_anime = anime
+        self.current_season = None
+        self.current_episode = None
+    
+    def set_season(self, season: str):
+        self.current_season = season
+        self.current_episode = None
+    
+    def set_episode(self, episode: str):
+        self.current_episode = episode
+    
+    def reset(self):
+        self.current_anime = None
+        self.current_season = None
+        self.current_episode = None
+    
+    def get_state(self) -> dict:
+        return {
+            "anime": self.current_anime,
+            "season": self.current_season,
+            "episode": self.current_episode,
+        }
