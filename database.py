@@ -20,304 +20,223 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-def _add_column_if_missing(conn, table, column, definition):
-    columns = {
-        row["name"]
-        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
-    }
-
-    if column not in columns:
-        conn.execute(
-            f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
-        )
-
-
 def init_db():
+    """Fresh database schema - no fingerprints, indexes, or old state."""
     with get_connection() as conn:
+        # Simple library table: anime sources only
         conn.execute("""
             CREATE TABLE IF NOT EXISTS library (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 anime TEXT NOT NULL,
-                content_type TEXT NOT NULL DEFAULT 'episode',
-                season TEXT DEFAULT '',
-                episode TEXT DEFAULT '',
-                title TEXT DEFAULT '',
-                language TEXT NOT NULL,
-                source_type TEXT NOT NULL,
+                season TEXT NOT NULL,
+                episode TEXT NOT NULL,
+                quality TEXT NOT NULL,
                 source_url TEXT NOT NULL,
-                telegram_chat_id INTEGER,
-                telegram_message_id INTEGER,
-                drive_file_id TEXT,
-                index_path TEXT DEFAULT '',
-                duration REAL DEFAULT 0,
-                status TEXT NOT NULL DEFAULT 'ready',
-                batch_id TEXT DEFAULT '',
-                source_order INTEGER DEFAULT 0,
-                error_message TEXT DEFAULT '',
-                last_attempt_at TEXT DEFAULT '',
+                language TEXT DEFAULT 'Unknown',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
         """)
 
-        _add_column_if_missing(conn, "library", "index_path", "TEXT DEFAULT ''")
-        _add_column_if_missing(conn, "library", "duration", "REAL DEFAULT 0")
-        _add_column_if_missing(conn, "library", "status", "TEXT NOT NULL DEFAULT 'ready'")
-        _add_column_if_missing(conn, "library", "batch_id", "TEXT DEFAULT ''")
-        _add_column_if_missing(conn, "library", "source_order", "INTEGER DEFAULT 0")
-        _add_column_if_missing(conn, "library", "error_message", "TEXT DEFAULT ''")
-        _add_column_if_missing(conn, "library", "last_attempt_at", "TEXT DEFAULT ''")
-
+        # Create indexes for efficient navigation
         conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_library_anime
+            CREATE INDEX IF NOT EXISTS idx_anime
             ON library(anime)
         """)
 
         conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_library_episode
-            ON library(anime, season, episode, language)
+            CREATE INDEX IF NOT EXISTS idx_season_episode
+            ON library(anime, season, episode)
         """)
 
         conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_library_content_type
-            ON library(content_type)
-        """)
-
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_library_status
-            ON library(status)
-        """)
-
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_library_batch
-            ON library(batch_id, source_order)
+            CREATE INDEX IF NOT EXISTS idx_quality
+            ON library(quality)
         """)
 
         conn.commit()
 
 
-def add_library_item(
-    anime,
-    content_type,
-    season,
-    episode,
-    title,
-    language,
-    source_type,
-    source_url,
-    telegram_chat_id=None,
-    telegram_message_id=None,
-    drive_file_id=None,
-    index_path="",
-    duration=0,
-    status="ready",
-    batch_id="",
-    source_order=0,
-    error_message="",
-    last_attempt_at="",
-):
+def add_source(anime, season, episode, quality, source_url, language="Unknown"):
+    """Add or replace a source link."""
     timestamp = now_iso()
-
     with get_connection() as conn:
-        cursor = conn.execute("""
-            INSERT INTO library (
-                anime, content_type, season, episode, title, language,
-                source_type, source_url, telegram_chat_id,
-                telegram_message_id, drive_file_id, index_path,
-                duration, status, batch_id, source_order,
-                error_message, last_attempt_at, created_at, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            anime, content_type, season, episode, title, language,
-            source_type, source_url, telegram_chat_id,
-            telegram_message_id, drive_file_id, index_path,
-            float(duration or 0), status, batch_id,
-            int(source_order or 0), error_message,
-            last_attempt_at, timestamp, timestamp
-        ))
-
-        conn.commit()
-        return cursor.lastrowid
-
-
-def find_episode(anime, season, episode, language=None):
-    with get_connection() as conn:
-        if language:
-            return conn.execute("""
-                SELECT *
-                FROM library
-                WHERE LOWER(anime) = LOWER(?)
-                  AND season = ?
-                  AND episode = ?
-                  AND LOWER(language) = LOWER(?)
-                  AND content_type = 'episode'
-                LIMIT 1
-            """, (
-                anime, str(season), str(episode), language
-            )).fetchone()
-
-        return conn.execute("""
-            SELECT *
-            FROM library
+        # Check if exists
+        existing = conn.execute(
+            """
+            SELECT id FROM library
             WHERE LOWER(anime) = LOWER(?)
               AND season = ?
               AND episode = ?
-              AND content_type = 'episode'
-            ORDER BY language
-        """, (
-            anime, str(season), str(episode)
-        )).fetchall()
+              AND quality = ?
+            LIMIT 1
+            """,
+            (anime, str(season), str(episode), quality),
+        ).fetchone()
+
+        if existing:
+            conn.execute(
+                """
+                UPDATE library
+                SET source_url = ?, language = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (source_url, language, timestamp, existing["id"]),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO library
+                (anime, season, episode, quality, source_url, language, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (anime, str(season), str(episode), quality, source_url, language, timestamp, timestamp),
+            )
+        conn.commit()
 
 
-def search_library(anime):
+def get_animes():
+    """Get list of all anime titles."""
     with get_connection() as conn:
-        return conn.execute("""
-            SELECT *
-            FROM library
-            WHERE LOWER(anime) LIKE LOWER(?)
-            ORDER BY
-                CASE
-                    WHEN season GLOB '[0-9]*'
-                    THEN CAST(season AS INTEGER)
-                    ELSE 999999
-                END,
-                CASE
-                    WHEN episode GLOB '[0-9]*'
-                    THEN CAST(episode AS INTEGER)
-                    ELSE 999999
-                END,
-                language
-        """, (f"%{anime}%",)).fetchall()
+        rows = conn.execute(
+            "SELECT DISTINCT anime FROM library ORDER BY anime"
+        ).fetchall()
+        return [row["anime"] for row in rows]
 
 
-def list_seasons(anime):
+def get_seasons(anime):
+    """Get seasons for an anime."""
     with get_connection() as conn:
-        return conn.execute("""
-            SELECT DISTINCT season
-            FROM library
+        rows = conn.execute(
+            """
+            SELECT DISTINCT season FROM library
             WHERE LOWER(anime) = LOWER(?)
-              AND content_type = 'episode'
-            ORDER BY
-                CASE
-                    WHEN season GLOB '[0-9]*'
-                    THEN CAST(season AS INTEGER)
-                    ELSE 999999
-                END
-        """, (anime,)).fetchall()
+            ORDER BY CAST(season AS INTEGER)
+            """,
+            (anime,),
+        ).fetchall()
+        return [row["season"] for row in rows]
 
 
-def list_episodes(anime, season):
+def get_episodes(anime, season):
+    """Get episodes for a season."""
     with get_connection() as conn:
-        return conn.execute("""
-            SELECT *
-            FROM library
-            WHERE LOWER(anime) = LOWER(?)
-              AND season = ?
-              AND content_type = 'episode'
-            ORDER BY
-                CASE
-                    WHEN episode GLOB '[0-9]*'
-                    THEN CAST(episode AS INTEGER)
-                    ELSE 999999
-                END,
-                language
-        """, (anime, str(season))).fetchall()
+        rows = conn.execute(
+            """
+            SELECT DISTINCT episode FROM library
+            WHERE LOWER(anime) = LOWER(?) AND season = ?
+            ORDER BY CAST(episode AS INTEGER)
+            """,
+            (anime, str(season)),
+        ).fetchall()
+        return [row["episode"] for row in rows]
 
 
-def get_batch(batch_id):
+def get_qualities(anime, season, episode):
+    """Get available qualities for an episode."""
     with get_connection() as conn:
-        return conn.execute("""
-            SELECT *
-            FROM library
-            WHERE batch_id = ?
-            ORDER BY source_order, id
-        """, (batch_id,)).fetchall()
+        rows = conn.execute(
+            """
+            SELECT DISTINCT quality FROM library
+            WHERE LOWER(anime) = LOWER(?) AND season = ? AND episode = ?
+            ORDER BY quality DESC
+            """,
+            (anime, str(season), str(episode)),
+        ).fetchall()
+        return [row["quality"] for row in rows]
 
 
-def get_pending_batch(batch_id):
+def get_source_url(anime, season, episode, quality):
+    """Get source URL for episode + quality."""
     with get_connection() as conn:
-        return conn.execute("""
-            SELECT *
-            FROM library
-            WHERE batch_id = ?
-              AND status != 'ready'
-            ORDER BY source_order, id
-        """, (batch_id,)).fetchall()
+        row = conn.execute(
+            """
+            SELECT source_url FROM library
+            WHERE LOWER(anime) = LOWER(?) AND season = ? AND episode = ? AND quality = ?
+            LIMIT 1
+            """,
+            (anime, str(season), str(episode), quality),
+        ).fetchone()
+        return row["source_url"] if row else None
 
 
-def update_library_item(item_id, **fields):
-    allowed = {
-        "source_type", "source_url", "telegram_chat_id",
-        "telegram_message_id", "drive_file_id", "index_path",
-        "duration", "status", "batch_id", "source_order",
-        "error_message", "last_attempt_at", "title",
-        "language", "season", "episode"
-    }
-
-    updates = []
-    values = []
-
-    for key, value in fields.items():
-        if key in allowed:
-            updates.append(f"{key} = ?")
-            values.append(value)
-
-    if not updates:
-        return False
-
-    updates.append("updated_at = ?")
-    values.append(now_iso())
-    values.append(item_id)
-
+def get_all_sources_for_episode(anime, season, episode):
+    """Get all source links (all qualities) for an episode."""
     with get_connection() as conn:
-        cursor = conn.execute(
-            f"UPDATE library SET {', '.join(updates)} WHERE id = ?",
-            values
+        rows = conn.execute(
+            """
+            SELECT quality, source_url FROM library
+            WHERE LOWER(anime) = LOWER(?) AND season = ? AND episode = ?
+            ORDER BY quality DESC
+            """,
+            (anime, str(season), str(episode)),
+        ).fetchall()
+        return {row["quality"]: row["source_url"] for row in rows}
+
+
+def edit_source(anime, season, episode, quality, source_url):
+    """Edit a single source link."""
+    add_source(anime, season, episode, quality, source_url)
+
+
+def delete_source(anime, season, episode, quality):
+    """Delete a source link."""
+    with get_connection() as conn:
+        conn.execute(
+            """
+            DELETE FROM library
+            WHERE LOWER(anime) = LOWER(?) AND season = ? AND episode = ? AND quality = ?
+            """,
+            (anime, str(season), str(episode), quality),
         )
         conn.commit()
-        return cursor.rowcount > 0
 
 
-def get_stats():
+def seed_naruto():
+    """Seed Naruto with 9 seasons, 220 episodes (220 available), placeholder URLs."""
     with get_connection() as conn:
-        stats = {}
+        # Clear existing Naruto data
+        conn.execute("DELETE FROM library WHERE LOWER(anime) = 'naruto'")
+        conn.commit()
 
-        stats["anime"] = conn.execute(
-            "SELECT COUNT(DISTINCT anime) FROM library"
-        ).fetchone()[0]
+    timestamp = now_iso()
 
-        stats["seasons"] = conn.execute("""
-            SELECT COUNT(DISTINCT anime || '|' || season)
-            FROM library
-            WHERE content_type = 'episode'
-        """).fetchone()[0]
+    # 9 seasons with episodes
+    seasons_data = [
+        (1, 220),  # Season 1: 220 episodes (we'll add some)
+        (2, 200),
+        (3, 150),
+        (4, 150),
+        (5, 100),
+        (6, 150),
+        (7, 120),
+        (8, 200),
+        (9, 500),  # Shippuden has many episodes
+    ]
 
-        stats["episodes"] = conn.execute("""
-            SELECT COUNT(*)
-            FROM library
-            WHERE content_type = 'episode'
-              AND status = 'ready'
-        """).fetchone()[0]
-
-        stats["movies"] = conn.execute("""
-            SELECT COUNT(*)
-            FROM library
-            WHERE content_type = 'movie'
-              AND status = 'ready'
-        """).fetchone()[0]
-
-        stats["pending"] = conn.execute("""
-            SELECT COUNT(*)
-            FROM library
-            WHERE status != 'ready'
-        """).fetchone()[0]
-
-        stats["languages"] = conn.execute(
-            "SELECT COUNT(DISTINCT language) FROM library"
-        ).fetchone()[0]
-
-        return stats
+    with get_connection() as conn:
+        for season, ep_count in seasons_data:
+            # Add first 10 episodes per season for demonstration
+            for ep in range(1, min(11, ep_count + 1)):
+                for quality in ["480p", "720p", "1080p"]:
+                    conn.execute(
+                        """
+                        INSERT INTO library
+                        (anime, season, episode, quality, source_url, language, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            "Naruto",
+                            str(season),
+                            str(ep),
+                            quality,
+                            f"https://t.me/placeholder/naruto_s{season}_e{ep}_{quality}",
+                            "Multi",
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+        conn.commit()
 
 
 init_db()
