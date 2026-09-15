@@ -1,214 +1,205 @@
 import asyncio
 import json
-import re
 import logging
+import re
 from pathlib import Path
-from typing import Optional
 
-import google.generativeai as genai
+from google import genai
+
 from config import GEMINI_API_KEY
 
-logger = logging.getLogger("gemini-analyzer")
+
+logger = logging.getLogger(
+    "gemini-analyzer"
+)
 
 
-def configure_gemini():
-    """Initialize Gemini API."""
-    if GEMINI_API_KEY:
-        genai.configure(api_key=GEMINI_API_KEY)
-
-
-def upload_video_to_gemini(video_path: str):
-    """Upload video to Gemini and return file object."""
-    try:
-        file = genai.upload_file(
-            video_path,
-            mime_type="video/mp4",
+def get_client():
+    if not GEMINI_API_KEY:
+        raise RuntimeError(
+            "GEMINI_API_KEY missing."
         )
-        logger.info(f"Uploaded video to Gemini: {file.name}")
-        return file
-    except Exception as e:
-        logger.exception(f"Failed to upload video: {e}")
-        return None
 
-
-async def analyze_youtube_short_async(
-    video_path: str,
-    timeout_seconds: int = 180,
-) -> Optional[dict]:
-    """
-    Analyze a YouTube Short using Gemini to identify ALL source segments.
-    
-    Returns:
-        {
-            "segments": [
-                {"start_time": 0.5, "end_time": 2.3, "anime": "Naruto", "season": 1, "episode": 5, "confidence": 0.95},
-                ...
-            ],
-            "raw_analysis": "...",
-            "error": None or error message
-        }
-    """
-    return await asyncio.to_thread(
-        _analyze_youtube_short,
-        video_path,
-        timeout_seconds,
+    return genai.Client(
+        api_key=GEMINI_API_KEY
     )
 
 
-def _analyze_youtube_short(
-    video_path: str,
-    timeout_seconds: int = 180,
-) -> dict:
-    """Synchronous Gemini analysis."""
-    configure_gemini()
+def upload_file_sync(
+    client,
+    path,
+):
+    return client.files.upload(
+        file=str(path)
+    )
 
-    video_path = Path(video_path)
-    if not video_path.exists():
-        return {
-            "segments": [],
-            "raw_analysis": "",
-            "error": f"Video not found: {video_path}",
-        }
 
-    # Upload to Gemini
-    file = upload_video_to_gemini(str(video_path))
-    if not file:
-        return {
-            "segments": [],
-            "raw_analysis": "",
-            "error": "Failed to upload video to Gemini",
-        }
+def delete_file_sync(
+    client,
+    file_name,
+):
+    try:
+        client.files.delete(
+            name=file_name
+        )
+    except Exception:
+        pass
+
+
+def extract_json(text):
+    text = text.strip()
 
     try:
-        model = genai.GenerativeModel("gemini-2.0-flash-exp")
+        return json.loads(text)
+    except Exception:
+        pass
 
-        prompt = """Analyze this YouTube Short video and identify ALL anime source segments.
+    match = re.search(
+        r"\{.*\}",
+        text,
+        re.DOTALL,
+    )
 
-For each visible anime scene, provide:
-1. Exact start and end timestamps (in seconds, format: 0.0-59.9)
-2. Anime title (if recognizable)
-3. Season number (if visible or deducible)
-4. Episode number (if visible or deducible)
-5. Confidence level (0.0-1.0)
-
-Return ONLY valid JSON in this format (no markdown, no extra text):
-{
-    "segments": [
-        {
-            "start_time": 0.5,
-            "end_time": 2.3,
-            "anime": "Naruto",
-            "season": 1,
-            "episode": 5,
-            "confidence": 0.95
-        }
-    ]
-}
-
-If no anime content found, return: {"segments": []}
-
-Important:
-- Preserve EXACT order of segments as they appear
-- Include ALL visible segments, even if short (>0.5s)
-- Mark repeated segments/episodes separately
-- Confidence: 1.0 = certain, 0.5 = uncertain, <0.5 = guess only
-"""
-
-        response = model.generate_content(
-            [prompt, file],
-            generation_config=genai.types.GenerationConfig(
-                max_output_tokens=2048,
-                temperature=0.2,  # Low randomness for consistency
-            ),
+    if not match:
+        raise ValueError(
+            "Gemini response me JSON nahi mila."
         )
 
-        raw_text = response.text.strip()
+    return json.loads(
+        match.group(0)
+    )
 
-        # Extract JSON from response
+
+async def analyze_video(
+    video_path,
+):
+    path = Path(video_path)
+
+    if not path.exists():
+        raise FileNotFoundError(
+            str(path)
+        )
+
+    def work():
+        client = get_client()
+
+        uploaded = upload_file_sync(
+            client,
+            path,
+        )
+
         try:
-            # Try direct parse
-            analysis = json.loads(raw_text)
-        except json.JSONDecodeError:
-            # Try extracting JSON from markdown code block
-            json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw_text, re.DOTALL)
-            if json_match:
-                analysis = json.loads(json_match.group(1))
-            else:
-                # Try finding any JSON object
-                json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
-                if json_match:
-                    analysis = json.loads(json_match.group(0))
-                else:
-                    raise ValueError("No JSON found in response")
+            prompt = """
+Analyze this edited anime video.
 
-        # Validate segments
-        segments = analysis.get("segments", [])
-        if not isinstance(segments, list):
-            segments = []
+We need to identify the individual source scenes
+that appear in the edit.
 
-        # Filter and sort by start_time
-        valid_segments = []
-        for seg in segments:
-            if (
-                isinstance(seg, dict)
-                and "start_time" in seg
-                and "end_time" in seg
-                and isinstance(seg["start_time"], (int, float))
-                and isinstance(seg["end_time"], (int, float))
-            ):
-                valid_segments.append(seg)
+Return ONLY JSON:
 
-        valid_segments.sort(key=lambda x: x["start_time"])
+{
+  "segments": [
+    {
+      "start_time": 0.0,
+      "end_time": 2.5,
+      "anime": "Naruto",
+      "season": 1,
+      "episode": 5,
+      "confidence": 0.95
+    }
+  ]
+}
 
-        return {
-            "segments": valid_segments,
-            "raw_analysis": raw_text,
-            "error": None,
-        }
+Rules:
 
-    except Exception as e:
-        logger.exception("Gemini analysis failed")
-        return {
-            "segments": [],
-            "raw_analysis": "",
-            "error": str(e),
-        }
-    finally:
-        # Clean up uploaded file
-        try:
-            genai.delete_file(file.name)
-        except Exception:
-            pass
+- Preserve exact chronological order.
+- Split whenever the source scene changes.
+- start_time/end_time refer to THIS EDITED VIDEO.
+- Anime/season/episode should only be supplied when reasonably identifiable.
+- If season or episode is unknown, use null.
+- Never invent an episode number merely to fill the field.
+- Confidence must be 0.0 to 1.0.
+"""
 
+            response = client.models.generate_content(
+                model="gemini-3.8-flash",
+                contents=[
+                    prompt,
+                    uploaded,
+                ],
+            )
 
-def align_segments_with_library(
-    segments: list,
-    library_lookup_fn,
-) -> list:
-    """
-    Align Gemini-identified segments with saved episode sources.
-    Returns merged list with actual source URLs.
-    """
-    aligned = []
+            data = extract_json(
+                response.text
+            )
 
-    for seg in segments:
-        anime = seg.get("anime", "").strip()
-        season = seg.get("season")
-        episode = seg.get("episode")
+            segments = data.get(
+                "segments",
+                [],
+            )
 
-        if not anime or season is None or episode is None:
-            aligned.append({**seg, "source_url": None, "found": False})
-            continue
+            clean = []
 
-        # Look up in library
-        try:
-            source_url = library_lookup_fn(anime, str(season), str(episode))
-            if source_url:
-                aligned.append({**seg, "source_url": source_url, "found": True})
-            else:
-                aligned.append({**seg, "source_url": None, "found": False})
-        except Exception as e:
-            logger.warning(f"Library lookup failed for {anime} S{season}E{episode}: {e}")
-            aligned.append({**seg, "source_url": None, "found": False})
+            for item in segments:
+                if not isinstance(
+                    item,
+                    dict,
+                ):
+                    continue
 
-    return aligned
+                try:
+                    start = float(
+                        item["start_time"]
+                    )
+
+                    end = float(
+                        item["end_time"]
+                    )
+
+                except Exception:
+                    continue
+
+                if end <= start:
+                    continue
+
+                clean.append(
+                    {
+                        "start_time": start,
+                        "end_time": end,
+                        "anime": (
+                            item.get(
+                                "anime"
+                            )
+                            or ""
+                        ).strip(),
+                        "season": item.get(
+                            "season"
+                        ),
+                        "episode": item.get(
+                            "episode"
+                        ),
+                        "confidence": float(
+                            item.get(
+                                "confidence",
+                                0,
+                            )
+                        ),
+                    }
+                )
+
+            clean.sort(
+                key=lambda x:
+                x["start_time"]
+            )
+
+            return clean
+
+        finally:
+            delete_file_sync(
+                client,
+                uploaded.name,
+            )
+
+    return await asyncio.to_thread(
+        work
+    )
