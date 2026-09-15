@@ -5,87 +5,147 @@ from config import TEMP_DIR
 from utils import ensure_dir, safe_filename
 
 
-TELEGRAM_LINK_RE = re.compile(
-    r"(?:https?://)?t\.me/"
-    r"(?:(?:c/)?[\w+-]+)"
-    r"/(\d+)"
-    r"(?:\?.*)?$",
-    re.IGNORECASE,
+VIDEO_EXTENSIONS = (
+    ".mp4",
+    ".mkv",
+    ".mov",
+    ".webm",
+    ".avi",
 )
 
 
-def is_video_message(message) -> bool:
+def is_video_message(message):
     if getattr(message, "video", None):
         return True
 
-    document = getattr(message, "document", None)
+    document = getattr(
+        message,
+        "document",
+        None,
+    )
 
     if document:
-        mime = getattr(document, "mime_type", "") or ""
+        mime = (
+            getattr(
+                document,
+                "mime_type",
+                "",
+            )
+            or ""
+        )
+
         return mime.startswith("video/")
 
     return False
 
 
-def get_message_video_name(message) -> str:
-    document = getattr(message, "document", None)
+def get_message_video_name(message):
+    document = getattr(
+        message,
+        "document",
+        None,
+    )
 
     if document:
-        filename = getattr(document, "file_name", None)
+        filename = getattr(
+            document,
+            "file_name",
+            None,
+        )
+
         if filename:
             return safe_filename(filename)
 
     return "telegram_video.mp4"
 
 
-async def download_bot_video(message, user_id: int) -> Path:
+async def download_bot_video(
+    message,
+    user_id,
+):
     if not is_video_message(message):
-        raise ValueError("This Telegram message does not contain a video.")
+        raise ValueError(
+            "Telegram message me video nahi hai."
+        )
 
-    user_dir = ensure_dir(Path(TEMP_DIR) / str(user_id))
+    user_dir = ensure_dir(
+        Path(TEMP_DIR) / str(user_id)
+    )
 
     filename = get_message_video_name(message)
 
-    if not filename.lower().endswith((".mp4", ".mkv", ".mov", ".webm", ".avi")):
+    if not filename.lower().endswith(
+        VIDEO_EXTENSIONS
+    ):
         filename += ".mp4"
 
     destination = user_dir / filename
 
-    await message.download_to_drive(custom_path=str(destination))
+    await message.download_to_drive(
+        custom_path=str(destination)
+    )
 
     if not destination.exists():
-        raise RuntimeError("Telegram video download failed.")
+        raise RuntimeError(
+            "Telegram video download failed."
+        )
 
     if destination.stat().st_size == 0:
-        raise RuntimeError("Downloaded video is empty.")
+        raise RuntimeError(
+            "Downloaded video empty hai."
+        )
 
     return destination
 
 
-def parse_telegram_message_link(url: str):
+def parse_telegram_message_link(url):
     """
-    Returns (chat_reference, message_id).
-
     Supported:
-      https://t.me/channel/123
-      https://t.me/c/123456789/123
+
+    https://t.me/channel/123
+    https://t.me/channel/topic/message
+    https://t.me/c/123456789/123
+    https://t.me/c/123456789/topic/message
     """
 
     url = url.strip()
 
+    if not url.startswith(
+        ("http://", "https://")
+    ):
+        raise ValueError(
+            "Telegram link must start with https://"
+        )
+
     match = re.match(
-        r"^https?://t\.me/([^/]+)/(\d+)(?:\?.*)?$",
+        r"^https?://t\.me/([^/]+)/(\d+)$",
+        url,
+        re.IGNORECASE,
+    )
+
+    if match:
+        return (
+            match.group(1),
+            int(match.group(2)),
+        )
+
+    match = re.match(
+        r"^https?://t\.me/([^/]+)/(\d+)/(\d+)$",
         url,
         re.IGNORECASE,
     )
 
     if match:
         chat = match.group(1)
-        message_id = int(match.group(2))
-        return chat, message_id
+        message_id = int(match.group(3))
+
+        return (
+            chat,
+            message_id,
+        )
 
     match = re.match(
-        r"^https?://t\.me/c/(\d+)/(\d+)(?:\?.*)?$",
+        r"^https?://t\.me/c/(\d+)/(\d+)$",
         url,
         re.IGNORECASE,
     )
@@ -94,32 +154,65 @@ def parse_telegram_message_link(url: str):
         internal_id = match.group(1)
         message_id = int(match.group(2))
 
-        # Telethon accepts -100 + internal channel ID.
-        chat_id = int("-100" + internal_id)
+        return (
+            int("-100" + internal_id),
+            message_id,
+        )
 
-        return chat_id, message_id
+    match = re.match(
+        r"^https?://t\.me/c/(\d+)/(\d+)/(\d+)$",
+        url,
+        re.IGNORECASE,
+    )
 
-    raise ValueError("Unsupported Telegram message link.")
+    if match:
+        internal_id = match.group(1)
+        message_id = int(match.group(3))
+
+        return (
+            int("-100" + internal_id),
+            message_id,
+        )
+
+    raise ValueError(
+        "Unsupported Telegram message link."
+    )
 
 
-def is_telegram_message_link(text: str) -> bool:
+def is_telegram_message_link(text):
     try:
         parse_telegram_message_link(text)
         return True
-    except ValueError:
+    except Exception:
         return False
 
 
-async def download_telethon_message(client, chat, message_id: int, user_id: int) -> Path:
-    message = await client.get_messages(chat, ids=message_id)
+async def download_telethon_message(
+    client,
+    chat,
+    message_id,
+    user_id,
+):
+    message = await client.get_messages(
+        chat,
+        ids=message_id,
+    )
 
     if not message:
-        raise RuntimeError("Telegram source message was not found.")
+        raise RuntimeError(
+            "Telegram source message nahi mila."
+        )
 
     if not message.media:
-        raise RuntimeError("The Telegram source message has no media.")
+        raise RuntimeError(
+            "Source message me media nahi hai."
+        )
 
-    user_dir = ensure_dir(Path(TEMP_DIR) / str(user_id) / "sources")
+    user_dir = ensure_dir(
+        Path(TEMP_DIR)
+        / str(user_id)
+        / "sources"
+    )
 
     path = await client.download_media(
         message,
@@ -127,11 +220,18 @@ async def download_telethon_message(client, chat, message_id: int, user_id: int)
     )
 
     if not path:
-        raise RuntimeError("Telethon could not download the source video.")
+        raise RuntimeError(
+            "Telethon source download failed."
+        )
 
     result = Path(path)
 
-    if not result.exists() or result.stat().st_size == 0:
-        raise RuntimeError("Downloaded Telegram source is empty.")
+    if (
+        not result.exists()
+        or result.stat().st_size == 0
+    ):
+        raise RuntimeError(
+            "Downloaded source empty hai."
+        )
 
     return result
