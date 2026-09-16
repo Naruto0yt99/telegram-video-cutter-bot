@@ -77,15 +77,12 @@ def _anime_from_text(text: str, marker):
     if not prefix:
         return None
 
-    while True:
-        match = re.match(r"^\[[^\]]{1,80}\]\s*", prefix)
-        if not match:
-            break
-        candidate = prefix[match.end():].strip()
-        if candidate:
-            prefix = candidate
-        else:
-            break
+    # Preserve a bracketed title such as [Attack on Titan], while removing
+    # obvious leading release/group tags when there is more text after them.
+    if prefix.startswith("[") and prefix.endswith("]"):
+        inner = prefix[1:-1].strip()
+        if len(inner) >= 2:
+            prefix = inner
 
     prefix = re.sub(r"\s{2,}", " ", prefix).strip(" -_.")
     if len(prefix) < 2:
@@ -97,9 +94,9 @@ def parse_episode_metadata(message: Message):
     filename = get_message_video_name(message)
     caption = _clean_caption(getattr(message, "message", "") or "")
 
-    # Prefer the caption because the user's source group uses the main anime
-    # title and release metadata there. Only fall back to the filename when the
-    # caption does not contain a complete episode marker.
+    # Prefer the caption because the source group uses the main anime title
+    # and release metadata there. Only fall back to filename metadata when
+    # the caption does not contain a complete episode marker.
     season, episode, marker = _episode_from_text(caption)
     source_text = caption
 
@@ -114,12 +111,7 @@ def parse_episode_metadata(message: Message):
     if not anime:
         return None
 
-    quality = _detect_quality(source_text)
-    if not quality:
-        quality = _detect_quality(filename)
-    if not quality:
-        # Never guess a quality that is not explicitly present.
-        quality = "auto"
+    quality = _detect_quality(source_text) or _detect_quality(filename) or "auto"
 
     if season is None:
         if re.search(r"\b(?:season|s)\s*1\b", source_text, re.I):
@@ -252,6 +244,7 @@ async def sync_source_library(client):
 
 def render_library_html(animes, get_seasons, get_episodes, get_all_sources_for_episode):
     lines = ["📚 <b>ANIME LIBRARY</b>", ""]
+    preferred = ["2160p", "1440p", "1080p", "720p", "480p", "360p", "auto"]
 
     for anime in animes:
         lines.append(f"🎬 <b>{escape(anime)}</b>")
@@ -262,8 +255,17 @@ def render_library_html(animes, get_seasons, get_episodes, get_all_sources_for_e
                 if not sources:
                     continue
 
+                best_quality = next((q for q in preferred if q in sources), None)
+                if not best_quality:
+                    continue
+
+                best_url = sources[best_quality]
+                episode_link = (
+                    f'<a href="{escape(best_url, quote=True)}">'
+                    f'Episode {escape(str(episode))}</a>'
+                )
+
                 quality_links = []
-                preferred = ["2160p", "1440p", "1080p", "720p", "480p", "360p", "auto"]
                 for quality in preferred:
                     url = sources.get(quality)
                     if url:
@@ -272,12 +274,10 @@ def render_library_html(animes, get_seasons, get_episodes, get_all_sources_for_e
                             f'<a href="{escape(url, quote=True)}">{label}</a>'
                         )
 
-                if quality_links:
-                    episode_label = f"Episode {escape(str(episode))}"
-                    lines.append(
-                        f"    🎞️ <b>{episode_label}</b> — "
-                        + " · ".join(quality_links)
-                    )
+                lines.append(
+                    f"    🎞️ <b>{episode_link}</b> — "
+                    + " · ".join(quality_links)
+                )
 
         lines.append("")
 
