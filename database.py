@@ -30,11 +30,16 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-def init_db():
-    with get_connection() as conn:
+def _ensure_library_schema(conn):
+    """Create or safely rebuild legacy library.db schema in-place."""
+    table = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='library'"
+    ).fetchone()
+
+    if not table:
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS library (
+            CREATE TABLE library (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 anime TEXT NOT NULL,
                 season TEXT NOT NULL,
@@ -44,16 +49,79 @@ def init_db():
                 language TEXT DEFAULT 'Unknown',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-
-                UNIQUE(
-                    anime,
-                    season,
-                    episode,
-                    quality
-                )
+                UNIQUE(anime, season, episode, quality)
             )
             """
         )
+        return
+
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(library)").fetchall()]
+
+    has_quality_unique = False
+    for row in conn.execute("PRAGMA index_list(library)").fetchall():
+        index_name = row[1]
+        if not bool(row[2]):
+            continue
+        index_columns = [
+            r[2]
+            for r in conn.execute(f"PRAGMA index_info({index_name!r})").fetchall()
+        ]
+        if index_columns == ["anime", "season", "episode", "quality"]:
+            has_quality_unique = True
+            break
+
+    if "quality" in columns and has_quality_unique:
+        return
+
+    # Legacy schema: rebuild so the ON CONFLICT(anime,season,episode,quality)
+    # used by add_source() is valid. Existing rows are preserved as quality=auto
+    # when their old schema had no quality column.
+    conn.execute("DROP TABLE IF EXISTS library_schema_new")
+    conn.execute(
+        """
+        CREATE TABLE library_schema_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            anime TEXT NOT NULL,
+            season TEXT NOT NULL,
+            episode TEXT NOT NULL,
+            quality TEXT NOT NULL DEFAULT 'auto',
+            source_url TEXT NOT NULL,
+            language TEXT DEFAULT 'Unknown',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(anime, season, episode, quality)
+        )
+        """
+    )
+
+    if "quality" in columns:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO library_schema_new
+            (id, anime, season, episode, quality, source_url, language, created_at, updated_at)
+            SELECT id, anime, season, episode, COALESCE(quality, 'auto'), source_url,
+                   COALESCE(language, 'Unknown'), created_at, updated_at
+            FROM library
+            """
+        )
+    else:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO library_schema_new
+            (id, anime, season, episode, quality, source_url, language, created_at, updated_at)
+            SELECT id, anime, season, episode, 'auto', source_url,
+                   COALESCE(language, 'Unknown'), created_at, updated_at
+            FROM library
+            """
+        )
+
+    conn.execute("DROP TABLE library")
+    conn.execute("ALTER TABLE library_schema_new RENAME TO library")
+
+
+def init_db():
+    with get_connection() as conn:
+        _ensure_library_schema(conn)
 
         conn.execute(
             """
@@ -83,6 +151,7 @@ def add_source(
     timestamp = now_iso()
 
     with get_connection() as conn:
+        _ensure_library_schema(conn)
         conn.execute(
             """
             INSERT INTO library (
