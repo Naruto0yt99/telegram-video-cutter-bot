@@ -40,8 +40,7 @@ _SEPARATORS = re.compile(r"[|•·]+")
 
 def _clean_caption(text: str) -> str:
     text = (text or "").replace("\n", " ").replace("\r", " ")
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _detect_quality(text: str):
@@ -56,50 +55,36 @@ def _episode_from_text(text: str):
         match = pattern.search(text)
         if match:
             return match.group("season"), match.group("episode"), match
-
     for pattern in _EP_ONLY_PATTERNS:
         match = pattern.search(text)
         if match:
             return None, match.group("episode"), match
-
     return None, None, None
 
 
 def _anime_from_text(text: str, marker):
     if not marker:
         return None
-
     prefix = text[: marker.start()].strip(" -_.|:•·[](){}")
     prefix = _CONTENT_MARKERS.sub(" ", prefix)
     prefix = _SEPARATORS.sub(" ", prefix)
     prefix = re.sub(r"\s+", " ", prefix).strip(" -_.")
-
     if not prefix:
         return None
-
-    # Preserve a bracketed title such as [Attack on Titan], while removing
-    # obvious leading release/group tags when there is more text after them.
     if prefix.startswith("[") and prefix.endswith("]"):
         inner = prefix[1:-1].strip()
         if len(inner) >= 2:
             prefix = inner
-
     prefix = re.sub(r"\s{2,}", " ", prefix).strip(" -_.")
-    if len(prefix) < 2:
-        return None
-    return prefix
+    return prefix if len(prefix) >= 2 else None
 
 
 def parse_episode_metadata(message: Message):
     filename = get_message_video_name(message)
     caption = _clean_caption(getattr(message, "message", "") or "")
 
-    # Prefer the caption because the source group uses the main anime title
-    # and release metadata there. Only fall back to filename metadata when
-    # the caption does not contain a complete episode marker.
     season, episode, marker = _episode_from_text(caption)
     source_text = caption
-
     if episode is None:
         source_text = _clean_caption(f"{caption} {filename}")
         season, episode, marker = _episode_from_text(source_text)
@@ -170,16 +155,20 @@ def _set_sync_state(last_message_id: int, initial_complete: bool):
         conn.commit()
 
 
+def _library_has_sources():
+    with get_connection() as conn:
+        row = conn.execute("SELECT 1 FROM library LIMIT 1").fetchone()
+    return row is not None
+
+
 def _message_link(message: Message):
     link = getattr(message, "link", None)
     if link:
         return link
-
     chat = getattr(message, "chat", None)
     username = getattr(chat, "username", None)
     if username:
         return f"https://t.me/{username}/{message.id}"
-
     return None
 
 
@@ -190,19 +179,37 @@ async def sync_source_library(client):
 
     _ensure_sync_table()
     last_id, initial_complete = _get_sync_state()
+
+    # If an earlier run marked the scan complete but indexed nothing, do not
+    # permanently lock the source into an empty state. Start the historical
+    # scan again so a parser/runtime fix can populate the library.
+    if initial_complete and not _library_has_sources():
+        last_id = 0
+        initial_complete = False
+        _set_sync_state(0, False)
+
     indexed = 0
     skipped = 0
     newest_seen = last_id
 
     entity = await client.get_entity(SOURCE_CHAT)
+    logger.info(
+        "Starting source sync: chat=%s last_message_id=%s initial_complete=%s",
+        SOURCE_CHAT,
+        last_id,
+        initial_complete,
+    )
 
     async for message in client.iter_messages(
         entity,
         min_id=last_id if last_id else None,
         reverse=True,
     ):
+        message_id = getattr(message, "id", 0) or 0
+        newest_seen = max(newest_seen, message_id)
+
         if not message or not is_video_message(message):
-            newest_seen = max(newest_seen, getattr(message, "id", 0))
+            skipped += 1
             continue
 
         metadata = parse_episode_metadata(message)
@@ -220,13 +227,18 @@ async def sync_source_library(client):
             )
             indexed += 1
 
-        newest_seen = max(newest_seen, message.id)
-
-        if (indexed + skipped) % 100 == 0:
+        processed = indexed + skipped
+        if processed % 100 == 0:
             _set_sync_state(newest_seen, False)
+            logger.info(
+                "Source sync progress: processed=%s indexed=%s skipped=%s last_message_id=%s",
+                processed,
+                indexed,
+                skipped,
+                newest_seen,
+            )
 
     _set_sync_state(newest_seen, True)
-
     logger.info(
         "Source sync complete: indexed=%s skipped=%s last_message_id=%s initial=%s",
         indexed,
