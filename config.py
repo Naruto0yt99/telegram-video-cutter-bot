@@ -73,6 +73,13 @@ GEMINI_API_KEY = env(
     "GEMINI_API_KEY"
 )
 
+# Telegram group/channel whose episode messages are indexed automatically.
+# The environment variable remains available if the source group changes later.
+SOURCE_CHAT = env(
+    "SOURCE_CHAT",
+    "AnimeNation012",
+)
+
 
 TELEGRAM_MAX_MB = int(
     env(
