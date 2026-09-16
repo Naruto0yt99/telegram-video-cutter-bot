@@ -73,7 +73,12 @@ def _wait_until_active_sync(file_name):
             )
             response.raise_for_status()
             data = response.json()
-            state = ((data.get("state") or {}).get("name"))
+            raw_state = data.get("state")
+            if isinstance(raw_state, dict):
+                state = raw_state.get("name")
+            else:
+                state = raw_state
+            state = str(state or "").upper()
             if state == "ACTIVE":
                 return data
             if state == "FAILED":
