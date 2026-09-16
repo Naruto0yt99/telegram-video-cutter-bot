@@ -22,7 +22,6 @@ REMOTE_HTTP_OPTIONS = [
 
 
 async def _extract_remote_window(server, output_path, source_start, duration):
-    """Ask FFmpeg to seek the Telegram-backed HTTP resource and materialize only the candidate window."""
     duration = max(1.0, float(duration))
     source_start = max(0.0, float(source_start))
     await run_command(
@@ -94,16 +93,18 @@ async def _try_candidate(client, candidate, segment, user_id, job_dir):
         return None
 
     hint = segment.get("source_start_hint")
+    try:
+        hint = None if hint is None else float(hint)
+    except (TypeError, ValueError):
+        hint = None
 
     if hint is None:
-        # Source position is unknown. Use a bounded coarse search instead of downloading
-        # the episode. Each attempt gives FFmpeg a seekable Telegram-backed HTTP resource.
         ratios = [0.05, 0.18, 0.31, 0.44, 0.57, 0.70, 0.83, 0.95]
         width = max(12.0, min(30.0, duration + 10.0))
         for ratio in ratios:
             source_start = max(
                 0.0,
-                min(source_duration - 0.1, ratio * source_duration),
+                min(max(0.0, source_duration - 0.1), ratio * source_duration),
             )
             result = await _verify_remote_candidate(
                 client,
@@ -114,27 +115,10 @@ async def _try_candidate(client, candidate, segment, user_id, job_dir):
                 width,
             )
             if result:
-                probe, verified = result
-                return probe, verified
+                return result
         return None
 
-    try:
-        hint = float(hint)
-    except (TypeError, ValueError):
-        hint = None
-
-    if hint is None:
-        return await _try_candidate(
-            client,
-            {**candidate},
-            {**segment, "source_start_hint": None},
-            user_id,
-            job_dir,
-        )
-
     hint = max(0.0, min(hint, max(0.0, source_duration - 0.1)))
-    # Give Gemini a little context around its approximate hint. The second attempt
-    # widens the window if the first visual verification misses because of timing drift.
     widths = [
         max(12.0, min(30.0, duration + 8.0)),
         max(24.0, min(45.0, duration + 20.0)),
