@@ -42,7 +42,39 @@ async def _extract_remote_window(server, output_path, source_start, duration):
     )
 
 
-async def _verify_remote_candidate(client, candidate, segment, job_dir, base_time, width):
+async def _make_target_segment(input_video, segment, job_dir, index):
+    start = max(0.0, float(segment["start_time"]))
+    duration = max(0.2, float(segment["end_time"]) - start)
+    target = job_dir / f"target_{index:03d}.mp4"
+    await run_command(
+        FFMPEG_BIN,
+        "-y",
+        "-ss", str(start),
+        "-i", str(input_video),
+        "-t", str(duration),
+        "-map", "0:v:0?",
+        "-map", "0:a:0?",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-crf", "20",
+        "-c:a", "aac",
+        "-movflags", "+faststart",
+        str(target),
+    )
+    if not target.exists() or target.stat().st_size == 0:
+        raise RuntimeError("Target edit scene extraction failed.")
+    return target
+
+
+async def _verify_remote_candidate(
+    client,
+    candidate,
+    segment,
+    target_video,
+    job_dir,
+    base_time,
+    width,
+):
     server = None
     try:
         server = await open_telegram_range_server(client, candidate["source_url"])
@@ -53,14 +85,17 @@ async def _verify_remote_candidate(client, candidate, segment, job_dir, base_tim
         await _extract_remote_window(server, probe, base_time, width)
         if not probe.exists() or probe.stat().st_size == 0:
             return None
+
         verified = await verify_candidate_window(
             probe,
             segment,
             base_time,
             base_time + width,
+            target_video_path=target_video,
         )
         if verified.get("match") and float(verified.get("confidence", 0)) >= 0.72:
             return probe, verified
+
         probe.unlink(missing_ok=True)
         return None
     except Exception as exc:
@@ -75,12 +110,26 @@ async def _verify_remote_candidate(client, candidate, segment, job_dir, base_tim
             await server.close()
 
 
-async def _try_candidate(client, candidate, segment, user_id, job_dir):
-    duration = max(0.5, float(segment["end_time"]) - float(segment["start_time"]))
+async def _try_candidate(
+    client,
+    candidate,
+    segment,
+    target_video,
+    user_id,
+    job_dir,
+):
+    duration = max(
+        0.5,
+        float(segment["end_time"]) - float(segment["start_time"]),
+    )
     chat, message_id = parse_telegram_message_link(candidate["source_url"])
 
     try:
-        _, source_duration, _ = await get_telegram_video_info(client, chat, message_id)
+        _, source_duration, _ = await get_telegram_video_info(
+            client,
+            chat,
+            message_id,
+        )
     except Exception as exc:
         logger.info("Source metadata failed: %s", exc)
         return None
@@ -100,7 +149,13 @@ async def _try_candidate(client, candidate, segment, user_id, job_dir):
                 min(max(0.0, source_duration - 0.1), ratio * source_duration),
             )
             result = await _verify_remote_candidate(
-                client, candidate, segment, job_dir, source_start, width
+                client,
+                candidate,
+                segment,
+                target_video,
+                job_dir,
+                source_start,
+                width,
             )
             if result:
                 return result
@@ -114,7 +169,13 @@ async def _try_candidate(client, candidate, segment, user_id, job_dir):
     for width in widths:
         start = max(0.0, hint - min(4.0, width * 0.2))
         result = await _verify_remote_candidate(
-            client, candidate, segment, job_dir, start, width
+            client,
+            candidate,
+            segment,
+            target_video,
+            job_dir,
+            start,
+            width,
         )
         if result:
             return result
@@ -140,38 +201,63 @@ def candidate_episodes(anime, season, episode):
     return candidates
 
 
-async def _process_segment(client, segment, index, user_id, job_dir):
+async def _process_segment(client, segment, index, user_id, job_dir, input_video):
     anime = segment.get("anime")
     if not anime:
         return None
 
-    candidates = candidate_episodes(anime, segment.get("season"), segment.get("episode"))
+    target_video = await _make_target_segment(
+        input_video,
+        segment,
+        job_dir,
+        index,
+    )
+
+    candidates = candidate_episodes(
+        anime,
+        segment.get("season"),
+        segment.get("episode"),
+    )
     if not candidates:
+        target_video.unlink(missing_ok=True)
         return None
 
-    for candidate in candidates:
-        result = await _try_candidate(client, candidate, segment, user_id, job_dir)
-        if not result:
-            continue
+    try:
+        for candidate in candidates:
+            result = await _try_candidate(
+                client,
+                candidate,
+                segment,
+                target_video,
+                user_id,
+                job_dir,
+            )
+            if not result:
+                continue
 
-        probe, verified = result
-        local_start = max(0.0, float(verified["start_time"]))
-        local_end = max(local_start + 0.1, float(verified["end_time"]))
-        clip = await make_clip_exact(
-            probe,
-            local_start,
-            local_end,
-            name=f"find_{index:03d}",
-        )
-        probe.unlink(missing_ok=True)
+            probe, verified = result
+            local_start = max(0.0, float(verified["start_time"]))
+            local_end = max(
+                local_start + 0.1,
+                float(verified["end_time"]),
+            )
+            clip = await make_clip_exact(
+                probe,
+                local_start,
+                local_end,
+                name=f"find_{index:03d}",
+            )
+            probe.unlink(missing_ok=True)
 
-        return {
-            "index": index,
-            "clip": clip,
-            "confidence": verified.get("confidence", 0),
-            "reason": verified.get("reason", ""),
-            "candidate": candidate,
-        }
+            return {
+                "index": index,
+                "clip": clip,
+                "confidence": verified.get("confidence", 0),
+                "reason": verified.get("reason", ""),
+                "candidate": candidate,
+            }
+    finally:
+        target_video.unlink(missing_ok=True)
 
     return None
 
@@ -214,13 +300,18 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
                             f"🎯 FIND\n\nScene {index}/{len(segments)}\n"
                             f"{segment.get('anime') or 'Unknown'} "
                             f"S{segment.get('season') or '?'} E{segment.get('episode') or '?'}\n\n"
-                            "Telegram range seek + Gemini verification..."
+                            "Telegram range seek + visual Gemini verification..."
                         )
                     except Exception:
                         pass
                 try:
                     return await _process_segment(
-                        telethon_client, segment, index, user_id, job_dir
+                        telethon_client,
+                        segment,
+                        index,
+                        user_id,
+                        job_dir,
+                        input_video,
                     )
                 except Exception as exc:
                     logger.exception("Scene %s failed: %s", index, exc)
@@ -235,7 +326,10 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
         if not results:
             raise RuntimeError("Koi reliable source clip match nahi mila.")
 
-        output = await merge_videos([result["clip"] for result in results], "find_result")
+        output = await merge_videos(
+            [result["clip"] for result in results],
+            "find_result",
+        )
         return {
             "output": output,
             "matched": len(results),
