@@ -49,10 +49,12 @@ async def get_telegram_video_info(client, chat, message_id):
 
 def _parse_range(header, size):
     if not header:
-        return 0, min(size, MAX_RANGE_BYTES - 1)
+        return 0, min(size - 1, MAX_RANGE_BYTES - 1)
+
     match = re.fullmatch(r"bytes=(\d+)-(\d*)", header.strip())
     if not match:
         raise ValueError("Unsupported Range header")
+
     start = int(match.group(1))
     end = int(match.group(2)) if match.group(2) else size - 1
     if start >= size:
@@ -69,9 +71,11 @@ async def _read_range(client, media, start, end):
     """Read an exact byte range without creating a sparse fake media file."""
     if end < start:
         return b""
+
     aligned_start = (start // ALIGN_BYTES) * ALIGN_BYTES
     needed = end - aligned_start + 1
     result = bytearray()
+
     async for chunk in client.iter_download(
         media,
         offset=aligned_start,
@@ -83,17 +87,13 @@ async def _read_range(client, media, start, end):
         result.extend(bytes(chunk))
         if len(result) >= needed:
             break
+
     trim_start = start - aligned_start
     return bytes(result[trim_start : trim_start + (end - start + 1)])
 
 
 class TelegramRangeServer:
-    """Local seekable HTTP facade over a Telegram media file.
-
-    FFmpeg can use normal HTTP Range requests against this server. Telegram only
-    receives the byte ranges FFmpeg actually seeks to, so the full episode is
-    never materialized locally just to inspect a small scene.
-    """
+    """Local seekable HTTP facade over a Telegram media file."""
 
     def __init__(self, client, message, duration, size):
         self.client = client
@@ -112,7 +112,7 @@ class TelegramRangeServer:
             limit=64 * 1024,
         )
         port = self.server.sockets[0].getsockname()[1]
-        self.url = f"http://127.0.0.1:{port}/video"
+        self.url = f"http://127.0.0.1:{port}/video.mp4"
         return self.url
 
     async def close(self):
@@ -128,8 +128,9 @@ class TelegramRangeServer:
             parts = first.split()
             if len(parts) < 2:
                 raise ValueError("Malformed HTTP request")
+
             method, path = parts[0], parts[1]
-            if method not in {"GET", "HEAD"} or urlparse(path).path != "/video":
+            if method not in {"GET", "HEAD"} or urlparse(path).path != "/video.mp4":
                 await self._send_error(writer, 404, "Not Found")
                 return
 
@@ -145,21 +146,16 @@ class TelegramRangeServer:
                 await self._send_416(writer)
                 return
 
-            partial = bool(headers.get("range"))
             content_length = end - start + 1
-            response_code = "206 Partial Content" if partial else "200 OK"
             response_headers = [
-                f"HTTP/1.1 {response_code}",
+                "HTTP/1.1 206 Partial Content",
                 "Content-Type: video/mp4",
                 f"Content-Length: {content_length}",
                 "Accept-Ranges: bytes",
+                f"Content-Range: bytes {start}-{end}/{self.size}",
                 "Cache-Control: no-store",
                 "Connection: close",
             ]
-            if partial:
-                response_headers.append(
-                    f"Content-Range: bytes {start}-{end}/{self.size}"
-                )
             writer.write(("\r\n".join(response_headers) + "\r\n\r\n").encode())
             await writer.drain()
 
@@ -172,8 +168,11 @@ class TelegramRangeServer:
                 start,
                 end,
             )
-            if not payload:
-                return
+            if len(payload) != content_length:
+                raise RuntimeError(
+                    f"Telegram returned {len(payload)} bytes, expected {content_length}."
+                )
+
             writer.write(payload)
             await writer.drain()
         except (asyncio.IncompleteReadError, ConnectionError, BrokenPipeError):
