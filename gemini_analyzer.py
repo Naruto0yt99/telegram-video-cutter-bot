@@ -87,19 +87,22 @@ def _wait_until_active_sync(file_name):
     raise TimeoutError("Gemini video processing timed out.")
 
 
-def _generate_sync(file_data, prompt):
+def _generate_sync(file_data, prompt, extra_file_data=None):
     _require_key()
-    payload = {
-        "contents": [{
-            "parts": [
-                {"text": prompt},
-                {"file_data": {
-                    "mime_type": file_data.get("mimeType") or file_data.get("mime_type") or "video/mp4",
-                    "file_uri": file_data["uri"],
-                }},
-            ]
-        }]
-    }
+    file_datas = [file_data]
+    if extra_file_data:
+        file_datas.extend(extra_file_data)
+
+    parts = [{"text": prompt}]
+    for item in file_datas:
+        parts.append({
+            "file_data": {
+                "mime_type": item.get("mimeType") or item.get("mime_type") or "video/mp4",
+                "file_uri": item["uri"],
+            }
+        })
+
+    payload = {"contents": [{"parts": parts}]}
     with httpx.Client(timeout=None) as client:
         response = client.post(
             f"{BASE_URL}/models/{MODEL}:generateContent",
@@ -111,6 +114,7 @@ def _generate_sync(file_data, prompt):
         )
         response.raise_for_status()
         data = response.json()
+
     parts = (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
     text = "\n".join(str(part.get("text", "")) for part in parts if part.get("text"))
     if not text:
@@ -183,7 +187,7 @@ async def analyze_video(video_path):
             _wait_until_active_sync(uploaded["name"])
             prompt = """
 You are the first-stage source identification engine for an anime clip finder.
-Analyze the ENTIRE edited video carefully, frame by frame where useful.
+Analyze the ENTIRE edited video carefully.
 
 Return ONLY JSON in this shape:
 {
@@ -202,17 +206,15 @@ Return ONLY JSON in this shape:
 
 Rules:
 - Preserve exact chronological order.
-- Split at every real source-scene change. Do not merge two different source scenes.
-- start_time/end_time are timestamps INSIDE THE EDIT, never source-episode timestamps.
+- Split at every real source-scene change. Do not merge different source scenes.
+- start_time/end_time are timestamps INSIDE THE EDIT, never source timestamps.
 - Account for speed-up, slow-down, reverse, zoom, crop, mirror, color grading, overlays,
   subtitles, transitions, repeated frames and short flashes.
 - Identify anime, season and episode only when visually supported. Never invent an episode.
 - If season/episode is uncertain, use null and lower confidence.
-- source_start_hint is optional and must be null unless you have a useful approximate
-  position in the original episode from visual recognition alone. It is only a hint,
-  not a final timestamp.
-- Keep very short shots if they are real source scenes; do not discard them merely because
-  they are under one second.
+- source_start_hint is only an approximate original-episode position when visually supported.
+  It is never the final answer and may be null.
+- Keep real short shots even when they are under one second.
 - Confidence must be between 0 and 1.
 """
             return _clean_segments(extract_json(_generate_sync(uploaded, prompt)))
@@ -222,19 +224,40 @@ Rules:
     return await asyncio.to_thread(work)
 
 
-async def verify_candidate_window(video_path, segment, candidate_start, candidate_end):
-    path = Path(video_path)
-    if not path.exists():
-        raise FileNotFoundError(str(path))
+async def verify_candidate_window(
+    candidate_video_path,
+    segment,
+    candidate_start,
+    candidate_end,
+    target_video_path=None,
+):
+    candidate_path = Path(candidate_video_path)
+    if not candidate_path.exists():
+        raise FileNotFoundError(str(candidate_path))
+
+    target_path = Path(target_video_path) if target_video_path else None
+    if target_path is not None and not target_path.exists():
+        raise FileNotFoundError(str(target_path))
 
     def work():
-        uploaded = _upload_file_sync(path)
+        candidate_file = _upload_file_sync(candidate_path)
+        target_file = None
         try:
-            _wait_until_active_sync(uploaded["name"])
+            _wait_until_active_sync(candidate_file["name"])
+            if target_path is not None:
+                target_file = _upload_file_sync(target_path)
+                _wait_until_active_sync(target_file["name"])
+
             prompt = f"""
 You are the FINAL visual verifier for an anime clip finder.
-The uploaded video is a candidate window extracted from a Telegram source episode.
-The target came from an edited video.
+
+If TWO videos are provided:
+- Video 1 is the TARGET clip cut from the user's edited YouTube video.
+- Video 2 is the CANDIDATE clip cut from the claimed original anime episode.
+Compare their actual visual content directly.
+
+If only one video is provided, do not claim an exact visual match unless the evidence in that
+single video is sufficient; prefer match=false when visual comparison is impossible.
 
 Target metadata:
 - anime: {segment.get('anime') or 'unknown'}
@@ -242,10 +265,11 @@ Target metadata:
 - episode: {segment.get('episode') or 'unknown'}
 - edited start: {segment.get('start_time')}
 - edited end: {segment.get('end_time')}
-- candidate source window nominal range: {candidate_start} to {candidate_end} seconds
+- candidate source nominal range: {candidate_start} to {candidate_end} seconds
 
-Analyze visual content, not filenames. The edit may have speed changes, crop/zoom, mirror,
-color changes, subtitles, overlays, transitions or removed frames.
+The target may have speed changes, crop/zoom, mirror, color changes, subtitles, overlays,
+transitions, frame removal or other editing. Match the underlying characters, poses, setting,
+camera composition and action rather than surface-level color or timing.
 
 Return ONLY JSON:
 {{
@@ -256,19 +280,23 @@ Return ONLY JSON:
   "reason": "brief factual visual evidence"
 }}
 
-start_time/end_time MUST be timestamps inside the uploaded candidate window.
-Choose the exact visible source-scene boundaries. If the target is not present, return
-match=false and confidence below 0.5.
+start_time/end_time MUST be timestamps inside Video 2 (the candidate video).
+They must tightly bound the portion that visually corresponds to Video 1.
+If the candidate does not contain the target scene, return match=false and confidence <= 0.5.
 """
-            data = extract_json(_generate_sync(uploaded, prompt))
-            return {
-                "match": bool(data.get("match")),
-                "confidence": max(0.0, min(1.0, float(data.get("confidence", 0)))),
-                "start_time": float(data.get("start_time", 0)),
-                "end_time": float(data.get("end_time", 0)),
-                "reason": str(data.get("reason") or ""),
-            }
+
+            if target_file is not None:
+                text = _generate_sync(
+                    target_file,
+                    prompt,
+                    extra_file_data=[candidate_file],
+                )
+            else:
+                text = _generate_sync(candidate_file, prompt)
+            return extract_json(text)
         finally:
-            _delete_file_sync(uploaded["name"])
+            _delete_file_sync(candidate_file["name"])
+            if target_file is not None:
+                _delete_file_sync(target_file["name"])
 
     return await asyncio.to_thread(work)
