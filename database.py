@@ -196,10 +196,13 @@ def get_qualities(anime, season, episode):
               AND episode = ?
             ORDER BY
                 CASE
-                    WHEN quality = '1080p' THEN 1
-                    WHEN quality = '720p' THEN 2
-                    WHEN quality = '480p' THEN 3
-                    ELSE 4
+                    WHEN quality = '2160p' THEN 1
+                    WHEN quality = '1440p' THEN 2
+                    WHEN quality = '1080p' THEN 3
+                    WHEN quality = '720p' THEN 4
+                    WHEN quality = '480p' THEN 5
+                    WHEN quality = '360p' THEN 6
+                    ELSE 7
                 END
             """,
             (
@@ -254,9 +257,12 @@ def get_best_source(
         return None
 
     preferred = [
+        "2160p",
+        "1440p",
         "1080p",
         "720p",
         "480p",
+        "360p",
         "auto",
     ]
 
