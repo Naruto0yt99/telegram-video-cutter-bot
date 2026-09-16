@@ -1,6 +1,12 @@
 """Runtime compatibility fixes loaded automatically by Python's site module."""
 
 try:
+    from db_schema_migrate import migrate_library_schema
+    migrate_library_schema()
+except Exception:
+    pass
+
+try:
     from telethon.client.messages import MessageMethods
 
     _original_iter_messages = MessageMethods.iter_messages
