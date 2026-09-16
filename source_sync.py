@@ -35,7 +35,6 @@ _CONTENT_MARKERS = re.compile(
     re.I,
 )
 
-_BRACKETED = re.compile(r"[\[\](){}]")
 _SEPARATORS = re.compile(r"[|•·]+")
 
 
@@ -66,7 +65,7 @@ def _episode_from_text(text: str):
     return None, None, None
 
 
-def _anime_from_caption(text: str, marker):
+def _anime_from_text(text: str, marker):
     if not marker:
         return None
 
@@ -78,8 +77,6 @@ def _anime_from_caption(text: str, marker):
     if not prefix:
         return None
 
-    # Captions often begin with a release/group tag such as [Group].
-    # Remove only leading bracketed tags; keep bracketed anime titles intact.
     while True:
         match = re.match(r"^\[[^\]]{1,80}\]\s*", prefix)
         if not match:
@@ -99,32 +96,33 @@ def _anime_from_caption(text: str, marker):
 def parse_episode_metadata(message: Message):
     filename = get_message_video_name(message)
     caption = _clean_caption(getattr(message, "message", "") or "")
-    combined = _clean_caption(f"{caption} {filename}")
 
-    season, episode, marker = _episode_from_text(combined)
+    # Prefer the caption because the user's source group uses the main anime
+    # title and release metadata there. Only fall back to the filename when the
+    # caption does not contain a complete episode marker.
+    season, episode, marker = _episode_from_text(caption)
+    source_text = caption
+
     if episode is None:
+        source_text = _clean_caption(f"{caption} {filename}")
+        season, episode, marker = _episode_from_text(source_text)
+
+    if episode is None or not marker:
         return None
 
-    anime = _anime_from_caption(caption, marker)
-    if not anime:
-        # If the caption itself did not contain the marker, use the filename
-        # prefix before the episode marker as a strict fallback.
-        anime = _anime_from_caption(combined, marker)
-
+    anime = _anime_from_text(source_text, marker)
     if not anime:
         return None
 
-    quality = _detect_quality(combined)
+    quality = _detect_quality(source_text)
     if not quality:
-        # Do not guess quality. A source without an explicit quality marker is
-        # stored as auto so it can still be used, while never pretending it is
-        # 1080p/720p/etc.
+        quality = _detect_quality(filename)
+    if not quality:
+        # Never guess a quality that is not explicitly present.
         quality = "auto"
 
     if season is None:
-        # A bare Episode N without a season is only safe for season 1 when the
-        # caption explicitly says it is season 1.
-        if re.search(r"\b(?:season|s)\s*1\b", combined, re.I):
+        if re.search(r"\b(?:season|s)\s*1\b", source_text, re.I):
             season = "1"
         else:
             return None
@@ -206,16 +204,13 @@ async def sync_source_library(client):
 
     entity = await client.get_entity(SOURCE_CHAT)
 
-    # First run walks the whole history oldest -> newest. Later runs only read
-    # messages newer than the checkpoint. Only Telegram metadata is fetched.
     async for message in client.iter_messages(
         entity,
         min_id=last_id if last_id else None,
         reverse=True,
     ):
         if not message or not is_video_message(message):
-            if getattr(message, "id", 0) > newest_seen:
-                newest_seen = message.id
+            newest_seen = max(newest_seen, getattr(message, "id", 0))
             continue
 
         metadata = parse_episode_metadata(message)
@@ -233,10 +228,8 @@ async def sync_source_library(client):
             )
             indexed += 1
 
-        if message.id > newest_seen:
-            newest_seen = message.id
+        newest_seen = max(newest_seen, message.id)
 
-        # Checkpoint regularly so an interrupted initial scan can resume.
         if (indexed + skipped) % 100 == 0:
             _set_sync_state(newest_seen, False)
 
@@ -275,11 +268,16 @@ def render_library_html(animes, get_seasons, get_episodes, get_all_sources_for_e
                     url = sources.get(quality)
                     if url:
                         label = "Source" if quality == "auto" else quality
-                        quality_links.append(f'<a href="{escape(url, quote=True)}">{label}</a>')
+                        quality_links.append(
+                            f'<a href="{escape(url, quote=True)}">{label}</a>'
+                        )
 
-                episode_label = f"Episode {escape(str(episode))}"
                 if quality_links:
-                    lines.append(f"    🎞️ <b>{episode_label}</b> — " + " · ".join(quality_links))
+                    episode_label = f"Episode {escape(str(episode))}"
+                    lines.append(
+                        f"    🎞️ <b>{episode_label}</b> — "
+                        + " · ".join(quality_links)
+                    )
 
         lines.append("")
 
