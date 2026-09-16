@@ -1,6 +1,11 @@
 import os
 from pathlib import Path
 
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -16,6 +21,11 @@ TEMP_DIR.mkdir(
     parents=True,
     exist_ok=True,
 )
+
+# Load the project's .env automatically. This keeps Termux startup reliable
+# even when variables were not exported in the shell first.
+if load_dotenv is not None:
+    load_dotenv(BASE_DIR / ".env", override=False)
 
 
 def env(
@@ -73,12 +83,8 @@ GEMINI_API_KEY = env(
     "GEMINI_API_KEY"
 )
 
-# Telegram group/channel whose episode messages are indexed automatically.
-# The environment variable remains available if the source group changes later.
-SOURCE_CHAT = env(
-    "SOURCE_CHAT",
-    "AnimeNation012",
-)
+# Required source group for the automatic episode library.
+SOURCE_CHAT = "AnimeNation012"
 
 
 TELEGRAM_MAX_MB = int(
