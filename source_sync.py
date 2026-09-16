@@ -180,9 +180,6 @@ async def sync_source_library(client):
     _ensure_sync_table()
     last_id, initial_complete = _get_sync_state()
 
-    # If an earlier run marked the scan complete but indexed nothing, do not
-    # permanently lock the source into an empty state. Start the historical
-    # scan again so a parser/runtime fix can populate the library.
     if initial_complete and not _library_has_sources():
         last_id = 0
         initial_complete = False
@@ -200,11 +197,11 @@ async def sync_source_library(client):
         initial_complete,
     )
 
-    async for message in client.iter_messages(
-        entity,
-        min_id=last_id if last_id else None,
-        reverse=True,
-    ):
+    iter_kwargs = {"entity": entity, "reverse": True}
+    if last_id > 0:
+        iter_kwargs["min_id"] = last_id
+
+    async for message in client.iter_messages(**iter_kwargs):
         message_id = getattr(message, "id", 0) or 0
         newest_seen = max(newest_seen, message_id)
 
