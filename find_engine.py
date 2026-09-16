@@ -6,7 +6,7 @@ from pathlib import Path
 from database import get_seasons, get_episodes, get_best_source
 from telegram_media import parse_telegram_message_link
 from telegram_remote import open_telegram_range_server, get_telegram_video_info
-from ffmpeg_utils import run_command, make_clip, merge_videos
+from ffmpeg_utils import run_command, make_clip_exact, merge_videos
 from config import TEMP_DIR, FFMPEG_BIN
 from gemini_analyzer import analyze_video, verify_candidate_window
 
@@ -76,18 +76,11 @@ async def _verify_remote_candidate(client, candidate, segment, job_dir, base_tim
 
 
 async def _try_candidate(client, candidate, segment, user_id, job_dir):
-    duration = max(
-        0.5,
-        float(segment["end_time"]) - float(segment["start_time"]),
-    )
+    duration = max(0.5, float(segment["end_time"]) - float(segment["start_time"]))
     chat, message_id = parse_telegram_message_link(candidate["source_url"])
 
     try:
-        _, source_duration, _ = await get_telegram_video_info(
-            client,
-            chat,
-            message_id,
-        )
+        _, source_duration, _ = await get_telegram_video_info(client, chat, message_id)
     except Exception as exc:
         logger.info("Source metadata failed: %s", exc)
         return None
@@ -107,12 +100,7 @@ async def _try_candidate(client, candidate, segment, user_id, job_dir):
                 min(max(0.0, source_duration - 0.1), ratio * source_duration),
             )
             result = await _verify_remote_candidate(
-                client,
-                candidate,
-                segment,
-                job_dir,
-                source_start,
-                width,
+                client, candidate, segment, job_dir, source_start, width
             )
             if result:
                 return result
@@ -126,12 +114,7 @@ async def _try_candidate(client, candidate, segment, user_id, job_dir):
     for width in widths:
         start = max(0.0, hint - min(4.0, width * 0.2))
         result = await _verify_remote_candidate(
-            client,
-            candidate,
-            segment,
-            job_dir,
-            start,
-            width,
+            client, candidate, segment, job_dir, start, width
         )
         if result:
             return result
@@ -144,17 +127,9 @@ def candidate_episodes(anime, season, episode):
     seasons = [str(season)] if season is not None else get_seasons(anime)
     candidates = []
     for current_season in seasons:
-        episodes = (
-            [str(episode)]
-            if episode is not None
-            else get_episodes(anime, current_season)
-        )
+        episodes = [str(episode)] if episode is not None else get_episodes(anime, current_season)
         for current_episode in episodes:
-            source = get_best_source(
-                anime,
-                current_season,
-                current_episode,
-            )
+            source = get_best_source(anime, current_season, current_episode)
             if source:
                 candidates.append({
                     "anime": anime,
@@ -170,33 +145,19 @@ async def _process_segment(client, segment, index, user_id, job_dir):
     if not anime:
         return None
 
-    candidates = candidate_episodes(
-        anime,
-        segment.get("season"),
-        segment.get("episode"),
-    )
+    candidates = candidate_episodes(anime, segment.get("season"), segment.get("episode"))
     if not candidates:
         return None
 
     for candidate in candidates:
-        result = await _try_candidate(
-            client,
-            candidate,
-            segment,
-            user_id,
-            job_dir,
-        )
+        result = await _try_candidate(client, candidate, segment, user_id, job_dir)
         if not result:
             continue
 
         probe, verified = result
         local_start = max(0.0, float(verified["start_time"]))
-        local_end = max(
-            local_start + 0.1,
-            float(verified["end_time"]),
-        )
-
-        clip = await make_clip(
+        local_end = max(local_start + 0.1, float(verified["end_time"]))
+        clip = await make_clip_exact(
             probe,
             local_start,
             local_end,
@@ -215,12 +176,7 @@ async def _process_segment(client, segment, index, user_id, job_dir):
     return None
 
 
-async def find_and_build(
-    input_video,
-    user_id,
-    telethon_client,
-    progress_message=None,
-):
+async def find_and_build(input_video, user_id, telethon_client, progress_message=None):
     if telethon_client is None:
         raise RuntimeError("Telegram source client connected nahi hai.")
 
@@ -230,9 +186,7 @@ async def find_and_build(
 
     segments = await analyze_video(input_video)
     if not segments:
-        raise RuntimeError(
-            "Gemini ko koi usable anime segment nahi mila."
-        )
+        raise RuntimeError("Gemini ko koi usable anime segment nahi mila.")
 
     job_dir = Path(TEMP_DIR) / str(user_id) / "find_job"
     if job_dir.exists():
@@ -244,8 +198,7 @@ async def find_and_build(
         if progress_message:
             try:
                 await progress_message.edit_text(
-                    f"🎯 FIND\n\n"
-                    f"Gemini analysis complete: {len(segments)} scenes\n"
+                    f"🎯 FIND\n\nGemini analysis complete: {len(segments)} scenes\n"
                     "Targeted Telegram range matching start..."
                 )
             except Exception:
@@ -258,29 +211,19 @@ async def find_and_build(
                 if progress_message:
                     try:
                         await progress_message.edit_text(
-                            f"🎯 FIND\n\n"
-                            f"Scene {index}/{len(segments)}\n"
+                            f"🎯 FIND\n\nScene {index}/{len(segments)}\n"
                             f"{segment.get('anime') or 'Unknown'} "
-                            f"S{segment.get('season') or '?'} "
-                            f"E{segment.get('episode') or '?'}\n\n"
+                            f"S{segment.get('season') or '?'} E{segment.get('episode') or '?'}\n\n"
                             "Telegram range seek + Gemini verification..."
                         )
                     except Exception:
                         pass
                 try:
                     return await _process_segment(
-                        telethon_client,
-                        segment,
-                        index,
-                        user_id,
-                        job_dir,
+                        telethon_client, segment, index, user_id, job_dir
                     )
                 except Exception as exc:
-                    logger.exception(
-                        "Scene %s failed: %s",
-                        index,
-                        exc,
-                    )
+                    logger.exception("Scene %s failed: %s", index, exc)
                     return None
 
         gathered = await asyncio.gather(
@@ -290,14 +233,9 @@ async def find_and_build(
         results.sort(key=lambda result: result["index"])
 
         if not results:
-            raise RuntimeError(
-                "Koi reliable source clip match nahi mila."
-            )
+            raise RuntimeError("Koi reliable source clip match nahi mila.")
 
-        output = await merge_videos(
-            [result["clip"] for result in results],
-            "find_result",
-        )
+        output = await merge_videos([result["clip"] for result in results], "find_result")
         return {
             "output": output,
             "matched": len(results),
