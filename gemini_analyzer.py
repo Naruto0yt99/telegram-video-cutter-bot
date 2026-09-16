@@ -93,7 +93,9 @@ def _generate_sync(file_data, prompt, extra_file_data=None):
     if extra_file_data:
         file_datas.extend(extra_file_data)
 
-    parts = [{"text": prompt}]
+    # Put the visual inputs first, then the instruction, matching Gemini's video
+    # input guidance and making the target/candidate ordering explicit.
+    parts = []
     for item in file_datas:
         parts.append({
             "file_data": {
@@ -101,6 +103,7 @@ def _generate_sync(file_data, prompt, extra_file_data=None):
                 "file_uri": item["uri"],
             }
         })
+    parts.append({"text": prompt})
 
     payload = {"contents": [{"parts": parts}]}
     with httpx.Client(timeout=None) as client:
@@ -115,8 +118,12 @@ def _generate_sync(file_data, prompt, extra_file_data=None):
         response.raise_for_status()
         data = response.json()
 
-    parts = (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
-    text = "\n".join(str(part.get("text", "")) for part in parts if part.get("text"))
+    response_parts = (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
+    text = "\n".join(
+        str(part.get("text", ""))
+        for part in response_parts
+        if part.get("text")
+    )
     if not text:
         raise RuntimeError(f"Gemini returned no text: {data}")
     return text
@@ -212,8 +219,9 @@ Rules:
   subtitles, transitions, repeated frames and short flashes.
 - Identify anime, season and episode only when visually supported. Never invent an episode.
 - If season/episode is uncertain, use null and lower confidence.
-- source_start_hint is only an approximate original-episode position when visually supported.
-  It is never the final answer and may be null.
+- source_start_hint is an approximate original-episode position only when visually supported.
+  Try hard to estimate it from the recognizable scene, but never pretend an uncertain value
+  is exact. Use null when no useful estimate is available.
 - Keep real short shots even when they are under one second.
 - Confidence must be between 0 and 1.
 """
@@ -251,13 +259,10 @@ async def verify_candidate_window(
             prompt = f"""
 You are the FINAL visual verifier for an anime clip finder.
 
-If TWO videos are provided:
+Two videos are provided in this request:
 - Video 1 is the TARGET clip cut from the user's edited YouTube video.
 - Video 2 is the CANDIDATE clip cut from the claimed original anime episode.
 Compare their actual visual content directly.
-
-If only one video is provided, do not claim an exact visual match unless the evidence in that
-single video is sufficient; prefer match=false when visual comparison is impossible.
 
 Target metadata:
 - anime: {segment.get('anime') or 'unknown'}
@@ -268,7 +273,7 @@ Target metadata:
 - candidate source nominal range: {candidate_start} to {candidate_end} seconds
 
 The target may have speed changes, crop/zoom, mirror, color changes, subtitles, overlays,
-transitions, frame removal or other editing. Match the underlying characters, poses, setting,
+transitions, frame removal or other editing. Match underlying characters, poses, setting,
 camera composition and action rather than surface-level color or timing.
 
 Return ONLY JSON:
@@ -285,14 +290,14 @@ They must tightly bound the portion that visually corresponds to Video 1.
 If the candidate does not contain the target scene, return match=false and confidence <= 0.5.
 """
 
-            if target_file is not None:
-                text = _generate_sync(
-                    target_file,
-                    prompt,
-                    extra_file_data=[candidate_file],
-                )
-            else:
-                text = _generate_sync(candidate_file, prompt)
+            if target_file is None:
+                raise RuntimeError("Target video required for visual verification.")
+
+            text = _generate_sync(
+                target_file,
+                prompt,
+                extra_file_data=[candidate_file],
+            )
             return extract_json(text)
         finally:
             _delete_file_sync(candidate_file["name"])
