@@ -1,33 +1,128 @@
 import asyncio
 import json
 import logging
+import mimetypes
 import re
+import time
 from pathlib import Path
 
-from google import genai
+import httpx
 
 from config import GEMINI_API_KEY
 
 logger = logging.getLogger("gemini-analyzer")
 
 MODEL = "gemini-3.8-flash"
+BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+UPLOAD_URL = "https://generativelanguage.googleapis.com/upload/v1beta/files"
 
 
-def get_client():
+def _require_key():
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY missing.")
-    return genai.Client(api_key=GEMINI_API_KEY)
 
 
-def upload_file_sync(client, path):
-    return client.files.upload(file=str(path))
+def _mime_type(path):
+    return mimetypes.guess_type(str(path))[0] or "video/mp4"
 
 
-def delete_file_sync(client, file_name):
+def _upload_file_sync(path):
+    _require_key()
+    path = Path(path)
+    size = path.stat().st_size
+    mime = _mime_type(path)
+    headers = {
+        "x-goog-api-key": GEMINI_API_KEY,
+        "X-Goog-Upload-Protocol": "resumable",
+        "X-Goog-Upload-Command": "start",
+        "X-Goog-Upload-Header-Content-Length": str(size),
+        "X-Goog-Upload-Header-Content-Type": mime,
+        "Content-Type": "application/json",
+    }
+    payload = {"file": {"display_name": path.name}}
+    with httpx.Client(timeout=None, follow_redirects=True) as client:
+        response = client.post(UPLOAD_URL, headers=headers, json=payload)
+        response.raise_for_status()
+        upload_url = response.headers.get("x-goog-upload-url")
+        if not upload_url:
+            raise RuntimeError("Gemini upload URL missing in response.")
+        with path.open("rb") as fh:
+            upload_response = client.post(
+                upload_url,
+                headers={
+                    "Content-Length": str(size),
+                    "X-Goog-Upload-Offset": "0",
+                    "X-Goog-Upload-Command": "upload, finalize",
+                },
+                content=fh,
+            )
+        upload_response.raise_for_status()
+        data = upload_response.json().get("file")
+        if not data or not data.get("name") or not data.get("uri"):
+            raise RuntimeError("Gemini upload response missing file metadata.")
+        return data
+
+
+def _wait_until_active_sync(file_name):
+    _require_key()
+    with httpx.Client(timeout=60.0) as client:
+        for _ in range(120):
+            response = client.get(
+                f"{BASE_URL}/{file_name}",
+                headers={"x-goog-api-key": GEMINI_API_KEY},
+            )
+            response.raise_for_status()
+            data = response.json()
+            state = ((data.get("state") or {}).get("name"))
+            if state == "ACTIVE":
+                return data
+            if state == "FAILED":
+                raise RuntimeError("Gemini video processing failed.")
+            time.sleep(2)
+    raise TimeoutError("Gemini video processing timed out.")
+
+
+def _generate_sync(file_data, prompt):
+    _require_key()
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"file_data": {
+                    "mime_type": file_data.get("mimeType") or file_data.get("mime_type") or "video/mp4",
+                    "file_uri": file_data["uri"],
+                }},
+            ]
+        }]
+    }
+    with httpx.Client(timeout=None) as client:
+        response = client.post(
+            f"{BASE_URL}/models/{MODEL}:generateContent",
+            headers={
+                "x-goog-api-key": GEMINI_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        response.raise_for_status()
+        data = response.json()
+    parts = (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
+    text = "\n".join(str(part.get("text", "")) for part in parts if part.get("text"))
+    if not text:
+        raise RuntimeError(f"Gemini returned no text: {data}")
+    return text
+
+
+def _delete_file_sync(file_name):
     try:
-        client.files.delete(name=file_name)
+        _require_key()
+        with httpx.Client(timeout=30.0) as client:
+            client.delete(
+                f"{BASE_URL}/{file_name}",
+                headers={"x-goog-api-key": GEMINI_API_KEY},
+            )
     except Exception:
-        pass
+        logger.debug("Gemini file cleanup failed", exc_info=True)
 
 
 def extract_json(text):
@@ -78,9 +173,9 @@ async def analyze_video(video_path):
         raise FileNotFoundError(str(path))
 
     def work():
-        client = get_client()
-        uploaded = upload_file_sync(client, path)
+        uploaded = _upload_file_sync(path)
         try:
+            _wait_until_active_sync(uploaded["name"])
             prompt = """
 You are the first-stage source identification engine for an anime clip finder.
 Analyze the ENTIRE edited video carefully, frame by frame where useful.
@@ -115,27 +210,22 @@ Rules:
   they are under one second.
 - Confidence must be between 0 and 1.
 """
-            response = client.models.generate_content(
-                model=MODEL,
-                contents=[prompt, uploaded],
-            )
-            return _clean_segments(extract_json(response.text))
+            return _clean_segments(extract_json(_generate_sync(uploaded, prompt)))
         finally:
-            delete_file_sync(client, uploaded.name)
+            _delete_file_sync(uploaded["name"])
 
     return await asyncio.to_thread(work)
 
 
 async def verify_candidate_window(video_path, segment, candidate_start, candidate_end):
-    """Ask Gemini whether a downloaded Telegram candidate contains the target scene."""
     path = Path(video_path)
     if not path.exists():
         raise FileNotFoundError(str(path))
 
     def work():
-        client = get_client()
-        uploaded = upload_file_sync(client, path)
+        uploaded = _upload_file_sync(path)
         try:
+            _wait_until_active_sync(uploaded["name"])
             prompt = f"""
 You are the FINAL visual verifier for an anime clip finder.
 The uploaded video is a candidate window extracted from a Telegram source episode.
@@ -165,11 +255,7 @@ start_time/end_time MUST be timestamps inside the uploaded candidate window.
 Choose the exact visible source-scene boundaries. If the target is not present, return
 match=false and confidence below 0.5.
 """
-            response = client.models.generate_content(
-                model=MODEL,
-                contents=[prompt, uploaded],
-            )
-            data = extract_json(response.text)
+            data = extract_json(_generate_sync(uploaded, prompt))
             return {
                 "match": bool(data.get("match")),
                 "confidence": max(0.0, min(1.0, float(data.get("confidence", 0)))),
@@ -178,6 +264,6 @@ match=false and confidence below 0.5.
                 "reason": str(data.get("reason") or ""),
             }
         finally:
-            delete_file_sync(client, uploaded.name)
+            _delete_file_sync(uploaded["name"])
 
     return await asyncio.to_thread(work)
