@@ -2,15 +2,16 @@ import asyncio
 import logging
 import re
 import shutil
+from html import escape
 from pathlib import Path
 
 from telethon import TelegramClient
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
@@ -34,10 +35,10 @@ from database import (
     get_episodes,
     get_all_sources_for_episode,
     get_best_source,
-    anime_exists,
     delete_source,
     delete_episode,
     delete_season,
+    get_connection,
 )
 
 from telegram_media import (
@@ -56,6 +57,7 @@ from ffmpeg_utils import (
 
 from find_engine import find_and_build
 from yt_downloader import download_video_from_url
+from source_sync import sync_source_library, render_library_html
 
 
 logging.basicConfig(
@@ -66,8 +68,8 @@ logging.basicConfig(
 logger = logging.getLogger("anime-bot")
 
 telethon_client = None
+source_sync_task = None
 job_lock = asyncio.Lock()
-
 active_videos = {}
 
 
@@ -79,12 +81,13 @@ def user_temp_dir(user_id: int) -> Path:
 
 def cleanup_user_temp(user_id: int):
     path = user_temp_dir(user_id)
-
     try:
         if path.exists():
             shutil.rmtree(path)
     except Exception:
         logger.exception("Temp cleanup failed")
+
+    active_videos.pop(user_id, None)
 
 
 def is_owner(user_id: int) -> bool:
@@ -93,12 +96,10 @@ def is_owner(user_id: int) -> bool:
 
 async def send_file(update: Update, path: Path, caption: str):
     size = path.stat().st_size
-
     if size > TELEGRAM_MAX_BYTES:
         await update.message.reply_text(
             f"⚠️ Output {size / 1024 / 1024:.1f} MB hai.\n"
-            f"Telegram limit configured: "
-            f"{TELEGRAM_MAX_BYTES / 1024 / 1024:.0f} MB."
+            f"Configured Telegram limit: {TELEGRAM_MAX_BYTES / 1024 / 1024:.0f} MB."
         )
         return
 
@@ -113,170 +114,92 @@ async def send_file(update: Update, path: Path, caption: str):
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎬 ANIME VIDEO BOT\n\n"
-        "📚 Library:\n"
-        "/save AnimeName\n"
-        "/library\n"
-        "/edit\n\n"
-        "🎯 Finder:\n"
-        "/find <YouTube URL>\n\n"
-        "✂️ Video tools:\n"
-        "/clips Anime S1 E1 01:20 - 01:50\n"
-        "/split 30 Anime S1 E1\n\n"
-        "Reply-video mode bhi supported hai."
+        "📚 /library — clickable source library\n"
+        "🎯 /find <YouTube URL> — exact scene finder\n"
+        "✂️ /clip 01:20 - 01:50 — active video se clip\n"
+        "✂️ /split 30 — active/original video ko parts me baanto\n"
+        "♻️ /next — current original video reset\n"
+        "💾 /save — owner-only manual source save\n"
+        "✏️ /edit — owner-only source management\n"
+        "❓ /help — detailed examples"
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📖 HELP\n\n"
-
-        "💾 SAVE\n"
-        "/save Naruto\n"
-        "→ season count\n"
-        "→ har season ka episode count\n"
-        "→ har episode ki Telegram link, one per line\n\n"
-
-        "Example:\n"
-        "/save Naruto\n"
-        "2\n"
-        "220\n"
-        "https://t.me/channel/101\n"
-        "https://t.me/channel/102\n"
-        "...\n\n"
-
         "🎯 FIND\n"
         "/find https://youtube.com/shorts/xxxxx\n"
-        "→ video download\n"
+        "→ edit download\n"
         "→ Gemini scene analysis\n"
-        "→ saved Telegram episode source\n"
-        "→ visual timestamp matching\n"
+        "→ Telegram episode source\n"
+        "→ visual verification\n"
         "→ exact clips\n"
-        "→ original order me merge\n\n"
-
-        "✂️ CLIPS\n"
-        "/clips Naruto S1 E1 01:20 - 01:50\n"
-        "Reply to a video:\n"
+        "→ final ordered video\n\n"
+        "✂️ CLIP (active/original video)\n"
+        "Reply-video ki zarurat nahi. Pehle video bhejo, phir:\n"
+        "/clip 01:20 - 01:50\n\n"
+        "Old alias bhi supported hai:\n"
         "/clips 01:20 - 01:50\n\n"
-
-        "✂️ SPLIT\n"
-        "/split 30 Naruto S1 E1\n"
-        "Default: 30 seconds\n"
-        "Reply video:\n"
-        "/split 30\n\n"
-
-        "✏️ EDIT\n"
-        "/edit"
+        "📺 Source episode se direct clip:\n"
+        "/clip Naruto S1 E1 01:20 - 01:50\n\n"
+        "✂️ SPLIT (active/original video)\n"
+        "/split 30\n"
+        "→ 30-second parts\n"
+        "/split 60\n"
+        "→ 60-second parts\n\n"
+        "♻️ NEXT\n"
+        "/next\n"
+        "→ current original video + temp files clear\n\n"
+        "📚 LIBRARY\n"
+        "/library\n"
+        "→ buttons nahi; Episode/quality text directly Telegram source link hai.\n\n"
+        "💾 SAVE (owner)\n"
+        "/save Naruto\n"
+        "→ season count → episode count → links\n\n"
+        "✏️ EDIT (owner)\n"
+        "/edit add Naruto S1 E1 1080p https://t.me/...\n"
+        "/edit delete Naruto S1 E1 1080p\n"
+        "/edit delete_episode Naruto S1 E1\n"
+        "/edit delete_season Naruto S1\n"
+        "/edit delete_anime Naruto"
     )
 
 
 async def library_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     animes = get_animes()
-
     if not animes:
         await update.message.reply_text(
-            "📚 Library empty hai.\n/save AnimeName se start karo."
+            "📚 Library abhi empty hai.\n"
+            "AnimeNation012 ka automatic source scan background me chal raha ho sakta hai."
         )
         return
 
-    buttons = [
-        [InlineKeyboardButton(a, callback_data=f"anime|{a}")]
-        for a in animes
-    ]
+    text = render_library_html(
+        animes,
+        get_seasons,
+        get_episodes,
+        get_all_sources_for_episode,
+    )
 
     await update.message.reply_text(
-        "📚 ANIME LIBRARY\n\n"
-        + "\n".join(f"• {a}" for a in animes),
-        reply_markup=InlineKeyboardMarkup(buttons),
+        text,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
     )
 
 
-async def library_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data
-
-    if data.startswith("anime|"):
-        anime = data.split("|", 1)[1]
-        seasons = get_seasons(anime)
-
-        buttons = [
-            [
-                InlineKeyboardButton(
-                    f"Season {s}",
-                    callback_data=f"season|{anime}|{s}",
-                )
-            ]
-            for s in seasons
-        ]
-
-        await query.edit_message_text(
-            f"📺 {anime}\n\n"
-            + "\n".join(f"• Season {s}" for s in seasons),
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
-
-    elif data.startswith("season|"):
-        _, anime, season = data.split("|", 2)
-
-        episodes = get_episodes(anime, season)
-
-        buttons = [
-            [
-                InlineKeyboardButton(
-                    f"Episode {e}",
-                    callback_data=f"episode|{anime}|{season}|{e}",
-                )
-            ]
-            for e in episodes[:100]
-        ]
-
-        await query.edit_message_text(
-            f"📺 {anime} S{season}\n\n"
-            f"Episodes: {len(episodes)}",
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
-
-    elif data.startswith("episode|"):
-        _, anime, season, episode = data.split("|", 3)
-
-        sources = get_all_sources_for_episode(
-            anime,
-            season,
-            episode,
-        )
-
-        if not sources:
-            text = "❌ Source nahi mila."
-        else:
-            text = (
-                f"📺 {anime} S{season} E{episode}\n\n"
-                + "\n".join(
-                    f"• {quality}: {url}"
-                    for quality, url in sources.items()
-                )
-            )
-
-        await query.edit_message_text(text)
-
-
 async def save_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-
-    if not is_owner(user_id):
+    if not is_owner(update.effective_user.id):
         await update.message.reply_text("❌ Owner only.")
         return
 
     anime = " ".join(context.args).strip()
-
     if not anime:
-        await update.message.reply_text(
-            "Usage:\n/save Naruto"
-        )
+        await update.message.reply_text("Usage:\n/save Naruto")
         return
 
     context.user_data.clear()
-
     context.user_data["save_anime"] = anime
     context.user_data["save_step"] = "season_count"
 
@@ -294,18 +217,11 @@ async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "✏️ EDIT\n\n"
-
-        "Source replace/add:\n"
-        "/edit add Naruto S1 E5 720p https://t.me/channel/123\n\n"
-
-        "Source delete:\n"
-        "/edit delete Naruto S1 E5 720p\n\n"
-
-        "Episode delete:\n"
-        "/edit delete_episode Naruto S1 E5\n\n"
-
-        "Season delete:\n"
-        "/edit delete_season Naruto S1"
+        "/edit add Anime S1 E1 1080p URL\n"
+        "/edit delete Anime S1 E1 1080p\n"
+        "/edit delete_episode Anime S1 E1\n"
+        "/edit delete_season Anime S1\n"
+        "/edit delete_anime Anime"
     )
 
 
@@ -315,247 +231,132 @@ async def edit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     args = context.args
-
     if not args:
         await edit_command(update, context)
         return
 
     action = args[0].lower()
-
     try:
         if action == "add":
             if len(args) < 6:
-                raise ValueError(
-                    "Format: /edit add Anime S1 E1 720p URL"
-                )
-
+                raise ValueError("Format: /edit add Anime S1 E1 1080p URL")
             anime = args[1]
             season = args[2].lstrip("Ss")
             episode = args[3].lstrip("Ee")
-            quality = args[4]
+            quality = args[4].lower()
             url = args[5]
-
             parse_telegram_message_link(url)
-
-            add_source(
-                anime,
-                season,
-                episode,
-                quality,
-                url,
-            )
-
-            await update.message.reply_text(
-                "✅ Source saved."
-            )
+            add_source(anime, season, episode, quality, url)
+            await update.message.reply_text("✅ Source saved.")
 
         elif action == "delete":
             if len(args) < 5:
-                raise ValueError(
-                    "Format: /edit delete Anime S1 E1 720p"
-                )
-
-            anime = args[1]
-            season = args[2].lstrip("Ss")
-            episode = args[3].lstrip("Ee")
-            quality = args[4]
-
+                raise ValueError("Format: /edit delete Anime S1 E1 1080p")
             delete_source(
-                anime,
-                season,
-                episode,
-                quality,
+                args[1],
+                args[2].lstrip("Ss"),
+                args[3].lstrip("Ee"),
+                args[4].lower(),
             )
-
-            await update.message.reply_text(
-                "✅ Source deleted."
-            )
+            await update.message.reply_text("✅ Source deleted.")
 
         elif action == "delete_episode":
             if len(args) < 4:
-                raise ValueError(
-                    "Format: /edit delete_episode Anime S1 E1"
-                )
-
-            anime = args[1]
-            season = args[2].lstrip("Ss")
-            episode = args[3].lstrip("Ee")
-
+                raise ValueError("Format: /edit delete_episode Anime S1 E1")
             delete_episode(
-                anime,
-                season,
-                episode,
+                args[1],
+                args[2].lstrip("Ss"),
+                args[3].lstrip("Ee"),
             )
-
-            await update.message.reply_text(
-                "✅ Episode deleted."
-            )
+            await update.message.reply_text("✅ Episode deleted.")
 
         elif action == "delete_season":
             if len(args) < 3:
-                raise ValueError(
-                    "Format: /edit delete_season Anime S1"
-                )
+                raise ValueError("Format: /edit delete_season Anime S1")
+            delete_season(args[1], args[2].lstrip("Ss"))
+            await update.message.reply_text("✅ Season deleted.")
 
+        elif action == "delete_anime":
+            if len(args) < 2:
+                raise ValueError("Format: /edit delete_anime Anime")
             anime = args[1]
-            season = args[2].lstrip("Ss")
-
-            delete_season(
-                anime,
-                season,
-            )
-
-            await update.message.reply_text(
-                "✅ Season deleted."
-            )
+            with get_connection() as conn:
+                conn.execute("DELETE FROM library WHERE LOWER(anime) = LOWER(?)", (anime,))
+                conn.commit()
+            await update.message.reply_text("✅ Anime deleted from library.")
 
         else:
             raise ValueError("Unknown edit action.")
-
     except Exception as exc:
-        await update.message.reply_text(
-            f"❌ {exc}"
-        )
+        await update.message.reply_text(f"❌ {exc}")
 
 
-async def process_save_text(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def process_save_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get("save_step")
-
     if not step:
         return False
 
     text = (update.message.text or "").strip()
 
     if step == "season_count":
-        if not text.isdigit():
-            await update.message.reply_text(
-                "❌ Sirf number bhejo."
-            )
+        if not text.isdigit() or not 1 <= int(text) <= 50:
+            await update.message.reply_text("❌ Seasons 1-50 ke beech number bhejo.")
             return True
-
-        count = int(text)
-
-        if count < 1 or count > 50:
-            await update.message.reply_text(
-                "❌ Seasons 1-50 ke beech rakho."
-            )
-            return True
-
-        context.user_data["save_season_count"] = count
+        context.user_data["save_season_count"] = int(text)
         context.user_data["save_current_season"] = 1
         context.user_data["save_step"] = "episode_count"
-
-        await update.message.reply_text(
-            "📺 Season 1 me kitne episodes hain?"
-        )
-
+        await update.message.reply_text("📺 Season 1 me kitne episodes hain?")
         return True
 
     if step == "episode_count":
-        if not text.isdigit():
-            await update.message.reply_text(
-                "❌ Episode count number me bhejo."
-            )
+        if not text.isdigit() or not 1 <= int(text) <= 5000:
+            await update.message.reply_text("❌ Valid episode count bhejo.")
             return True
-
-        count = int(text)
-
-        if count < 1 or count > 5000:
-            await update.message.reply_text(
-                "❌ Episode count invalid."
-            )
-            return True
-
         season = context.user_data["save_current_season"]
-
-        context.user_data["save_episode_count"] = count
+        context.user_data["save_episode_count"] = int(text)
         context.user_data["save_step"] = "episode_links"
-
         await update.message.reply_text(
-            f"🔗 Season {season}: {count} Telegram links bhejo.\n\n"
-            "Har line = ek episode.\n"
-            "Pehli line = Episode 1\n"
-            "Dusri line = Episode 2\n"
-            "...\n\n"
-            "Example:\n"
-            "https://t.me/animeclipcutter/3/5\n"
-            "https://t.me/animeclipcutter/3/6"
+            f"🔗 Season {season}: {text} Telegram links bhejo, one per line.\n"
+            "Pehli line = Episode 1, dusri = Episode 2...\n\n"
+            "Quality auto source ke liye exact quality links /edit se add kiye ja sakte hain."
         )
-
         return True
 
     if step == "episode_links":
-        links = [
-            x.strip()
-            for x in text.splitlines()
-            if x.strip()
-        ]
-
+        links = [x.strip() for x in text.splitlines() if x.strip()]
         expected = context.user_data["save_episode_count"]
-
         if len(links) != expected:
             await update.message.reply_text(
-                f"❌ {expected} links chahiye the.\n"
-                f"Aapne {len(links)} bheje."
+                f"❌ {expected} links chahiye the; {len(links)} mile."
             )
             return True
 
         anime = context.user_data["save_anime"]
         season = context.user_data["save_current_season"]
-
-        status = await update.message.reply_text(
-            f"⏳ Season {season} validate/save ho raha hai..."
-        )
-
         saved = 0
-
         for index, url in enumerate(links, start=1):
             try:
                 parse_telegram_message_link(url)
-
-                add_source(
-                    anime,
-                    season,
-                    index,
-                    "auto",
-                    url,
-                )
-
+                add_source(anime, season, index, "auto", url)
                 saved += 1
-
             except Exception as exc:
-                logger.warning(
-                    "Invalid source %s: %s",
-                    url,
-                    exc,
-                )
+                logger.warning("Invalid source %s: %s", url, exc)
 
         total_seasons = context.user_data["save_season_count"]
-
         if season < total_seasons:
             context.user_data["save_current_season"] = season + 1
             context.user_data["save_step"] = "episode_count"
-
-            await status.edit_text(
-                f"✅ Season {season}: {saved}/{expected} saved.\n\n"
-                f"📺 Ab Season {season + 1} me kitne episodes hain?"
+            await update.message.reply_text(
+                f"✅ Season {season}: {saved}/{expected} saved.\n"
+                f"📺 Ab Season {season + 1} ka episode count bhejo."
             )
-
         else:
             anime_name = context.user_data["save_anime"]
-
             context.user_data.clear()
-
-            await status.edit_text(
-                f"🎉 SAVE COMPLETE\n\n"
-                f"Anime: {anime_name}\n"
-                f"Seasons: {total_seasons}\n"
-                f"Last season saved: {saved}/{expected}"
+            await update.message.reply_text(
+                f"🎉 SAVE COMPLETE\nAnime: {anime_name}\n"
+                f"Last season: {saved}/{expected}"
             )
-
         return True
 
     return False
@@ -563,321 +364,179 @@ async def process_save_text(
 
 async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text(
-            "Usage:\n"
-            "/find https://youtube.com/shorts/xxxxx"
-        )
+        await update.message.reply_text("Usage:\n/find https://youtube.com/shorts/xxxxx")
         return
 
     url = context.args[0]
-
-    if not re.match(
-        r"^https?://",
-        url,
-        re.IGNORECASE,
-    ):
-        await update.message.reply_text(
-            "❌ Valid URL bhejo."
-        )
+    if not re.match(r"^https?://", url, re.I):
+        await update.message.reply_text("❌ Valid URL bhejo.")
         return
 
     if job_lock.locked():
-        await update.message.reply_text(
-            "⏳ Ek find job already chal raha hai. "
-            "Pehle uske complete hone ka wait karo."
-        )
+        await update.message.reply_text("⏳ Ek find job already chal raha hai.")
         return
 
     status = await update.message.reply_text(
-        "🎯 FIND STARTED\n\n"
-        "1️⃣ Video download ho raha hai..."
+        "🎯 FIND STARTED\n\n1️⃣ Video download ho raha hai..."
     )
-
     user_id = update.effective_user.id
 
     try:
         async with job_lock:
-            video_path = await download_video_from_url(
-                url,
-                user_id,
-            )
-
+            video_path = await download_video_from_url(url, user_id)
             await status.edit_text(
                 "🎯 FIND\n\n"
                 "1️⃣ Video downloaded ✅\n"
                 "2️⃣ Gemini scene analysis..."
             )
-
             result = await find_and_build(
                 input_video=video_path,
                 user_id=user_id,
                 telethon_client=telethon_client,
                 progress_message=status,
             )
-
             output = result["output"]
-
             await status.edit_text(
                 "🎯 FIND\n\n"
                 f"Scenes matched: {result['matched']}\n"
                 "3️⃣ Clips merged ✅\n"
                 "4️⃣ Sending result..."
             )
-
-            await send_file(
-                update,
-                output,
-                "🎬 Exact matched clips",
-            )
-
+            await send_file(update, output, "🎬 Exact matched clips")
     except Exception as exc:
         logger.exception("Find failed")
-        await status.edit_text(
-            f"❌ FIND FAILED\n\n{exc}"
-        )
-
+        await status.edit_text(f"❌ FIND FAILED\n\n{exc}")
     finally:
         cleanup_user_temp(user_id)
 
 
-async def clips_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def _get_active_video(user_id: int):
+    path_text = active_videos.get(user_id)
+    if not path_text:
+        return None
+    path = Path(path_text)
+    if not path.exists() or path.stat().st_size == 0:
+        active_videos.pop(user_id, None)
+        return None
+    return path
+
+
+async def clip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    args = context.args
 
     try:
-        args = context.args
-
-        input_path = None
-        cleanup_input = False
-
-        if update.message.reply_to_message:
-            replied = update.message.reply_to_message
-
-            if not replied.video and not replied.document:
-                raise ValueError(
-                    "Reply kisi video message par karo."
-                )
-
-            input_path = await download_bot_video(
-                replied,
-                user_id,
-            )
-
-            cleanup_input = True
-
-            if len(args) != 3:
-                raise ValueError(
-                    "Reply mode:\n/clips 01:20 - 01:50"
-                )
-
+        if len(args) == 3 and args[1] == "-":
+            input_path = await _get_active_video(user_id)
+            if input_path is None:
+                raise ValueError("Pehle original video bhejo.")
             start = parse_time(args[0])
             end = parse_time(args[2])
-
-        else:
-            if len(args) != 6:
-                raise ValueError(
-                    "Format:\n"
-                    "/clips Anime S1 E1 01:20 - 01:50"
-                )
-
+        elif len(args) == 6 and args[4] == "-":
             anime = args[0]
             season = args[1].lstrip("Ss")
             episode = args[2].lstrip("Ee")
-
             start = parse_time(args[3])
             end = parse_time(args[5])
-
-            source = get_best_source(
-                anime,
-                season,
-                episode,
-            )
-
+            source = get_best_source(anime, season, episode)
             if not source:
-                raise ValueError(
-                    "Episode source nahi mila."
-                )
-
+                raise ValueError("Episode source nahi mila.")
             if telethon_client is None:
-                raise ValueError(
-                    "Telegram source client connected nahi hai."
-                )
-
-            chat, message_id = parse_telegram_message_link(
-                source
-            )
-
+                raise ValueError("Telegram source client connected nahi hai.")
+            chat, message_id = parse_telegram_message_link(source)
             input_path = await download_telethon_message(
-                telethon_client,
-                chat,
-                message_id,
-                user_id,
+                telethon_client, chat, message_id, user_id
+            )
+        else:
+            raise ValueError(
+                "Usage:\n/clip 01:20 - 01:50\n"
+                "or\n/clip Anime S1 E1 01:20 - 01:50"
             )
 
         duration = await get_duration(input_path)
+        if start < 0 or end <= start or end > duration:
+            raise ValueError(f"Video duration {format_time(duration)} hai.")
 
-        if start < 0 or end > duration:
-            raise ValueError(
-                f"Video duration {format_time(duration)} hai."
-            )
-
-        output = await make_clip(
-            input_path,
-            start,
-            end,
-            name="clip",
-        )
-
-        await send_file(
-            update,
-            output,
-            f"✂️ {format_time(start)} → {format_time(end)}",
-        )
+        output = await make_clip(input_path, start, end, name="clip")
+        await send_file(update, output, f"✂️ {format_time(start)} → {format_time(end)}")
 
     except Exception as exc:
-        await update.message.reply_text(
-            f"❌ {exc}"
-        )
-
-    finally:
-        if cleanup_input:
-            cleanup_user_temp(user_id)
+        await update.message.reply_text(f"❌ {exc}")
 
 
 async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
     try:
         args = context.args
-
         part_duration = 30
-
         if args and args[0].isdigit():
             part_duration = int(args[0])
-            args = args[1:]
 
-        input_path = None
+        if part_duration <= 0:
+            raise ValueError("Split duration 1 second se zyada hona chahiye.")
 
-        if update.message.reply_to_message:
-            replied = update.message.reply_to_message
+        input_path = await _get_active_video(user_id)
+        if input_path is None:
+            raise ValueError("Pehle original video bhejo.")
 
-            if not replied.video and not replied.document:
-                raise ValueError(
-                    "Reply kisi video par karo."
-                )
-
-            input_path = await download_bot_video(
-                replied,
-                user_id,
-            )
-
-        else:
-            if len(args) < 3:
-                raise ValueError(
-                    "Format:\n"
-                    "/split 30 Anime S1 E1"
-                )
-
-            anime = args[0]
-            season = args[1].lstrip("Ss")
-            episode = args[2].lstrip("Ee")
-
-            source = get_best_source(
-                anime,
-                season,
-                episode,
-            )
-
-            if not source:
-                raise ValueError(
-                    "Episode source nahi mila."
-                )
-
-            if telethon_client is None:
-                raise ValueError(
-                    "Telegram source client connected nahi hai."
-                )
-
-            chat, message_id = parse_telegram_message_link(
-                source
-            )
-
-            input_path = await download_telethon_message(
-                telethon_client,
-                chat,
-                message_id,
-                user_id,
-            )
-
-        parts = await split_video(
-            input_path,
-            part_duration,
-        )
-
+        parts = await split_video(input_path, part_duration)
         for index, part in enumerate(parts, start=1):
-            await send_file(
-                update,
-                part,
-                f"✂️ Part {index}/{len(parts)}",
-            )
+            await send_file(update, part, f"✂️ Part {index}/{len(parts)}")
 
     except Exception as exc:
-        await update.message.reply_text(
-            f"❌ {exc}"
-        )
-
-    finally:
-        cleanup_user_temp(user_id)
+        await update.message.reply_text(f"❌ {exc}")
 
 
-async def receive_video(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    cleanup_user_temp(user_id)
+    await update.message.reply_text("♻️ Current original video reset ho gaya. Naya video bhej sakte ho.")
+
+
+async def receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     user_id = update.effective_user.id
 
     if context.user_data.get("save_step"):
-        await message.reply_text(
-            "💾 Save process chal raha hai. "
-            "Abhi requested links/text bhejo."
-        )
+        await message.reply_text("💾 Save process chal raha hai. Abhi requested text/links bhejo.")
         return
 
     if not message.video and not message.document:
         return
 
-    path = await download_bot_video(
-        message,
-        user_id,
-    )
+    try:
+        cleanup_user_temp(user_id)
+        path = await download_bot_video(message, user_id)
+        active_videos[user_id] = str(path)
+        await message.reply_text(
+            "✅ Original video set ho gaya.\n\n"
+            "/clip 01:00 - 01:30\n"
+            "/split 30\n"
+            "/next"
+        )
+    except Exception as exc:
+        await message.reply_text(f"❌ {exc}")
 
-    active_videos[user_id] = str(path)
 
-    await message.reply_text(
-        "✅ Video received.\n\n"
-        "Ab use kar sakte ho:\n"
-        "/split 30\n"
-        "/clips 01:00 - 01:30"
-    )
-
-
-async def text_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await process_save_text(update, context):
         return
 
 
 async def error_handler(update, context):
-    logger.exception(
-        "Unhandled Telegram error",
-        exc_info=context.error,
-    )
+    logger.exception("Unhandled Telegram error", exc_info=context.error)
+
+
+async def _run_source_sync():
+    try:
+        result = await sync_source_library(telethon_client)
+        logger.info("AnimeNation012 sync result: %s", result)
+    except Exception:
+        logger.exception("AnimeNation012 source sync failed")
 
 
 async def post_init(application: Application):
-    global telethon_client
+    global telethon_client, source_sync_task
 
     init_db()
 
@@ -887,21 +546,26 @@ async def post_init(application: Application):
             TG_API_ID,
             TG_API_HASH,
         )
-
         await telethon_client.start()
+        logger.info("Telethon source client connected.")
 
-        logger.info(
-            "Telethon source client connected."
-        )
+        # Do not block bot startup on a potentially large historical scan.
+        source_sync_task = asyncio.create_task(_run_source_sync())
     else:
         logger.warning(
-            "TG_API_ID/TG_API_HASH missing. "
-            "Telegram source downloading disabled."
+            "TG_API_ID/TG_API_HASH missing. Telegram source features disabled."
         )
 
 
 async def post_shutdown(application: Application):
-    global telethon_client
+    global telethon_client, source_sync_task
+
+    if source_sync_task and not source_sync_task.done():
+        source_sync_task.cancel()
+        try:
+            await source_sync_task
+        except asyncio.CancelledError:
+            pass
 
     if telethon_client:
         try:
@@ -921,65 +585,27 @@ def main():
         .build()
     )
 
-    application.add_handler(
-        CommandHandler("start", start_command)
-    )
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("library", library_command))
+    application.add_handler(CommandHandler("save", save_command))
+    application.add_handler(CommandHandler("edit", edit_handler))
+    application.add_handler(CommandHandler("find", find_command))
+    application.add_handler(CommandHandler("clip", clip_command))
+    application.add_handler(CommandHandler("clips", clip_command))
+    application.add_handler(CommandHandler("split", split_command))
+    application.add_handler(CommandHandler("next", next_command))
 
     application.add_handler(
-        CommandHandler("help", help_command)
+        MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)
     )
-
     application.add_handler(
-        CommandHandler("library", library_command)
+        MessageHandler(filters.VIDEO | filters.Document.VIDEO, receive_video)
     )
-
-    application.add_handler(
-        CommandHandler("save", save_command)
-    )
-
-    application.add_handler(
-        CommandHandler("edit", edit_handler)
-    )
-
-    application.add_handler(
-        CommandHandler("find", find_command)
-    )
-
-    application.add_handler(
-        CommandHandler("clips", clips_command)
-    )
-
-    application.add_handler(
-        CommandHandler("split", split_command)
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(
-            library_callback,
-            pattern=r"^(anime|season|episode)\|",
-        )
-    )
-
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            text_handler,
-        )
-    )
-
-    application.add_handler(
-        MessageHandler(
-            filters.VIDEO | filters.Document.VIDEO,
-            receive_video,
-        )
-    )
-
     application.add_error_handler(error_handler)
 
     logger.info("Bot starting...")
-    application.run_polling(
-        allowed_updates=Update.ALL_TYPES
-    )
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
