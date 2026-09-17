@@ -1,12 +1,10 @@
 import asyncio
-import math
-import shutil
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
-from config import FFMPEG_BIN, TEMP_DIR
+from config import FFMPEG_BIN
 from ffmpeg_utils import run_command
 
 REMOTE_HTTP_OPTIONS = [
@@ -85,6 +83,8 @@ def _frame_signatures(path, usable_regions=None):
         regions = [(0.0, 0.0, 1.0, 1.0)]
 
     signatures = [_signature(_crop_region(image, region)) for region in regions]
+    # Keep a full-frame signature as a fallback. This helps when Gemini's region
+    # is slightly too tight or when the source copy has a different crop.
     if len(regions) > 1 or regions[0] != (0.0, 0.0, 1.0, 1.0):
         signatures.append(_signature(image))
     return signatures
@@ -123,6 +123,7 @@ def _best_frame_match(target_groups, source_groups):
 def _sequence_score(target_groups, source_groups, source_times):
     if not target_groups or not source_groups:
         return None
+
     matches = []
     for target in target_groups:
         best_idx = -1
@@ -134,6 +135,7 @@ def _sequence_score(target_groups, source_groups, source_times):
                 best_idx = idx
         if best_idx >= 0:
             matches.append((best_idx, best_dist))
+
     if not matches:
         return None
 
@@ -163,12 +165,12 @@ async def _load_signatures(frame_paths, usable_regions=None):
     return groups
 
 
-async def _search_window(server_url, target_groups, start, duration, root, fps=1.0):
+async def _search_window(server_url, target_groups, usable_regions, start, duration, root, fps=1.0):
     source_dir = root / f"source_{int(start * 10)}"
     source_frames = await _extract_frames(
         server_url, source_dir, fps=fps, start=start, duration=duration, remote=True
     )
-    source_groups = await _load_signatures(source_frames)
+    source_groups = await _load_signatures(source_frames, usable_regions)
     if not source_groups:
         return None
     source_times = [start + i / fps for i in range(len(source_groups))]
@@ -183,7 +185,9 @@ async def find_visual_match(client, candidate, segment, target_video, job_dir, s
     target_frames = await _extract_frames(target_video, target_dir, fps=1.0)
     if not target_frames:
         return None
-    target_groups = await _load_signatures(target_frames, segment.get("usable_regions"))
+
+    usable_regions = segment.get("usable_regions") or []
+    target_groups = await _load_signatures(target_frames, usable_regions)
     if not target_groups:
         return None
 
@@ -196,15 +200,18 @@ async def find_visual_match(client, candidate, segment, target_video, job_dir, s
         hint = max(0.0, min(hint, max(0.0, source_duration - 1.0)))
 
     duration = max(1.0, float(segment["end_time"]) - float(segment["start_time"]))
-    window = max(30.0, min(75.0, duration * 4.0 + 15.0))
+    window = max(30.0, min(90.0, duration * 4.0 + 18.0))
+    max_start = max(0.0, source_duration - window)
+
     starts = []
     if hint is not None:
-        for delta in (0, -30, 30, -60, 60, -120, 120, -180, 180):
-            starts.append(max(0.0, min(hint + delta, max(0.0, source_duration - window))))
+        # First search tightly around Gemini's landmark estimate, then expand far
+        # enough to tolerate different intros/recaps/cuts between source copies.
+        for delta in (0, -15, 15, -30, 30, -60, 60, -120, 120, -180, 180, -300, 300, -480, 480):
+            starts.append(max(0.0, min(hint + delta, max_start)))
     else:
         step = max(20.0, window * 0.8)
-        count = min(36, max(8, int(source_duration / step) + 1))
-        max_start = max(0.0, source_duration - window)
+        count = min(48, max(10, int(source_duration / step) + 1))
         starts.extend(max_start * i / max(1, count - 1) for i in range(count))
 
     starts = list(dict.fromkeys(round(x, 1) for x in starts))
@@ -217,15 +224,21 @@ async def find_visual_match(client, candidate, segment, target_video, job_dir, s
                 result = await _search_window(
                     server.url,
                     target_groups,
+                    usable_regions,
                     start,
                     min(window, max(1.0, source_duration - start)),
                     job_dir,
                     fps=1.0,
                 )
-            except Exception as exc:
+            except Exception:
                 continue
+
             if result and (best is None or result["score"] < best["score"]):
                 best = result
+                # A very strong sequence match is unlikely to improve enough to
+                # justify more remote range requests.
+                if best["score"] <= 0.18 and best["progression"] >= 0.90:
+                    break
     finally:
         if server is not None:
             await server.close()
@@ -234,7 +247,7 @@ async def find_visual_match(client, candidate, segment, target_video, job_dir, s
         return None
 
     center = float(best["source_time"])
-    margin = max(8.0, min(18.0, duration * 0.75))
+    margin = max(8.0, min(20.0, duration * 0.75))
     start = max(0.0, center - margin)
     end = min(source_duration, center + margin + duration)
     return {
