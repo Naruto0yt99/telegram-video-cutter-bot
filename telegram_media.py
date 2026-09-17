@@ -24,7 +24,23 @@ def is_video_message(message):
     document = getattr(message, "document", None)
     if document:
         mime = getattr(document, "mime_type", "") or ""
-        return mime.startswith("video/")
+        if mime.startswith("video/"):
+            return True
+
+    # Telethon Message objects expose uploaded videos as
+    # message.media.document, while Bot API Update messages expose them as
+    # message.video/message.document. Support both representations because
+    # the range proxy reads the source through the Telethon USER_SESSION.
+    media = getattr(message, "media", None)
+    media_document = getattr(media, "document", None)
+    if media_document:
+        mime = getattr(media_document, "mime_type", "") or ""
+        if mime.startswith("video/"):
+            return True
+
+        for attribute in getattr(media_document, "attributes", []) or []:
+            if attribute.__class__.__name__.lower() == "documentattributevideo":
+                return True
 
     return False
 
@@ -41,6 +57,14 @@ def get_message_video_name(message):
         filename = getattr(video, "file_name", None)
         if filename:
             return safe_filename(filename)
+
+    media = getattr(message, "media", None)
+    media_document = getattr(media, "document", None)
+    if media_document:
+        for attribute in getattr(media_document, "attributes", []) or []:
+            filename = getattr(attribute, "file_name", None)
+            if filename:
+                return safe_filename(filename)
 
     return "telegram_video.mp4"
 
@@ -69,7 +93,7 @@ def read_remote_video_meta(path):
 async def download_bot_video(message, user_id):
     """Register an incoming Telegram video without downloading it.
 
-    The normal Bot API file download is intentionally NOT used here.  A tiny
+    The normal Bot API file download is intentionally NOT used here. A tiny
     metadata file is stored locally and the actual media is later read by the
     Telethon USER_SESSION through Telegram's range API when /clip or /split
     needs a portion of the video.
