@@ -8,7 +8,7 @@ from telegram_media import parse_telegram_message_link
 from telegram_remote import open_telegram_range_server, get_telegram_video_info
 from ffmpeg_utils import run_command, make_clip_exact, merge_videos
 from config import TEMP_DIR, FFMPEG_BIN
-from gemini_analyzer import analyze_video
+from gemini_analyzer import analyze_video, verify_candidate_window
 from visual_matcher import find_visual_match
 
 logger = logging.getLogger("find-engine")
@@ -29,7 +29,13 @@ def _candidate_quality_sources(anime, season, episode):
     if not sources:
         return []
     return [
-        {"anime": anime, "season": str(season), "episode": str(episode), "quality": q, "source_url": sources[q]}
+        {
+            "anime": anime,
+            "season": str(season),
+            "episode": str(episode),
+            "quality": q,
+            "source_url": sources[q],
+        }
         for q in MATCH_QUALITY_ORDER
         if q in sources
     ]
@@ -54,49 +60,63 @@ def _landmark_episode_priority(anime, segment):
     return []
 
 
+def _episode_sort_key(value):
+    try:
+        return int(str(value))
+    except Exception:
+        return 10**9
+
+
 def candidate_episodes(anime, season, episode, segment=None):
     if not anime:
         return []
 
+    seasons = get_seasons(anime)
     requested_season = str(season) if season is not None else None
     requested_episode = str(episode) if episode is not None else None
     priority_episodes = _landmark_episode_priority(anime, segment or {})
 
-    seasons = get_seasons(anime)
-    if requested_season in seasons:
-        ordered_seasons = [requested_season] + [s for s in seasons if s != requested_season]
-    else:
-        ordered_seasons = seasons
+    # When Gemini gives a concrete episode, do not scan the entire anime first.
+    # Search the requested episode, then a very small same-season neighborhood.
+    # This is the main protection against multi-hour remote scans.
+    if requested_season in seasons and requested_episode:
+        available = get_episodes(anime, requested_season)
+        ordered = []
+        if requested_episode in available:
+            ordered.append(requested_episode)
+        numbers = sorted(available, key=_episode_sort_key)
+        try:
+            pos = numbers.index(requested_episode)
+            ordered.extend(numbers[max(0, pos - 2):pos + 3])
+        except ValueError:
+            pass
+        result = []
+        seen = set()
+        for ep in ordered:
+            if ep in seen:
+                continue
+            seen.add(ep)
+            result.extend(_candidate_quality_sources(anime, requested_season, ep))
+        return result
 
+    # If the episode is unknown, use strong landmark priorities first and then
+    # scan the catalog in bounded batches. The caller stops as soon as a reliable
+    # match is found, so it no longer repeats every quality of every episode.
     candidates = []
     seen = set()
-
-    def add_episode(current_season, current_episode):
-        key = (str(anime).lower(), str(current_season), str(current_episode))
-        if key in seen:
-            return
-        seen.add(key)
-        candidates.extend(_candidate_quality_sources(anime, current_season, current_episode))
-
-    for current_season in ordered_seasons:
-        if requested_season is not None and current_season != requested_season:
-            continue
+    for current_season in seasons:
         available = get_episodes(anime, current_season)
-        for prioritized in priority_episodes:
-            if prioritized in available:
-                add_episode(current_season, prioritized)
-        if requested_episode is not None and requested_episode in available:
-            add_episode(current_season, requested_episode)
-
-    for current_season in ordered_seasons:
-        for current_episode in get_episodes(anime, current_season):
-            add_episode(current_season, current_episode)
-
-    logger.info(
-        "Candidate episodes for %s S%s E%s: %s source variants landmarks=%s",
-        anime, season if season is not None else "?", episode if episode is not None else "?",
-        len(candidates), priority_episodes,
-    )
+        ordered = []
+        for ep in priority_episodes:
+            if ep in available:
+                ordered.append(ep)
+        ordered.extend(sorted(available, key=_episode_sort_key))
+        for ep in ordered:
+            key = (str(current_season), str(ep))
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.extend(_candidate_quality_sources(anime, current_season, ep))
     return candidates
 
 
@@ -146,7 +166,7 @@ async def _materialize_match(client, candidate, match, segment, job_dir, index):
             await server.close()
 
 
-async def _try_candidate_visual(client, candidate, segment, job_dir, index):
+async def _try_candidate_visual(client, candidate, segment, target_video, job_dir, index):
     chat, message_id = parse_telegram_message_link(candidate["source_url"])
     try:
         _, source_duration, _ = await get_telegram_video_info(client, chat, message_id)
@@ -158,14 +178,17 @@ async def _try_candidate_visual(client, candidate, segment, job_dir, index):
         client=client,
         candidate=candidate,
         segment=segment,
-        target_video=job_dir / f"target_{index:03d}.mp4",
+        target_video=target_video,
         job_dir=job_dir,
         source_duration=source_duration,
     )
     if not match:
         return None
 
-    if match["score"] > 0.52 or match["progression"] < 0.55:
+    # Local retrieval is deliberately permissive; Gemini is the final judge for
+    # the one strongest visual candidate. This prevents false positives while
+    # avoiding Gemini uploads for every remote search window.
+    if match["score"] > 0.55 or match["progression"] < 0.50:
         logger.info(
             "Visual candidate rejected score=%.3f progression=%.3f candidate=%s S%s E%s",
             match["score"], match["progression"], candidate["anime"],
@@ -173,12 +196,63 @@ async def _try_candidate_visual(client, candidate, segment, job_dir, index):
         )
         return None
 
-    logger.info(
-        "Visual candidate accepted score=%.3f progression=%.3f source=%.2f-%.2f %s S%s E%s q=%s",
-        match["score"], match["progression"], match["start"], match["end"],
-        candidate["anime"], candidate["season"], candidate["episode"], candidate["quality"],
+    probe = job_dir / (
+        f"verify_{index:03d}_{int(float(match['start']) * 1000)}_"
+        f"{candidate['season']}_{candidate['episode']}.mp4"
     )
-    return await _materialize_match(client, candidate, match, segment, job_dir, index)
+    server = None
+    try:
+        server = await open_telegram_range_server(client, candidate["source_url"])
+        await _extract_remote_window(
+            server,
+            probe,
+            max(0.0, float(match["start"])),
+            max(2.0, float(match["end"]) - float(match["start"])),
+        )
+        verification = await verify_candidate_window(
+            candidate_video_path=probe,
+            segment=segment,
+            candidate_start=float(match["start"]),
+            candidate_end=float(match["end"]),
+            target_video_path=target_video,
+        )
+        if not bool(verification.get("match")) or float(verification.get("confidence", 0.0)) < 0.70:
+            logger.info(
+                "Gemini verification rejected candidate=%s S%s E%s confidence=%s reason=%s",
+                candidate["anime"], candidate["season"], candidate["episode"],
+                verification.get("confidence"), verification.get("reason"),
+            )
+            return None
+
+        verified_start = float(verification.get("start_time", 0.0))
+        verified_end = float(verification.get("end_time", verified_start + 1.0))
+        verified_start = max(0.0, min(verified_start, probe.stat().st_size and 10**9))
+        verified_end = max(verified_start + 0.2, verified_end)
+        clip = await make_clip_exact(
+            probe,
+            verified_start,
+            min(verified_end, await _probe_duration(probe)),
+            name=f"find_{index:03d}",
+        )
+        logger.info(
+            "Gemini verified candidate score=%.3f confidence=%.3f source=%s S%s E%s q=%s reason=%s",
+            match["score"], float(verification.get("confidence", 0.0)), candidate["anime"],
+            candidate["season"], candidate["episode"], candidate["quality"],
+            verification.get("reason"),
+        )
+        return clip
+    except Exception as exc:
+        logger.info("Gemini candidate verification failed: %s", exc)
+        return None
+    finally:
+        if server is not None:
+            await server.close()
+        probe.unlink(missing_ok=True)
+
+
+async def _probe_duration(path):
+    from ffmpeg_utils import get_duration
+    return await get_duration(path)
 
 
 async def _make_target_segment(input_video, segment, job_dir, index):
@@ -202,15 +276,18 @@ async def _process_segment(client, segment, index, job_dir, input_video):
         return None
 
     target_video = await _make_target_segment(input_video, segment, job_dir, index)
-    candidates = candidate_episodes(anime, segment.get("season"), segment.get("episode"), segment=segment)
+    candidates = candidate_episodes(
+        anime,
+        segment.get("season"),
+        segment.get("episode"),
+        segment=segment,
+    )
     if not candidates:
         target_video.unlink(missing_ok=True)
         return None
 
     tried_episodes = set()
     try:
-        # Each episode is searched once, using the lightest available quality. This
-        # prevents a failed episode from multiplying the remote search by 720/1080/etc.
         for candidate in candidates:
             episode_key = (candidate["season"], candidate["episode"])
             if episode_key in tried_episodes:
@@ -220,13 +297,20 @@ async def _process_segment(client, segment, index, job_dir, input_video):
                 "Visual search %s S%s E%s quality=%s",
                 candidate["anime"], candidate["season"], candidate["episode"], candidate["quality"],
             )
-            clip = await _try_candidate_visual(client, candidate, segment, job_dir, index)
+            clip = await _try_candidate_visual(
+                client=client,
+                candidate=candidate,
+                segment=segment,
+                target_video=target_video,
+                job_dir=job_dir,
+                index=index,
+            )
             if clip:
                 return {
                     "index": index,
                     "clip": clip,
-                    "confidence": 0.80,
-                    "reason": "Local visual retrieval match; Gemini used only for scene mapping and edit-region masking.",
+                    "confidence": 0.90,
+                    "reason": "Visual retrieval followed by Gemini final verification.",
                     "candidate": candidate,
                 }
     finally:
@@ -258,7 +342,7 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
             try:
                 await progress_message.edit_text(
                     f"🎯 FIND\n\nGemini analysis complete: {len(segments)} scenes\n"
-                    "Template/overlay regions masked. Local visual source search start..."
+                    "Template/overlay regions masked. Fast visual source search start..."
                 )
             except Exception:
                 pass
@@ -272,7 +356,7 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
                         await progress_message.edit_text(
                             f"🎯 FIND\n\nScene {index}/{len(segments)}\n"
                             f"{segment.get('anime') or 'Unknown'} S{segment.get('season') or '?'} E{segment.get('episode') or '?'}\n\n"
-                            "Local visual retrieval: Telegram remote range search..."
+                            "Fast visual retrieval + Gemini verification..."
                         )
                     except Exception:
                         pass
