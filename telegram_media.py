@@ -1,3 +1,4 @@
+import json
 import re
 from pathlib import Path
 
@@ -12,6 +13,8 @@ VIDEO_EXTENSIONS = (
     ".webm",
     ".avi",
 )
+
+REMOTE_META_SUFFIX = ".telegram_remote.json"
 
 
 def is_video_message(message):
@@ -42,41 +45,51 @@ def get_message_video_name(message):
     return "telegram_video.mp4"
 
 
-async def download_bot_video(message, user_id):
-    """Download a video received by python-telegram-bot.
+def _remote_meta_path(user_id, message_id):
+    user_dir = ensure_dir(Path(TEMP_DIR) / str(user_id))
+    return user_dir / f"telegram_{message_id}{REMOTE_META_SUFFIX}"
 
-    PTB media objects expose a file_id; the Bot API File object is obtained
-    through the Bot instance and then downloaded to the local destination.
+
+def is_remote_video_path(path):
+    return str(path).endswith(REMOTE_META_SUFFIX)
+
+
+def read_remote_video_meta(path):
+    path = Path(path)
+    if not is_remote_video_path(path):
+        raise ValueError("Ye Telegram remote video metadata nahi hai.")
+    if not path.exists():
+        raise RuntimeError("Telegram remote video metadata missing hai.")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if "chat_id" not in data or "message_id" not in data:
+        raise RuntimeError("Telegram remote video metadata invalid hai.")
+    return data
+
+
+async def download_bot_video(message, user_id):
+    """Register an incoming Telegram video without downloading it.
+
+    The normal Bot API file download is intentionally NOT used here.  A tiny
+    metadata file is stored locally and the actual media is later read by the
+    Telethon USER_SESSION through Telegram's range API when /clip or /split
+    needs a portion of the video.
     """
     if not is_video_message(message):
         raise ValueError("Telegram message me video nahi hai.")
 
-    user_dir = ensure_dir(Path(TEMP_DIR) / str(user_id))
-    filename = get_message_video_name(message)
+    chat_id = getattr(message, "chat_id", None)
+    message_id = getattr(message, "message_id", None)
+    if chat_id is None or message_id is None:
+        raise RuntimeError("Telegram message reference nahi mila.")
 
-    if not filename.lower().endswith(VIDEO_EXTENSIONS):
-        filename += ".mp4"
-
-    destination = user_dir / filename
-
-    media = getattr(message, "video", None) or getattr(message, "document", None)
-    if media is None:
-        raise ValueError("Telegram message me downloadable video nahi hai.")
-
-    file_id = getattr(media, "file_id", None)
-    if not file_id:
-        raise ValueError("Telegram video ka file_id nahi mila.")
-
-    bot = message.get_bot()
-    telegram_file = await bot.get_file(file_id)
-    await telegram_file.download_to_drive(custom_path=str(destination))
-
-    if not destination.exists():
-        raise RuntimeError("Telegram video download failed.")
-    if destination.stat().st_size == 0:
-        raise RuntimeError("Downloaded video empty hai.")
-
-    return destination
+    path = _remote_meta_path(user_id, message_id)
+    payload = {
+        "chat_id": int(chat_id),
+        "message_id": int(message_id),
+        "filename": get_message_video_name(message),
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
 
 
 def parse_telegram_message_link(url):
