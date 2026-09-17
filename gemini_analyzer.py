@@ -11,13 +11,12 @@ from config import GEMINI_API_KEY
 
 logger = logging.getLogger("gemini-analyzer")
 
+# 3.x is tried first, but the stable 2.5 Flash models are kept as hard fallbacks.
+# Gemini documents 503 as a temporary capacity/unavailable condition and recommends
+# switching models instead of repeatedly hammering the same backend.
 MODEL = "gemini-3.8-flash"
-FALLBACK_MODELS = ("gemini-3.7-flash", "gemini-3.6-flash")
+FALLBACK_MODELS = ("gemini-3.7-flash", "gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite")
 API_ROOT = "https://generativelanguage.googleapis.com"
-
-# A transient Gemini 503 should not make a FIND job spend several minutes
-# retrying the same model. One short retry per model is enough; the next model
-# is then tried immediately.
 MODEL_ATTEMPTS = 2
 RETRY_DELAYS = (2.0, 4.0)
 REQUEST_TIMEOUT = httpx.Timeout(connect=20.0, read=90.0, write=90.0, pool=20.0)
@@ -39,7 +38,6 @@ def _upload_file(path: Path):
         upload_url = start.headers.get("x-goog-upload-url")
         if not upload_url:
             raise RuntimeError("Gemini upload URL nahi mila.")
-
         with path.open("rb") as fh:
             response = client.post(
                 upload_url,
@@ -73,8 +71,7 @@ def _generate_sync(model: str, payload: dict):
             try:
                 response = client.post(
                     f"{API_ROOT}/v1beta/models/{model}:generateContent",
-                    headers=_headers(),
-                    json=payload,
+                    headers=_headers(), json=payload,
                 )
                 if response.status_code in (429, 500, 502, 503, 504):
                     last_error = RuntimeError(f"Gemini HTTP {response.status_code}")
@@ -107,6 +104,7 @@ def _generate_with_fallback(payload: dict):
     last_error = None
     for model in (MODEL, *FALLBACK_MODELS):
         try:
+            logger.info("Gemini generate model=%s", model)
             return _generate_sync(model, payload)
         except Exception as exc:
             last_error = exc
@@ -116,7 +114,10 @@ def _generate_with_fallback(payload: dict):
 
 def _analyze_uploaded(file_name: str, prompt: str):
     payload = {
-        "contents": [{"role": "user", "parts": [{"file_data": {"mime_type": "video/mp4", "file_uri": f"{API_ROOT}/v1beta/{file_name}"}}, {"text": prompt}]}],
+        "contents": [{"role": "user", "parts": [
+            {"file_data": {"mime_type": "video/mp4", "file_uri": f"{API_ROOT}/v1beta/{file_name}"}},
+            {"text": prompt},
+        ]}],
         "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
     }
     return _generate_with_fallback(payload)
@@ -125,14 +126,12 @@ def _analyze_uploaded(file_name: str, prompt: str):
 def analyze_video(path: Path):
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY missing")
-
     logger.info("Gemini upload: %s (%0.1f MB)", path.name, path.stat().st_size / 1024 / 1024)
     uploaded = _upload_file(path)
     name = uploaded.get("name")
     if not name:
         raise RuntimeError("Gemini file upload failed")
     _wait_file_active(name)
-
     prompt = """
 Analyze the entire uploaded anime edit and return ONLY valid JSON.
 Split the edit into every real source-scene region. Ignore intros, subtitles-only moments, black frames, effects-only transitions, and duplicate frames.
@@ -176,7 +175,6 @@ def _clean_regions(data):
 def verify_candidate_window(candidate_path: Path, target_path: Path, context: dict | None = None):
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY missing")
-
     candidate = _upload_file(candidate_path)
     target = _upload_file(target_path)
     candidate_name = candidate.get("name")
@@ -185,7 +183,6 @@ def verify_candidate_window(candidate_path: Path, target_path: Path, context: di
         raise RuntimeError("Gemini candidate upload failed")
     _wait_file_active(candidate_name)
     _wait_file_active(target_name)
-
     context_text = json.dumps(context or {}, ensure_ascii=False)
     prompt = f"""
 Compare the TARGET edit against the CANDIDATE SOURCE WINDOW.
