@@ -98,13 +98,7 @@ async def _read_range(client, media, start, end):
     last_error = None
     for request_size in (CHUNK_BYTES, RETRY_CHUNK_BYTES):
         try:
-            payload = await _read_range_once(
-                client,
-                media,
-                start,
-                end,
-                request_size,
-            )
+            payload = await _read_range_once(client, media, start, end, request_size)
             if len(payload) == expected:
                 return payload
             last_error = RuntimeError(
@@ -112,20 +106,13 @@ async def _read_range(client, media, start, end):
             )
             logger.warning(
                 "Short Telegram range read start=%s end=%s got=%s expected=%s request=%s",
-                start,
-                end,
-                len(payload),
-                expected,
-                request_size,
+                start, end, len(payload), expected, request_size,
             )
         except Exception as exc:
             last_error = exc
             logger.warning(
                 "Telegram range read failed start=%s end=%s request=%s: %s",
-                start,
-                end,
-                request_size,
-                exc,
+                start, end, request_size, exc,
             )
 
     raise last_error or RuntimeError("Telegram range read failed.")
@@ -145,10 +132,7 @@ class TelegramRangeServer:
 
     async def start(self):
         self.server = await asyncio.start_server(
-            self._handle,
-            host="127.0.0.1",
-            port=0,
-            limit=64 * 1024,
+            self._handle, host="127.0.0.1", port=0, limit=64 * 1024,
         )
         port = self.server.sockets[0].getsockname()[1]
         self.url = f"http://127.0.0.1:{port}/video.mp4"
@@ -206,7 +190,6 @@ class TelegramRangeServer:
                 raise RuntimeError(
                     f"Telegram returned {len(payload)} bytes, expected {content_length}."
                 )
-
             writer.write(payload)
             await writer.drain()
         except (asyncio.IncompleteReadError, ConnectionError, BrokenPipeError):
@@ -232,8 +215,7 @@ class TelegramRangeServer:
                 "Content-Type: text/plain\r\n"
                 f"Content-Length: {len(body)}\r\n"
                 "Connection: close\r\n\r\n"
-            ).encode()
-            + body
+            ).encode() + body
         )
         await writer.drain()
 
@@ -249,16 +231,20 @@ class TelegramRangeServer:
         await writer.drain()
 
 
-async def open_telegram_range_server(client, source_url):
-    chat, message_id = parse_telegram_message_link(source_url)
+async def open_telegram_message_range_server(client, chat, message_id):
+    """Open a range server for a video sent directly to the bot chat."""
     message, duration, size = await get_telegram_video_info(client, chat, message_id)
     server = TelegramRangeServer(client, message, duration, size)
     await server.start()
     return server
 
 
+async def open_telegram_range_server(client, source_url):
+    chat, message_id = parse_telegram_message_link(source_url)
+    return await open_telegram_message_range_server(client, chat, message_id)
+
+
 async def targeted_episode_window(client, source_url, user_id, target_time, window_seconds=8.0):
-    """Compatibility helper retained for callers using the old remote API."""
     server = await open_telegram_range_server(client, source_url)
     return {
         "url": server.url,
