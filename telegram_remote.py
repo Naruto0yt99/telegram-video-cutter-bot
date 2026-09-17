@@ -7,9 +7,9 @@ from telegram_media import parse_telegram_message_link, is_video_message
 
 logger = logging.getLogger("telegram-remote")
 
-CHUNK_BYTES = 1024 * 1024
+CHUNK_BYTES = 512 * 1024
 ALIGN_BYTES = 4096
-MAX_RANGE_BYTES = 32 * 1024 * 1024
+MAX_RANGE_BYTES = 8 * 1024 * 1024
 
 
 def _video_duration(message):
@@ -68,7 +68,7 @@ def _parse_range(header, size):
 
 
 async def _read_range(client, media, start, end):
-    """Read an exact byte range without creating a sparse fake media file."""
+    """Read an exact byte range without creating a full local episode file."""
     if end < start:
         return b""
 
