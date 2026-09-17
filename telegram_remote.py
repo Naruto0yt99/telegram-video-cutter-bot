@@ -3,7 +3,7 @@ import logging
 import re
 from urllib.parse import urlparse
 
-from telegram_media import parse_telegram_message_link, is_video_message
+from telegram_media import parse_telegram_message_link
 
 logger = logging.getLogger("telegram-remote")
 
@@ -13,9 +13,40 @@ ALIGN_BYTES = 4096
 MAX_RANGE_BYTES = 8 * 1024 * 1024
 
 
-def _video_duration(message):
+def _video_document(message):
+    """Return a Telegram/Telethon document when the message contains one."""
+    document = getattr(message, "document", None)
+    if document is not None:
+        return document
+
     media = getattr(message, "media", None)
     document = getattr(media, "document", None)
+    if document is not None:
+        return document
+
+    return None
+
+
+def _is_usable_video_message(message):
+    document = _video_document(message)
+    if document is None:
+        return False
+
+    mime = (getattr(document, "mime_type", "") or "").lower()
+    if mime.startswith("video/"):
+        return True
+
+    for attribute in getattr(document, "attributes", []) or []:
+        if attribute.__class__.__name__.lower() == "documentattributevideo":
+            return True
+        if getattr(attribute, "duration", None) is not None and hasattr(attribute, "w") and hasattr(attribute, "h"):
+            return True
+
+    return False
+
+
+def _video_duration(message):
+    document = _video_document(message)
     if document is None:
         return None
     for attribute in getattr(document, "attributes", []) or []:
@@ -26,19 +57,49 @@ def _video_duration(message):
 
 
 def _media_size(message):
-    media = getattr(message, "media", None)
-    document = getattr(media, "document", None)
-    size = getattr(document, "size", None)
-    if size:
-        return int(size)
+    document = _video_document(message)
+    if document is not None:
+        size = getattr(document, "size", None)
+        if size:
+            return int(size)
+
     size = getattr(getattr(message, "file", None), "size", None)
     return int(size) if size else None
 
 
 async def get_telegram_video_info(client, chat, message_id):
-    message = await client.get_messages(chat, ids=message_id)
-    if not message or not is_video_message(message):
-        raise RuntimeError("Telegram source message me usable video nahi hai.")
+    try:
+        message = await client.get_messages(chat, ids=message_id)
+    except Exception as exc:
+        logger.exception("Telegram source lookup failed chat=%r message_id=%r", chat, message_id)
+        raise RuntimeError(
+            f"Telegram source message access failed (chat={chat}, message={message_id}): {exc}"
+        ) from exc
+
+    if not message:
+        raise RuntimeError(
+            f"Telegram source message nahi mila (chat={chat}, message={message_id}). "
+            "USER_SESSION account ko is chat/message ka access nahi hai."
+        )
+
+    if not _is_usable_video_message(message):
+        document = _video_document(message)
+        mime = getattr(document, "mime_type", None) if document else None
+        media_type = type(getattr(message, "media", None)).__name__
+        logger.error(
+            "Telegram source is not a usable video: chat=%r message_id=%r message_type=%s media_type=%s document=%s mime=%r",
+            chat,
+            message_id,
+            type(message).__name__,
+            media_type,
+            type(document).__name__ if document else None,
+            mime,
+        )
+        raise RuntimeError(
+            "Telegram source message me usable video nahi hai "
+            f"(chat={chat}, message={message_id}, media={media_type}, mime={mime!r})."
+        )
+
     duration = _video_duration(message)
     size = _media_size(message)
     if not duration or duration <= 0:
