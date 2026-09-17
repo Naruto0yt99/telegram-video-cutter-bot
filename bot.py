@@ -445,8 +445,8 @@ async def clip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             source_url = get_best_source(anime, season, episode)
             if not source_url:
                 raise ValueError("Source episode library me nahi mila.")
-            if telethon_client is None:
-                raise ValueError("Telegram source client connected nahi hai.")
+            from telethon_runtime import ensure_telethon_client
+            source_client = await ensure_telethon_client()
             source_mode = True
             input_path = None
         else:
@@ -457,7 +457,7 @@ async def clip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if source_mode:
             output = unique_source_clip_path(user_id, anime, season, episode)
-            await _extract_remote_clip(telethon_client, source_url, start, end, output)
+            await _extract_remote_clip(source_client, source_url, start, end, output)
             caption = f"✂️ {anime} S{season} E{episode} {format_time(start)} - {format_time(end)}"
             await send_file(update, output, caption)
             return
