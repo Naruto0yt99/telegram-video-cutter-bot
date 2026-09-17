@@ -29,24 +29,16 @@ def _candidate_quality_sources(anime, season, episode):
     if not sources:
         return []
     return [
-        {
-            "anime": anime,
-            "season": str(season),
-            "episode": str(episode),
-            "quality": q,
-            "source_url": sources[q],
-        }
+        {"anime": anime, "season": str(season), "episode": str(episode), "quality": q, "source_url": sources[q]}
         for q in MATCH_QUALITY_ORDER
         if q in sources
     ]
 
 
 def _landmark_episode_priority(anime, segment):
-    """Return exact-episode priorities when strong visual landmarks support them."""
     name = str(anime or "").lower().replace("-", " ")
     if "naruto" not in name or "shippuden" in name:
         return []
-
     text = " ".join([
         str(segment.get("arc") or ""),
         " ".join(segment.get("landmarks") or []),
@@ -86,7 +78,6 @@ def candidate_episodes(anime, season, episode, segment=None):
         seen.add(key)
         candidates.extend(_candidate_quality_sources(anime, current_season, current_episode))
 
-    # Strong visual landmarks first, then Gemini's episode guess.
     for current_season in ordered_seasons:
         if requested_season is not None and current_season != requested_season:
             continue
@@ -97,19 +88,14 @@ def candidate_episodes(anime, season, episode, segment=None):
         if requested_episode is not None and requested_episode in available:
             add_episode(current_season, requested_episode)
 
-    # If the first episode guess is wrong, the matcher can escape it. Search all
-    # indexed episodes only after the high-value exact guesses.
     for current_season in ordered_seasons:
         for current_episode in get_episodes(anime, current_season):
             add_episode(current_season, current_episode)
 
     logger.info(
         "Candidate episodes for %s S%s E%s: %s source variants landmarks=%s",
-        anime,
-        season if season is not None else "?",
-        episode if episode is not None else "?",
-        len(candidates),
-        priority_episodes,
+        anime, season if season is not None else "?", episode if episode is not None else "?",
+        len(candidates), priority_episodes,
     )
     return candidates
 
@@ -118,20 +104,11 @@ async def _extract_remote_window(server, output_path, source_start, duration):
     duration = max(1.0, float(duration))
     source_start = max(0.0, float(source_start))
     await run_command(
-        FFMPEG_BIN,
-        "-y",
-        *REMOTE_HTTP_OPTIONS,
-        "-ss", str(source_start),
-        "-i", server.url,
-        "-t", str(duration),
-        "-map", "0:v:0?",
-        "-map", "0:a:0?",
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-crf", "18",
-        "-c:a", "aac",
-        "-movflags", "+faststart",
-        str(output_path),
+        FFMPEG_BIN, "-y", *REMOTE_HTTP_OPTIONS,
+        "-ss", str(source_start), "-i", server.url, "-t", str(duration),
+        "-map", "0:v:0?", "-map", "0:a:0?",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+        "-c:a", "aac", "-movflags", "+faststart", str(output_path),
     )
 
 
@@ -149,11 +126,10 @@ async def _materialize_match(client, candidate, match, segment, job_dir, index):
         if not probe.exists() or probe.stat().st_size == 0:
             return None
 
-        # The local matcher gives the source window itself. Cut the center using the
-        # edited scene duration; this avoids another Gemini upload/verification pass.
         target_duration = max(0.2, float(segment["end_time"]) - float(segment["start_time"]))
-        center = (source_end - source_start) / 2.0
-        local_start = max(0.0, center - target_duration / 2.0)
+        center = float(match.get("center", source_start + (source_end - source_start) / 2.0))
+        local_center = max(0.0, center - source_start)
+        local_start = max(0.0, local_center - target_duration / 2.0)
         local_end = min(source_end - source_start, local_start + target_duration)
         if local_end - local_start < 0.2:
             return None
@@ -189,9 +165,6 @@ async def _try_candidate_visual(client, candidate, segment, job_dir, index):
     if not match:
         return None
 
-    # Lower score is better. The matcher is deliberately conservative; weak matches
-    # are allowed to fall through to the next episode/quality rather than producing a
-    # random clip.
     if match["score"] > 0.52 or match["progression"] < 0.55:
         logger.info(
             "Visual candidate rejected score=%.3f progression=%.3f candidate=%s S%s E%s",
@@ -213,19 +186,9 @@ async def _make_target_segment(input_video, segment, job_dir, index):
     duration = max(0.2, float(segment["end_time"]) - start)
     target = job_dir / f"target_{index:03d}.mp4"
     await run_command(
-        FFMPEG_BIN,
-        "-y",
-        "-ss", str(start),
-        "-i", str(input_video),
-        "-t", str(duration),
-        "-map", "0:v:0?",
-        "-map", "0:a:0?",
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-crf", "20",
-        "-c:a", "aac",
-        "-movflags", "+faststart",
-        str(target),
+        FFMPEG_BIN, "-y", "-ss", str(start), "-i", str(input_video), "-t", str(duration),
+        "-map", "0:v:0?", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "ultrafast",
+        "-crf", "20", "-c:a", "aac", "-movflags", "+faststart", str(target),
     )
     if not target.exists() or target.stat().st_size == 0:
         raise RuntimeError("Target edit scene extraction failed.")
@@ -239,20 +202,20 @@ async def _process_segment(client, segment, index, job_dir, input_video):
         return None
 
     target_video = await _make_target_segment(input_video, segment, job_dir, index)
-    candidates = candidate_episodes(
-        anime,
-        segment.get("season"),
-        segment.get("episode"),
-        segment=segment,
-    )
+    candidates = candidate_episodes(anime, segment.get("season"), segment.get("episode"), segment=segment)
     if not candidates:
         target_video.unlink(missing_ok=True)
         return None
 
+    tried_episodes = set()
     try:
-        # Search one source quality per episode at a time. The visual matcher does not
-        # need the highest quality, and 720p is usually a good speed/quality balance.
+        # Each episode is searched once, using the lightest available quality. This
+        # prevents a failed episode from multiplying the remote search by 720/1080/etc.
         for candidate in candidates:
+            episode_key = (candidate["season"], candidate["episode"])
+            if episode_key in tried_episodes:
+                continue
+            tried_episodes.add(episode_key)
             logger.info(
                 "Visual search %s S%s E%s quality=%s",
                 candidate["anime"], candidate["season"], candidate["episode"], candidate["quality"],
@@ -262,7 +225,7 @@ async def _process_segment(client, segment, index, job_dir, input_video):
                 return {
                     "index": index,
                     "clip": clip,
-                    "confidence": max(0.0, min(1.0, 1.0 - float(0.5 * 0.52))),
+                    "confidence": 0.80,
                     "reason": "Local visual retrieval match; Gemini used only for scene mapping and edit-region masking.",
                     "candidate": candidate,
                 }
@@ -279,8 +242,6 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
     if not input_video.exists():
         raise RuntimeError("Input video nahi mila.")
 
-    # Gemini is called exactly once for the uploaded edit. It identifies scenes and
-    # tells the local matcher which screen regions are actual anime footage.
     segments = await analyze_video(input_video)
     if not segments:
         raise RuntimeError("Gemini ko koi usable anime segment nahi mila.")
@@ -310,8 +271,7 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
                     try:
                         await progress_message.edit_text(
                             f"🎯 FIND\n\nScene {index}/{len(segments)}\n"
-                            f"{segment.get('anime') or 'Unknown'} "
-                            f"S{segment.get('season') or '?'} E{segment.get('episode') or '?'}\n\n"
+                            f"{segment.get('anime') or 'Unknown'} S{segment.get('season') or '?'} E{segment.get('episode') or '?'}\n\n"
                             "Local visual retrieval: Telegram remote range search..."
                         )
                     except Exception:
