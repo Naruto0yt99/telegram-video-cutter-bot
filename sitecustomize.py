@@ -71,3 +71,39 @@ try:
     _CommandHandler.__init__ = _patched_command_handler_init
 except Exception:
     pass
+
+# Telethon's default SQLite session is single-writer.  The bot can otherwise
+# crash at startup with "sqlite3.OperationalError: database is locked" when a
+# stale/helper process has the canonical session open.  Give this bot its own
+# runtime copy of an already-authenticated session so Telegram bot polling is
+# independent from other Telethon/Pyrogram workers.  The canonical session is
+# still used as the source for each fresh bot process.
+try:
+    import os as _telethon_os
+    import shutil as _telethon_shutil
+    from pathlib import Path as _telethon_Path
+    from telethon import TelegramClient as _TelegramClient
+
+    _original_telegram_client_init = _TelegramClient.__init__
+
+    def _isolated_telegram_client_init(self, session, *args, **kwargs):
+        try:
+            if isinstance(session, (str, _telethon_Path)):
+                source = _telethon_Path(str(session))
+                source_file = source if source.suffix == ".session" else _telethon_Path(str(source) + ".session")
+                if source_file.exists():
+                    runtime_dir = source_file.parent / "runtime_sessions"
+                    runtime_dir.mkdir(parents=True, exist_ok=True)
+                    runtime_file = runtime_dir / f"bot_{_telethon_os.getpid()}.session"
+                    if not runtime_file.exists():
+                        _telethon_shutil.copy2(source_file, runtime_file)
+                    session = str(runtime_file)
+        except Exception:
+            # Never prevent normal Telethon startup if isolation cannot be
+            # prepared (for example on a first login before a .session exists).
+            pass
+        return _original_telegram_client_init(self, session, *args, **kwargs)
+
+    _TelegramClient.__init__ = _isolated_telegram_client_init
+except Exception:
+    pass
