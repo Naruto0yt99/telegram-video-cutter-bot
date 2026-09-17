@@ -13,12 +13,13 @@ from database import get_animes
 
 logger = logging.getLogger("gemini-analyzer")
 
-MODEL = "gemini-3.8-flash"
-FALLBACK_MODELS = ("gemini-3.7-flash", "gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite")
+# Fast multimodal model first. The 3.5 Flash-Lite model is designed for
+# low-latency/high-throughput work; heavier models are only fallbacks.
+MODEL = "gemini-3.5-flash-lite"
+FALLBACK_MODELS = ("gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash")
 API_ROOT = "https://generativelanguage.googleapis.com"
-MODEL_ATTEMPTS = 2
-RETRY_DELAYS = (2.0, 4.0)
-REQUEST_TIMEOUT = httpx.Timeout(connect=20.0, read=90.0, write=90.0, pool=20.0)
+MODEL_ATTEMPTS = 1
+REQUEST_TIMEOUT = httpx.Timeout(connect=20.0, read=90.0, write=120.0, pool=20.0)
 
 
 def _headers():
@@ -58,7 +59,7 @@ def _upload_file(path: Path):
 
 
 def _wait_file_active(name: str):
-    deadline = time.monotonic() + 60.0
+    deadline = time.monotonic() + 45.0
     with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
         while time.monotonic() < deadline:
             response = client.get(f"{API_ROOT}/v1beta/{name}", headers=_headers())
@@ -69,40 +70,24 @@ def _wait_file_active(name: str):
                 return data
             if state == "FAILED":
                 raise RuntimeError("Gemini video processing failed.")
-            time.sleep(1.5)
+            time.sleep(1.0)
     raise TimeoutError("Gemini video processing timed out.")
 
 
 def _generate_sync(model: str, payload: dict):
     last_error = None
     with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
-        for attempt in range(1, MODEL_ATTEMPTS + 1):
-            try:
-                response = client.post(
-                    f"{API_ROOT}/v1beta/models/{model}:generateContent",
-                    headers=_headers(),
-                    json=payload,
-                )
-                if response.status_code in (429, 500, 502, 503, 504):
-                    last_error = RuntimeError(f"Gemini HTTP {response.status_code}")
-                    logger.warning(
-                        "Gemini transient error model=%s status=%s attempt=%s/%s",
-                        model, response.status_code, attempt, MODEL_ATTEMPTS,
-                    )
-                    if attempt < MODEL_ATTEMPTS:
-                        time.sleep(RETRY_DELAYS[attempt - 1])
-                        continue
-                    break
-                response.raise_for_status()
-                return response.json()
-            except (httpx.HTTPError, RuntimeError) as exc:
-                last_error = exc
-                if attempt < MODEL_ATTEMPTS:
-                    logger.warning(
-                        "Gemini request error model=%s attempt=%s/%s: %s",
-                        model, attempt, MODEL_ATTEMPTS, exc,
-                    )
-                    time.sleep(RETRY_DELAYS[attempt - 1])
+        try:
+            response = client.post(
+                f"{API_ROOT}/v1beta/models/{model}:generateContent",
+                headers=_headers(),
+                json=payload,
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPError as exc:
+            last_error = exc
+            logger.warning("Gemini request failed model=%s: %s", model, exc)
     raise last_error or RuntimeError("Gemini request failed")
 
 
@@ -124,7 +109,7 @@ def _generate_with_fallback(payload: dict):
             return _generate_sync(model, payload)
         except Exception as exc:
             last_error = exc
-            logger.warning("Gemini model %s exhausted: %s", model, exc)
+            logger.warning("Gemini model %s failed: %s", model, exc)
     raise last_error or RuntimeError("All Gemini models failed")
 
 
@@ -166,28 +151,15 @@ def _catalog_text():
 
 def _analysis_prompt(catalog: str):
     return f"""
-You are a SIMPLE anime clip timestamp detector.
-Watch the ENTIRE uploaded YouTube edit and identify every contiguous anime clip in it.
-Do not do visual source matching, candidate searching, fingerprinting or verification.
-Your only job is to tell the bot approximately where each clip comes from.
+Watch the uploaded YouTube anime edit and list every contiguous anime clip.
+Do ONLY timestamp identification. Do not search, compare, fingerprint, verify, or explain.
+For each clip return the closest catalog anime, season, episode, approximate START time in the original episode, and the clip start/end inside the uploaded edit.
+Use seconds as numbers. Best-effort timestamps are required; a few seconds of offset is acceptable.
+Return ONLY JSON.
 
-For every anime clip, give:
-- anime: closest exact name from the catalog below
-- season: source season number
-- episode: source episode number
-- source_start_hint: approximate START timestamp inside the original episode
-- start_time/end_time: start/end timestamps of that clip inside the uploaded edit
-- confidence: your confidence
+Catalog: {catalog}
 
-The source_start_hint is REQUIRED whenever you can identify the episode. Never leave it null if an approximate timestamp can be estimated.
-Use seconds as numbers for all timestamps. Example: 12:35 = 755.
-If you are unsure by a few seconds, still give your best approximate timestamp. Do NOT refuse a scene just because the timestamp may be shifted.
-
-Source catalog:
-{catalog}
-
-Return ONLY this JSON shape:
-{{"regions":[{{"start_time":0.0,"end_time":5.0,"anime":"NARUTO","season":1,"episode":27,"source_start_hint":755.0,"confidence":0.9}}]}}
+{{"regions":[{{"start_time":0,"end_time":5,"anime":"NARUTO","season":1,"episode":27,"source_start_hint":755,"confidence":0.9}}]}}
 """
 
 
