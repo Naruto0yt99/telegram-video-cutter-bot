@@ -3,7 +3,7 @@ import logging
 import shutil
 from pathlib import Path
 
-from database import get_seasons, get_episodes, get_all_sources_for_episode, get_best_source
+from database import get_seasons, get_episodes, get_all_sources_for_episode
 from telegram_media import parse_telegram_message_link
 from telegram_remote import open_telegram_range_server, get_telegram_video_info
 from ffmpeg_utils import run_command, make_clip_exact, merge_videos
@@ -214,8 +214,19 @@ def candidate_episodes(anime, season, episode, segment=None):
     if not anime:
         return []
 
-    seasons = [str(season)] if season is not None else get_seasons(anime)
+    # Gemini's season/episode is evidence, not a hard constraint.  A wrong episode
+    # guess was previously fatal because the search never escaped that exact episode.
+    # Search the predicted episode first, then broaden to the rest of the same anime.
+    requested_season = str(season) if season is not None else None
+    requested_episode = str(episode) if episode is not None else None
     priority_episodes = _landmark_episode_priority(anime, segment or {})
+
+    seasons = get_seasons(anime)
+    if requested_season in seasons:
+        ordered_seasons = [requested_season] + [s for s in seasons if s != requested_season]
+    else:
+        ordered_seasons = seasons
+
     candidates = []
     seen = set()
 
@@ -228,19 +239,27 @@ def candidate_episodes(anime, season, episode, segment=None):
         if sources:
             candidates.extend(sources)
 
-    for current_season in seasons:
+    # Strong landmarks go before Gemini's episode guess when they identify a known
+    # Naruto Part 1 scene, even if Gemini returned a mistaken episode number.
+    for current_season in ordered_seasons:
+        if requested_season is not None and current_season != requested_season:
+            continue
         available = get_episodes(anime, current_season)
-        if priority_episodes and season is None:
-            for prioritized in priority_episodes:
-                if prioritized in available:
-                    add_episode(current_season, prioritized)
+        for prioritized in priority_episodes:
+            if prioritized in available:
+                add_episode(current_season, prioritized)
 
-        episodes = [str(episode)] if episode is not None else available
-        for current_episode in episodes:
+        if requested_episode is not None and requested_episode in available:
+            add_episode(current_season, requested_episode)
+
+    # Only after the high-value exact guesses, widen to every indexed episode.
+    # This makes episode-number errors recoverable while preserving speed for good guesses.
+    for current_season in ordered_seasons:
+        for current_episode in get_episodes(anime, current_season):
             add_episode(current_season, current_episode)
 
     logger.info(
-        "Candidate episodes for %s S%s E%s: %s source variants landmarks=%s",
+        "Candidate episodes for %s S%s E%s: %s source variants landmarks=%s broad_search=True",
         anime,
         season if season is not None else "?",
         episode if episode is not None else "?",
