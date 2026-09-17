@@ -40,17 +40,19 @@ def _remote_meta(path):
     return read_remote_video_meta(path)
 
 
+async def _remote_client():
+    from telethon_runtime import ensure_telethon_client
+    return await ensure_telethon_client()
+
+
 async def _remote_clip(input_path, start, end, output):
     """Extract a clip from a Telegram video without downloading the source."""
-    import bot as bot_module
     from telegram_remote import open_telegram_message_range_server
 
-    if bot_module.telethon_client is None:
-        raise RuntimeError("Telegram USER_SESSION client connected nahi hai.")
-
+    client = await _remote_client()
     meta = _remote_meta(input_path)
     server = await open_telegram_message_range_server(
-        bot_module.telethon_client,
+        client,
         meta["chat_id"],
         meta["message_id"],
     )
@@ -77,15 +79,12 @@ async def _remote_clip(input_path, start, end, output):
 
 
 async def _remote_video_info(input_path):
-    import bot as bot_module
     from telegram_remote import get_telegram_video_info
 
-    if bot_module.telethon_client is None:
-        raise RuntimeError("Telegram USER_SESSION client connected nahi hai.")
-
+    client = await _remote_client()
     meta = _remote_meta(input_path)
     _, duration, size = await get_telegram_video_info(
-        bot_module.telethon_client,
+        client,
         meta["chat_id"],
         meta["message_id"],
     )
