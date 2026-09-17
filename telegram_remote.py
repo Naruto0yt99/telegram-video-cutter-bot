@@ -7,9 +7,9 @@ from telegram_media import parse_telegram_message_link, is_video_message
 
 logger = logging.getLogger("telegram-remote")
 
-CHUNK_BYTES = 512 * 1024
+CHUNK_BYTES = 1024 * 1024
 ALIGN_BYTES = 4096
-MAX_RANGE_BYTES = 8 * 1024 * 1024
+MAX_RANGE_BYTES = 32 * 1024 * 1024
 
 
 def _video_duration(message):
@@ -162,12 +162,7 @@ class TelegramRangeServer:
             if method == "HEAD":
                 return
 
-            payload = await _read_range(
-                self.client,
-                self.media,
-                start,
-                end,
-            )
+            payload = await _read_range(self.client, self.media, start, end)
             if len(payload) != content_length:
                 raise RuntimeError(
                     f"Telegram returned {len(payload)} bytes, expected {content_length}."
