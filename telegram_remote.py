@@ -8,6 +8,7 @@ from telegram_media import parse_telegram_message_link, is_video_message
 logger = logging.getLogger("telegram-remote")
 
 CHUNK_BYTES = 512 * 1024
+RETRY_CHUNK_BYTES = 128 * 1024
 ALIGN_BYTES = 4096
 MAX_RANGE_BYTES = 8 * 1024 * 1024
 
@@ -67,11 +68,7 @@ def _parse_range(header, size):
     return start, end
 
 
-async def _read_range(client, media, start, end):
-    """Read an exact byte range without creating a full local episode file."""
-    if end < start:
-        return b""
-
+async def _read_range_once(client, media, start, end, request_size):
     aligned_start = (start // ALIGN_BYTES) * ALIGN_BYTES
     needed = end - aligned_start + 1
     result = bytearray()
@@ -79,8 +76,8 @@ async def _read_range(client, media, start, end):
     async for chunk in client.iter_download(
         media,
         offset=aligned_start,
-        request_size=CHUNK_BYTES,
-        chunk_size=CHUNK_BYTES,
+        request_size=request_size,
+        chunk_size=request_size,
     ):
         if not chunk:
             break
@@ -90,6 +87,48 @@ async def _read_range(client, media, start, end):
 
     trim_start = start - aligned_start
     return bytes(result[trim_start : trim_start + (end - start + 1)])
+
+
+async def _read_range(client, media, start, end):
+    """Read an exact byte range from Telegram with a smaller-chunk retry."""
+    if end < start:
+        return b""
+
+    expected = end - start + 1
+    last_error = None
+    for request_size in (CHUNK_BYTES, RETRY_CHUNK_BYTES):
+        try:
+            payload = await _read_range_once(
+                client,
+                media,
+                start,
+                end,
+                request_size,
+            )
+            if len(payload) == expected:
+                return payload
+            last_error = RuntimeError(
+                f"Telegram returned {len(payload)} bytes, expected {expected}."
+            )
+            logger.warning(
+                "Short Telegram range read start=%s end=%s got=%s expected=%s request=%s",
+                start,
+                end,
+                len(payload),
+                expected,
+                request_size,
+            )
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "Telegram range read failed start=%s end=%s request=%s: %s",
+                start,
+                end,
+                request_size,
+                exc,
+            )
+
+    raise last_error or RuntimeError("Telegram range read failed.")
 
 
 class TelegramRangeServer:
