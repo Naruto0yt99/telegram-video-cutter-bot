@@ -149,7 +149,9 @@ def loop_runner():
     LOOP.run_forever()
 
 def submit(coro):
-    return asyncio.run_coroutine_threadsafe(coro, LOOP).result()
+    async def wait_any(awaitable):
+        return await awaitable
+    return asyncio.run_coroutine_threadsafe(wait_any(coro), LOOP).result()
 
 def size_of(message):
     size = getattr(getattr(message, "file", None), "size", None)
