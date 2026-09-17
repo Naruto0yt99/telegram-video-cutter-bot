@@ -80,8 +80,6 @@ try:
 
     def _patched_application_add_handler(self, handler, group=0):
         result = _original_application_add_handler(self, handler, group=group)
-        if isinstance(handler, _RandomCommandHandler):
-            return result
         try:
             commands = getattr(handler, "commands", set()) or set()
             normalized = {str(value).lower() for value in commands}
