@@ -171,30 +171,30 @@ def _catalog_text():
     return ", ".join(str(name) for name in names[:80]) or "No catalog available"
 
 
-def _analysis_prompt(catalog: str, compact=False):
-    detail = "" if compact else "\nUse visual landmarks, character identities, costumes, locations, arc events and known episode boundaries."
+def _analysis_prompt(catalog: str):
     return f"""
-You are the scene-identification engine for an anime clip retrieval system.
-Analyze the ENTIRE uploaded edit carefully. Do not guess from one frame.
-{detail}
+You are a SIMPLE anime clip timestamp detector.
+Watch the ENTIRE uploaded YouTube edit and identify every contiguous anime clip in it.
+Do not do visual source matching, candidate searching, fingerprinting or verification.
+Your only job is to tell the bot approximately where each clip comes from.
 
-The source library currently contains these anime names:
+For every anime clip, give:
+- anime: closest exact name from the catalog below
+- season: source season number
+- episode: source episode number
+- source_start_hint: approximate START timestamp inside the original episode
+- start_time/end_time: start/end timestamps of that clip inside the uploaded edit
+- confidence: your confidence
+
+The source_start_hint is REQUIRED whenever you can identify the episode. Never leave it null if an approximate timestamp can be estimated.
+Use seconds as numbers for all timestamps. Example: 12:35 = 755.
+If you are unsure by a few seconds, still give your best approximate timestamp. Do NOT refuse a scene just because the timestamp may be shifted.
+
+Source catalog:
 {catalog}
 
-For every contiguous region that contains actual anime footage, return one region.
-Do NOT discard a region merely because episode or timestamp is uncertain. The bot can search the source catalog when those fields are unknown.
-Anime should be the closest name from the catalog whenever possible. Season and episode may be null.
-source_start_hint is only a search hint and may be null.
-start_time/end_time are timestamps in THIS uploaded edit.
-Handle speed ramps, reverse playback, mirror, crop, zoom, color grading, overlays and transitions.
-Separate genuinely different source scenes even when the same anime is used.
-
-Return ONLY JSON in this exact shape:
-{{"regions":[{{"start_time":0.0,"end_time":5.0,"anime":"NARUTO","season":1,"episode":27,"source_start_hint":123.0,"confidence":0.9,"landmarks":["..."],"arc":"...","reason":"..."}}]}}
-
-If the anime is recognizable but episode is uncertain, still return the region with episode=null.
-If a short transition contains usable source frames, include it with a conservative time range.
-For Naruto Forest of Death entry/setup landmarks, remember that original Naruto episode 27 covers the Chunin Exam Stage 2 / Forest of Death setup immediately before or at the forest gates; episode 28 continues the subsequent early-forest action.
+Return ONLY this JSON shape:
+{{"regions":[{{"start_time":0.0,"end_time":5.0,"anime":"NARUTO","season":1,"episode":27,"source_start_hint":755.0,"confidence":0.9}}]}}
 """
 
 
@@ -209,27 +209,39 @@ def _analyze_video_sync(path: Path):
     _wait_file_active(name)
 
     catalog = _catalog_text()
-    prompts = [
-        _analysis_prompt(catalog, compact=False),
-        _analysis_prompt(catalog, compact=True),
-    ]
+    prompt = _analysis_prompt(catalog)
+    logger.info("Gemini simple scene-analysis pass=1")
+    data = _generate_video_prompt(name, prompt, temperature=0.0)
+    text = _text_from_response(data)
+    parsed = _parse_json(text)
+    regions = parsed.get("regions") if isinstance(parsed, dict) else None
+    if not isinstance(regions, list) or not regions:
+        raise RuntimeError("Gemini returned no usable anime regions")
+    return parsed
 
-    last_error = None
-    for index, prompt in enumerate(prompts, 1):
+
+def _parse_time_value(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    if ":" in text:
+        parts = text.split(":")
         try:
-            logger.info("Gemini scene-analysis pass=%s", index)
-            data = _generate_video_prompt(name, prompt, temperature=0.0)
-            text = _text_from_response(data)
-            parsed = _parse_json(text)
-            regions = parsed.get("regions") if isinstance(parsed, dict) else None
-            if isinstance(regions, list) and regions:
-                return parsed
-            logger.warning("Gemini scene-analysis pass=%s returned no regions", index)
-        except Exception as exc:
-            last_error = exc
-            logger.warning("Gemini scene-analysis pass=%s failed: %s", index, exc)
-
-    raise last_error or RuntimeError("Gemini returned no usable anime regions")
+            numbers = [float(part) for part in parts]
+        except ValueError:
+            return None
+        if len(numbers) == 2:
+            return numbers[0] * 60.0 + numbers[1]
+        if len(numbers) == 3:
+            return numbers[0] * 3600.0 + numbers[1] * 60.0 + numbers[2]
+    try:
+        return float(text)
+    except ValueError:
+        return None
 
 
 def _clean_regions(data):
@@ -238,31 +250,25 @@ def _clean_regions(data):
     for item in regions:
         if not isinstance(item, dict):
             continue
-        try:
-            start = float(item.get("start_time", 0))
-            end = float(item.get("end_time", start))
-        except (TypeError, ValueError):
+        start = _parse_time_value(item.get("start_time"))
+        end = _parse_time_value(item.get("end_time"))
+        if start is None or end is None or end <= start:
             continue
-        if end <= start:
-            continue
+
         anime = item.get("anime")
         if isinstance(anime, str):
             anime = anime.strip()
-        season = item.get("season")
-        episode = item.get("episode")
+
         for key in ("season", "episode"):
             value = item.get(key)
             if value is not None:
                 try:
                     item[key] = int(value)
                 except (TypeError, ValueError):
-                    item[key] = None
-        hint = item.get("source_start_hint")
-        if hint is not None:
-            try:
-                item["source_start_hint"] = float(hint)
-            except (TypeError, ValueError):
-                item["source_start_hint"] = None
+                    match = re.search(r"\d+", str(value))
+                    item[key] = int(match.group()) if match else None
+
+        item["source_start_hint"] = _parse_time_value(item.get("source_start_hint"))
         cleaned.append({
             **item,
             "anime": anime,
@@ -270,6 +276,7 @@ def _clean_regions(data):
             "end_time": end,
             "confidence": float(item.get("confidence", 0.0) or 0.0),
         })
+
     cleaned.sort(key=lambda x: x["start_time"])
     return cleaned
 
@@ -277,56 +284,3 @@ def _clean_regions(data):
 async def analyze_video(path: Path):
     raw = await asyncio.to_thread(_analyze_video_sync, path)
     return _clean_regions(raw)
-
-
-def _verify_candidate_window_sync(candidate_path: Path, target_path: Path, context: dict | None = None):
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY missing")
-    candidate = _upload_file(candidate_path)
-    target = _upload_file(target_path)
-    candidate_name = candidate.get("name")
-    target_name = target.get("name")
-    if not candidate_name or not target_name:
-        raise RuntimeError("Gemini candidate upload failed")
-    _wait_file_active(candidate_name)
-    _wait_file_active(target_name)
-    context_text = json.dumps(context or {}, ensure_ascii=False)
-    prompt = f"""
-You are the FINAL visual verifier.
-TARGET is an edited anime clip. CANDIDATE is a source-video window.
-Determine whether the candidate contains the same underlying anime footage as the target.
-Ignore subtitles, logos, crop, zoom, mirror, speed changes, color grading, overlays and compression differences.
-Compare multiple moments across the whole target, not just one frame.
-If matched, return the tightest continuous candidate interval containing all target footage.
-The returned timestamps MUST be relative to the candidate window.
-Never say match=true merely because the anime/characters are similar.
-
-Return ONLY JSON:
-{{"match":true,"confidence":0.95,"start_time":1.2,"end_time":8.7,"reason":"..."}}
-Context: {context_text}
-"""
-    payload = {
-        "contents": [{"role": "user", "parts": [
-            {"text": "CANDIDATE SOURCE WINDOW:"},
-            {"file_data": {"mime_type": "video/mp4", "file_uri": f"{API_ROOT}/v1beta/{candidate_name}"}},
-            {"text": "TARGET EDIT:"},
-            {"file_data": {"mime_type": "video/mp4", "file_uri": f"{API_ROOT}/v1beta/{target_name}"}},
-            {"text": prompt},
-        ]}],
-        "generationConfig": {"temperature": 0.0, "responseMimeType": "application/json"},
-    }
-    data = _generate_with_fallback(payload)
-    return _parse_json(_text_from_response(data))
-
-
-async def verify_candidate_window(candidate_path: Path = None, target_path: Path = None, context: dict | None = None, **kwargs):
-    candidate_path = candidate_path or kwargs.get("candidate_video_path")
-    target_path = target_path or kwargs.get("target_video_path")
-    if candidate_path is None or target_path is None:
-        raise ValueError("Candidate and target video paths are required")
-    return await asyncio.to_thread(
-        _verify_candidate_window_sync,
-        Path(candidate_path),
-        Path(target_path),
-        context,
-    )
