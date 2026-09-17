@@ -6,7 +6,7 @@ names and common S1/E5 or Season 1 Episode 5 spellings.
 
 import re
 
-from database import get_animes, get_best_source
+from database import get_animes, get_best_source, get_connection
 from ffmpeg_utils import get_duration, make_clip, parse_time, format_time
 from library_nav import canonical_anime
 from telegram_media import download_telethon_message
@@ -25,22 +25,93 @@ _SOURCE_RE = re.compile(
 def _resolve_anime(requested: str):
     requested = (requested or "").strip()
     requested_canonical = canonical_anime(requested)
-
     animes = get_animes()
 
-    # First prefer canonical-name equality. This makes NARUTO, Naruto and
-    # other harmless casing/format variants resolve to the same library entry.
     if requested_canonical:
         for stored in animes:
             if canonical_anime(stored) == requested_canonical:
                 return stored
 
-    # Then exact case-insensitive match for titles outside the canonical map.
+    requested_norm = re.sub(r"[^a-z0-9]+", " ", requested.casefold()).strip()
     for stored in animes:
-        if stored.casefold() == requested.casefold():
+        stored_norm = re.sub(r"[^a-z0-9]+", " ", stored.casefold()).strip()
+        if stored_norm == requested_norm:
+            return stored
+
+    for stored in animes:
+        if canonical_anime(stored) == requested_canonical:
             return stored
 
     return None
+
+
+def _resolve_source(anime: str, season: str, episode: str):
+    """Resolve an episode even when legacy sync data used slightly different
+    season/episode text representations.
+    """
+    season = str(int(season))
+    episode = str(int(episode))
+
+    source = get_best_source(anime, season, episode)
+    if source:
+        return source, season, episode
+
+    # Legacy/edge-case fallback: compare numeric season/episode values directly
+    # instead of requiring the database text representation to be identical.
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT season, episode, quality, source_url
+            FROM library
+            WHERE LOWER(anime) = LOWER(?)
+            ORDER BY
+                CASE quality
+                    WHEN '720p' THEN 1
+                    WHEN '1080p' THEN 2
+                    WHEN '480p' THEN 3
+                    WHEN '360p' THEN 4
+                    WHEN '1440p' THEN 5
+                    WHEN '2160p' THEN 6
+                    ELSE 7
+                END
+            """,
+            (anime,),
+        ).fetchall()
+
+    for row in rows:
+        db_season = str(row["season"]).strip()
+        db_episode = str(row["episode"]).strip()
+        if db_season.isdigit() and db_episode.isdigit():
+            if int(db_season) == int(season) and int(db_episode) == int(episode):
+                return row["source_url"], db_season, db_episode
+
+    # Some old Naruto uploads were episode-only and implicitly Season 1.
+    if season == "1":
+        with get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT season, episode, quality, source_url
+                FROM library
+                WHERE LOWER(anime) = LOWER(?)
+                  AND episode = ?
+                ORDER BY
+                    CASE quality
+                        WHEN '720p' THEN 1
+                        WHEN '1080p' THEN 2
+                        WHEN '480p' THEN 3
+                        WHEN '360p' THEN 4
+                        WHEN '1440p' THEN 5
+                        WHEN '2160p' THEN 6
+                        ELSE 7
+                    END
+                """,
+                (anime, episode),
+            ).fetchall()
+        if rows:
+            row = rows[0]
+            return row["source_url"], str(row["season"]), str(row["episode"])
+
+    return None, season, episode
 
 
 async def clip_command(update, context):
@@ -79,7 +150,9 @@ async def clip_command(update, context):
                     "/library se available anime names check karo."
                 )
 
-            source = get_best_source(anime, season, episode)
+            source, resolved_season, resolved_episode = _resolve_source(
+                anime, season, episode
+            )
             if not source:
                 raise ValueError(
                     f"{anime} S{season} E{episode} ka source library me nahi mila."
