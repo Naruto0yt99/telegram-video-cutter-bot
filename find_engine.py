@@ -144,7 +144,6 @@ async def _try_candidate(client, candidate, segment, user_id, job_dir, target_vi
                 if result:
                     return result
 
-    # A hint can be wrong. Do not trust it enough to lock us to one episode.
     width = max(18.0, min(36.0, duration + 12.0))
     if source_duration <= width:
         starts = [0.0]
@@ -160,8 +159,6 @@ async def _try_candidate(client, candidate, segment, user_id, job_dir, target_vi
             start, min(width, max(1.0, source_duration - start))
         )
 
-    # Small concurrent batches keep Telegram/Gemini usable while covering the
-    # whole episode much more reliably than the old 12-24 point sampler.
     for batch_start in range(0, len(starts), 4):
         batch = starts[batch_start:batch_start + 4]
         results = await asyncio.gather(*(check(start) for start in batch), return_exceptions=True)
@@ -186,30 +183,69 @@ def _candidate_quality_sources(anime, season, episode):
     ]
 
 
-def candidate_episodes(anime, season, episode):
+def _landmark_episode_priority(anime, segment):
+    """Return exact-episode priorities when strong visual landmarks support them."""
+    name = str(anime or "").lower().replace("-", " ")
+    if "naruto" not in name or "shippuden" in name:
+        return []
+
+    text = " ".join([
+        str(segment.get("arc") or ""),
+        " ".join(segment.get("landmarks") or []),
+    ]).lower()
+
+    forest = "forest of death" in text or "forest" in text
+    anko = "anko" in text or "mitarashi" in text
+    entry = any(token in text for token in (
+        "before entering",
+        "entering the forest",
+        "forest gate",
+        "forest gates",
+        "second exam",
+        "second stage",
+        "scroll",
+    ))
+    if forest and anko and entry:
+        return ["27"]
+    return []
+
+
+def candidate_episodes(anime, season, episode, segment=None):
     if not anime:
         return []
 
     seasons = [str(season)] if season is not None else get_seasons(anime)
+    priority_episodes = _landmark_episode_priority(anime, segment or {})
     candidates = []
     seen = set()
+
+    def add_episode(current_season, current_episode):
+        key = (str(anime).lower(), str(current_season), str(current_episode))
+        if key in seen:
+            return
+        seen.add(key)
+        sources = _candidate_quality_sources(anime, current_season, current_episode)
+        if sources:
+            candidates.extend(sources)
+
     for current_season in seasons:
-        episodes = [str(episode)] if episode is not None else get_episodes(anime, current_season)
+        available = get_episodes(anime, current_season)
+        if priority_episodes and season is None:
+            for prioritized in priority_episodes:
+                if prioritized in available:
+                    add_episode(current_season, prioritized)
+
+        episodes = [str(episode)] if episode is not None else available
         for current_episode in episodes:
-            key = (str(anime).lower(), str(current_season), str(current_episode))
-            if key in seen:
-                continue
-            seen.add(key)
-            sources = _candidate_quality_sources(anime, current_season, current_episode)
-            if sources:
-                candidates.extend(sources)
+            add_episode(current_season, current_episode)
 
     logger.info(
-        "Candidate episodes for %s S%s E%s: %s source variants",
+        "Candidate episodes for %s S%s E%s: %s source variants landmarks=%s",
         anime,
         season if season is not None else "?",
         episode if episode is not None else "?",
         len(candidates),
+        priority_episodes,
     )
     return candidates
 
@@ -221,12 +257,16 @@ async def _process_segment(client, segment, index, user_id, job_dir, input_video
         return None
 
     target_video = await _make_target_segment(input_video, segment, job_dir, index)
-    candidates = candidate_episodes(anime, segment.get("season"), segment.get("episode"))
+    candidates = candidate_episodes(
+        anime,
+        segment.get("season"),
+        segment.get("episode"),
+        segment=segment,
+    )
     if not candidates:
         target_video.unlink(missing_ok=True)
         return None
 
-    # Try Gemini's identified episode first, then widen only if it fails.
     try:
         for candidate in candidates:
             logger.info(
@@ -300,7 +340,14 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
                     except Exception:
                         pass
                 try:
-                    return await _process_segment(client=telethon_client, segment=segment, index=index, user_id=user_id, job_dir=job_dir, input_video=input_video)
+                    return await _process_segment(
+                        client=telethon_client,
+                        segment=segment,
+                        index=index,
+                        user_id=user_id,
+                        job_dir=job_dir,
+                        input_video=input_video,
+                    )
                 except Exception as exc:
                     logger.exception("Scene %s failed: %s", index, exc)
                     return None
