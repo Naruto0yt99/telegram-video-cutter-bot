@@ -241,7 +241,8 @@ async def analyze_video(video_path):
             _wait_until_active_sync(uploaded["name"])
             prompt = """
 You are the first-stage source identification engine for an anime clip finder.
-Analyze the ENTIRE edited video carefully.
+Analyze the ENTIRE edited video carefully and use recognizable story landmarks to identify
+THE ORIGINAL ANIME EPISODE, not merely the arc or character.
 
 Return ONLY JSON in this shape:
 {
@@ -253,7 +254,7 @@ Return ONLY JSON in this shape:
       "season": 4,
       "episode": 5,
       "confidence": 0.95,
-      "source_start_hint": null
+      "source_start_hint": 123.4
     }
   ]
 }
@@ -265,12 +266,21 @@ Rules:
 - Account for speed-up, slow-down, reverse, zoom, crop, mirror, color grading, overlays,
   subtitles, transitions, repeated frames and short flashes.
 - Identify anime, season and episode only when visually supported. Never invent an episode.
-- If season/episode is uncertain, use null and lower confidence.
-- source_start_hint is an approximate original-episode position only when visually supported.
-  Try hard to estimate it from the recognizable scene, but never pretend an uncertain value
-  is exact. Use null when no useful estimate is available.
-- Keep real short shots even when they are under one second.
+- Distinguish original-series episodes from sequels, movies, specials and fillers when possible.
+- Use concrete episode landmarks: location, characters present, costumes/age, exact event,
+  fight/action progression, distinctive dialogue context, opening/ending position and scene order.
+- If the same arc spans several episodes, determine the episode from the actual event shown,
+  not just from the arc name.
+- If season/episode is uncertain, use null and lower confidence rather than guessing.
+- source_start_hint is an approximate timestamp IN THE ORIGINAL EPISODE, not the edit.
+  Estimate it only when the scene's position is visually supported. Allow for different
+  intros/recaps/cuts between source copies. Use null when no useful estimate is possible.
 - Confidence must be between 0 and 1.
+
+Important landmark example for Naruto Part 1:
+The Chunin Exam Stage 2 / Forest of Death setup immediately before or at the forest gates is
+original Naruto episode 27. Episode 28 is the subsequent panic/early-forest action. Use this
+kind of exact event-to-episode distinction whenever a landmark is recognizable.
 """
             result = extract_json(_generate_sync(uploaded, prompt))
             return _clean_segments(result)
