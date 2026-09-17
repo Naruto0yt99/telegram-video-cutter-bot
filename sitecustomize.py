@@ -46,10 +46,28 @@ except Exception:
     pass
 
 # Load the hardened FIND engine while keeping the existing module/API name
-# untouched for bot.py. This avoids invasive changes to the stable command layer.
+# untouched for bot.py.
 try:
     import sys
     import find_engine_v2 as _find_engine_v2
     sys.modules["find_engine"] = _find_engine_v2
+except Exception:
+    pass
+
+# Replace only the /clip and /clips callback at handler construction time.
+# This lets the stable bot.py keep its existing registration while the parser
+# accepts multi-word anime names such as "Naruto Shippuden S1 E27 ...".
+try:
+    from telegram.ext import CommandHandler as _CommandHandler
+    _original_command_handler_init = _CommandHandler.__init__
+
+    def _patched_command_handler_init(self, callback, commands, *args, **kwargs):
+        _original_command_handler_init(self, callback, commands, *args, **kwargs)
+        command_values = {commands} if isinstance(commands, str) else set(commands)
+        if {str(value).lower() for value in command_values} & {"clip", "clips"}:
+            from clip_handler import clip_command as _robust_clip_command
+            self.callback = _robust_clip_command
+
+    _CommandHandler.__init__ = _patched_command_handler_init
 except Exception:
     pass
