@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import mimetypes
+import re
 import time
 from pathlib import Path
 
@@ -132,19 +133,11 @@ def _generate_video_prompt(file_name: str, prompt: str, temperature=0.0):
         "contents": [{
             "role": "user",
             "parts": [
-                {
-                    "file_data": {
-                        "mime_type": "video/mp4",
-                        "file_uri": f"{API_ROOT}/v1beta/{file_name}",
-                    }
-                },
+                {"file_data": {"mime_type": "video/mp4", "file_uri": f"{API_ROOT}/v1beta/{file_name}"}},
                 {"text": prompt},
             ],
         }],
-        "generationConfig": {
-            "temperature": temperature,
-            "responseMimeType": "application/json",
-        },
+        "generationConfig": {"temperature": temperature, "responseMimeType": "application/json"},
     }
     return _generate_with_fallback(payload)
 
@@ -207,13 +200,9 @@ def _analyze_video_sync(path: Path):
     if not name:
         raise RuntimeError("Gemini file upload failed")
     _wait_file_active(name)
-
-    catalog = _catalog_text()
-    prompt = _analysis_prompt(catalog)
     logger.info("Gemini simple scene-analysis pass=1")
-    data = _generate_video_prompt(name, prompt, temperature=0.0)
-    text = _text_from_response(data)
-    parsed = _parse_json(text)
+    data = _generate_video_prompt(name, _analysis_prompt(_catalog_text()), temperature=0.0)
+    parsed = _parse_json(_text_from_response(data))
     regions = parsed.get("regions") if isinstance(parsed, dict) else None
     if not isinstance(regions, list) or not regions:
         raise RuntimeError("Gemini returned no usable anime regions")
@@ -254,11 +243,9 @@ def _clean_regions(data):
         end = _parse_time_value(item.get("end_time"))
         if start is None or end is None or end <= start:
             continue
-
         anime = item.get("anime")
         if isinstance(anime, str):
             anime = anime.strip()
-
         for key in ("season", "episode"):
             value = item.get(key)
             if value is not None:
@@ -267,7 +254,6 @@ def _clean_regions(data):
                 except (TypeError, ValueError):
                     match = re.search(r"\d+", str(value))
                     item[key] = int(match.group()) if match else None
-
         item["source_start_hint"] = _parse_time_value(item.get("source_start_hint"))
         cleaned.append({
             **item,
@@ -276,7 +262,6 @@ def _clean_regions(data):
             "end_time": end,
             "confidence": float(item.get("confidence", 0.0) or 0.0),
         })
-
     cleaned.sort(key=lambda x: x["start_time"])
     return cleaned
 
