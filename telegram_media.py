@@ -45,8 +45,8 @@ def get_message_video_name(message):
 async def download_bot_video(message, user_id):
     """Download a video received by python-telegram-bot.
 
-    In PTB v22, Message itself does not expose download_to_drive(); the
-    Telegram File object returned by message.video/document.get_file() does.
+    PTB media objects expose a file_id; the Bot API File object is obtained
+    through the Bot instance and then downloaded to the local destination.
     """
     if not is_video_message(message):
         raise ValueError("Telegram message me video nahi hai.")
@@ -63,7 +63,12 @@ async def download_bot_video(message, user_id):
     if media is None:
         raise ValueError("Telegram message me downloadable video nahi hai.")
 
-    telegram_file = await media.get_file()
+    file_id = getattr(media, "file_id", None)
+    if not file_id:
+        raise ValueError("Telegram video ka file_id nahi mila.")
+
+    bot = message.get_bot()
+    telegram_file = await bot.get_file(file_id)
     await telegram_file.download_to_drive(custom_path=str(destination))
 
     if not destination.exists():
