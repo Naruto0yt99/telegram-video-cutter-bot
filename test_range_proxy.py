@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import os
 import re
@@ -151,6 +152,8 @@ def loop_runner():
 def submit(coro):
     async def wait_any(awaitable):
         return await awaitable
+    if not inspect.isawaitable(coro):
+        return coro
     return asyncio.run_coroutine_threadsafe(wait_any(coro), LOOP).result()
 
 def size_of(message):
