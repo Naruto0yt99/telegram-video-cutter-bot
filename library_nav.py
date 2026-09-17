@@ -12,9 +12,6 @@ from database import get_connection
 logger = logging.getLogger("anime-bot.library")
 
 
-# Canonical titles for the anime the source group is intended to contain.
-# Matching is deliberately conservative; unrelated topic names are not added
-# merely because they contain a word like "anime" or "clip".
 _CANONICAL = {
     "a gentle noble's vacation recommendation": "A Gentle Noble's Vacation Recommendation",
     "odayaka kizoku no kyuuka no susume": "A Gentle Noble's Vacation Recommendation",
@@ -54,27 +51,24 @@ def _norm(value: str) -> str:
 
 
 def canonical_anime(value: str):
-    raw = (value or "").strip()
-    norm = _norm(raw)
+    norm = _norm(value)
     if not norm or norm in _TOPIC_EXCLUDES:
         return None
 
     if norm in _CANONICAL:
         return _CANONICAL[norm]
 
-    # Safe variants seen in the existing source scan.
+    # Prefer the longest known title so "Naruto Shippuden" does not become
+    # the shorter "Naruto" title when both words are present.
+    for key in sorted(_CANONICAL, key=len, reverse=True):
+        if key in norm:
+            return _CANONICAL[key]
+
     if norm.replace(" ", "") == "attackontitan":
         return "Attack on Titan"
     if norm.startswith("ndiaattack on titan") or norm.endswith("attack on titan"):
         return "Attack on Titan"
-    if norm.startswith("naruto shippuden"):
-        return "Naruto Shippuden"
-    if norm.startswith("naruto movies"):
-        return "Naruto Movies"
-    if norm == "naruto":
-        return "Naruto"
 
-    # Do not invent new anime names from arbitrary forum topics.
     return None
 
 
