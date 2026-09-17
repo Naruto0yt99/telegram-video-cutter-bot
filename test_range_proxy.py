@@ -32,6 +32,7 @@ from config import FFMPEG_BIN, FFPROBE_BIN, SOURCE_CHAT, TELEGRAM_SESSION, TG_AP
 HOST = os.getenv("POC_HOST", "127.0.0.1")
 PORT = int(os.getenv("POC_PORT", "0"))
 CHUNK = max(64 * 1024, int(os.getenv("POC_CHUNK_SIZE", "524288")))
+MIN_SOURCE_BYTES = max(1, int(os.getenv("POC_MIN_SOURCE_BYTES", str(5 * 1024 * 1024))))
 LOOP = asyncio.new_event_loop()
 BRIDGE = None
 
@@ -149,12 +150,21 @@ def loop_runner():
     asyncio.set_event_loop(LOOP)
     LOOP.run_forever()
 
-def submit(coro):
+def submit(value):
+    """Run an awaitable on the dedicated Telethon loop; also accept sync results."""
+    if not inspect.isawaitable(value):
+        return value
     async def wait_any(awaitable):
         return await awaitable
-    if not inspect.isawaitable(coro):
-        return coro
-    return asyncio.run_coroutine_threadsafe(wait_any(coro), LOOP).result()
+    return asyncio.run_coroutine_threadsafe(wait_any(value), LOOP).result()
+
+def close_client(client):
+    """Telethon disconnect() can be sync or awaitable depending on client state/version."""
+    try:
+        submit(client.disconnect())
+    except Exception as exc:
+        print(f"[POC] disconnect cleanup warning: {exc}", flush=True)
+
 
 def size_of(message):
     size = getattr(getattr(message, "file", None), "size", None)
@@ -181,9 +191,13 @@ async def resolve(client, chat, ident):
             raise RuntimeError(f"message {ident} has no media")
         return msg
     async for msg in client.iter_messages(chat, limit=100):
-        if msg and msg.media and video_message(msg):
-            return msg
-    raise RuntimeError("no recent video found in source chat")
+        if not msg or not msg.media or not video_message(msg):
+            continue
+        size = getattr(getattr(msg, "file", None), "size", None) or 0
+        if int(size) < MIN_SOURCE_BYTES:
+            continue
+        return msg
+    raise RuntimeError(f"no recent video >= {MIN_SOURCE_BYTES} bytes found in source chat; pass --message MESSAGE_ID for a specific episode")
 
 def probe_request(url, method="GET", headers=None, body_limit=2048):
     req = urllib.request.Request(url, method=method, headers=headers or {})
@@ -272,6 +286,8 @@ def main():
         print(f"[POC] chat={a.chat} message_id={msg.id}", flush=True)
         print(f"[POC] file={getattr(getattr(msg,'file',None),'name',None) or '(unnamed)'} mime={mime}", flush=True)
         print(f"[POC] source_size={total} bytes ({total/1024/1024:.2f} MiB)", flush=True)
+        if total < MIN_SOURCE_BYTES:
+            raise RuntimeError(f"selected source is too small ({total} bytes); use a real episode message or raise/lower POC_MIN_SOURCE_BYTES")
 
         global BRIDGE
         BRIDGE = Bridge(client, msg, total, mime)
@@ -308,7 +324,7 @@ def main():
         finally:
             server.shutdown(); server.server_close()
     finally:
-        submit(client.disconnect())
+        close_client(client)
         LOOP.call_soon_threadsafe(LOOP.stop)
         if out.exists(): out.unlink()
         shutil.rmtree(session_dir, ignore_errors=True)
