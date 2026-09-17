@@ -11,9 +11,6 @@ from config import GEMINI_API_KEY
 
 logger = logging.getLogger("gemini-analyzer")
 
-# 3.x is tried first, but the stable 2.5 Flash models are kept as hard fallbacks.
-# Gemini documents 503 as a temporary capacity/unavailable condition and recommends
-# switching models instead of repeatedly hammering the same backend.
 MODEL = "gemini-3.8-flash"
 FALLBACK_MODELS = ("gemini-3.7-flash", "gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite")
 API_ROOT = "https://generativelanguage.googleapis.com"
@@ -123,7 +120,7 @@ def _analyze_uploaded(file_name: str, prompt: str):
     return _generate_with_fallback(payload)
 
 
-def analyze_video(path: Path):
+def _analyze_video_sync(path: Path):
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY missing")
     logger.info("Gemini upload: %s (%0.1f MB)", path.name, path.stat().st_size / 1024 / 1024)
@@ -153,10 +150,7 @@ For Naruto Forest of Death entry/setup landmarks, remember the original Naruto e
 
 
 def _clean_regions(data):
-    if isinstance(data, dict):
-        regions = data.get("regions", [])
-    else:
-        regions = []
+    regions = data.get("regions", []) if isinstance(data, dict) else []
     cleaned = []
     for item in regions:
         if not isinstance(item, dict):
@@ -172,7 +166,13 @@ def _clean_regions(data):
     return cleaned
 
 
-def verify_candidate_window(candidate_path: Path, target_path: Path, context: dict | None = None):
+async def analyze_video(path: Path):
+    """Async public API returning a clean list of scene regions."""
+    raw = await asyncio.to_thread(_analyze_video_sync, path)
+    return _clean_regions(raw)
+
+
+def _verify_candidate_window_sync(candidate_path: Path, target_path: Path, context: dict | None = None):
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY missing")
     candidate = _upload_file(candidate_path)
@@ -210,3 +210,12 @@ Context: {context_text}
         if start >= 0 and end > start:
             return json.loads(text[start:end + 1])
         raise RuntimeError("Gemini verification returned invalid JSON")
+
+
+async def verify_candidate_window(candidate_path: Path = None, target_path: Path = None, context: dict | None = None, **kwargs):
+    """Async public API; also accepts the older keyword names used by find_engine."""
+    candidate_path = candidate_path or kwargs.get("candidate_video_path")
+    target_path = target_path or kwargs.get("target_video_path")
+    if candidate_path is None or target_path is None:
+        raise ValueError("Candidate and target video paths are required")
+    return await asyncio.to_thread(_verify_candidate_window_sync, Path(candidate_path), Path(target_path), context)
