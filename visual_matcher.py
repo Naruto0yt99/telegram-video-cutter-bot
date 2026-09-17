@@ -83,9 +83,7 @@ def _frame_signatures(path, usable_regions=None):
         regions = [(0.0, 0.0, 1.0, 1.0)]
 
     signatures = [_signature(_crop_region(image, region)) for region in regions]
-    # Keep a full-frame signature as a fallback. This helps when Gemini's region
-    # is slightly too tight or when the source copy has a different crop.
-    if len(regions) > 1 or regions[0] != (0.0, 0.0, 1.0, 1.0):
+    if regions[0] != (0.0, 0.0, 1.0, 1.0):
         signatures.append(_signature(image))
     return signatures
 
@@ -102,7 +100,7 @@ async def _extract_frames(input_path, out_dir, fps=1.0, start=None, duration=Non
     if duration is not None:
         args += ["-t", str(max(0.1, duration))]
     args += [
-        "-vf", f"fps={max(0.2, float(fps))},scale=256:144:force_original_aspect_ratio=decrease,pad=256:144:(ow-iw)/2:(oh-ih)/2",
+        "-vf", f"fps={max(0.25, float(fps))},scale=256:144:force_original_aspect_ratio=decrease,pad=256:144:(ow-iw)/2:(oh-ih)/2",
         "-q:v", "5",
         str(pattern),
     ]
@@ -165,8 +163,8 @@ async def _load_signatures(frame_paths, usable_regions=None):
     return groups
 
 
-async def _search_window(server_url, target_groups, usable_regions, start, duration, root, fps=1.0):
-    source_dir = root / f"source_{int(start * 10)}"
+async def _search_window(server_url, target_groups, usable_regions, start, duration, root, fps=0.5):
+    source_dir = root / f"source_{int(start * 10)}_{int(fps * 10)}"
     source_frames = await _extract_frames(
         server_url, source_dir, fps=fps, start=start, duration=duration, remote=True
     )
@@ -177,12 +175,25 @@ async def _search_window(server_url, target_groups, usable_regions, start, durat
     return _sequence_score(target_groups, source_groups, source_times)
 
 
+def _unique_starts(values, max_start):
+    result = []
+    seen = set()
+    for value in values:
+        value = round(max(0.0, min(float(value), max_start)), 1)
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
 async def find_visual_match(client, candidate, segment, target_video, job_dir, source_duration):
-    """Find a source timestamp using local visual retrieval; no candidate Gemini upload."""
+    """Fast hierarchical visual retrieval over a Telegram remote source."""
     from telegram_remote import open_telegram_range_server
 
+    target_duration = max(1.0, float(segment["end_time"]) - float(segment["start_time"]))
     target_dir = job_dir / f"target_frames_{int(float(segment['start_time']) * 10)}"
-    target_frames = await _extract_frames(target_video, target_dir, fps=1.0)
+    target_fps = 1.0 if target_duration <= 25 else 0.5
+    target_frames = await _extract_frames(target_video, target_dir, fps=target_fps)
     if not target_frames:
         return None
 
@@ -199,22 +210,35 @@ async def find_visual_match(client, candidate, segment, target_video, job_dir, s
     if hint is not None:
         hint = max(0.0, min(hint, max(0.0, source_duration - 1.0)))
 
-    duration = max(1.0, float(segment["end_time"]) - float(segment["start_time"]))
-    window = max(30.0, min(90.0, duration * 4.0 + 18.0))
+    window = max(24.0, min(60.0, target_duration * 2.5 + 12.0))
     max_start = max(0.0, source_duration - window)
 
-    starts = []
     if hint is not None:
-        # First search tightly around Gemini's landmark estimate, then expand far
-        # enough to tolerate different intros/recaps/cuts between source copies.
-        for delta in (0, -15, 15, -30, 30, -60, 60, -120, 120, -180, 180, -300, 300, -480, 480):
-            starts.append(max(0.0, min(hint + delta, max_start)))
+        # One broad first pass centered on Gemini's estimate, followed by a small
+        # number of expanding probes. This replaces the old 15-window sweep.
+        starts = _unique_starts(
+            [
+                hint - window / 2,
+                hint - 20,
+                hint + 20,
+                hint - 60,
+                hint + 60,
+                hint - 120,
+                hint + 120,
+                hint - 240,
+                hint + 240,
+            ],
+            max_start,
+        )
     else:
-        step = max(20.0, window * 0.8)
-        count = min(48, max(10, int(source_duration / step) + 1))
-        starts.extend(max_start * i / max(1, count - 1) for i in range(count))
+        # Unknown episode timestamps are expensive. Keep the coarse fallback bounded.
+        step = max(45.0, window * 1.25)
+        count = min(20, max(6, int(source_duration / step) + 1))
+        starts = _unique_starts(
+            [max_start * i / max(1, count - 1) for i in range(count)],
+            max_start,
+        )
 
-    starts = list(dict.fromkeys(round(x, 1) for x in starts))
     best = None
     server = None
     try:
@@ -228,16 +252,13 @@ async def find_visual_match(client, candidate, segment, target_video, job_dir, s
                     start,
                     min(window, max(1.0, source_duration - start)),
                     job_dir,
-                    fps=1.0,
+                    fps=0.5,
                 )
             except Exception:
                 continue
-
             if result and (best is None or result["score"] < best["score"]):
                 best = result
-                # A very strong sequence match is unlikely to improve enough to
-                # justify more remote range requests.
-                if best["score"] <= 0.18 and best["progression"] >= 0.90:
+                if best["score"] <= 0.20 and best["progression"] >= 0.80:
                     break
     finally:
         if server is not None:
@@ -246,15 +267,39 @@ async def find_visual_match(client, candidate, segment, target_video, job_dir, s
     if not best:
         return None
 
-    center = float(best["source_time"])
-    margin = max(8.0, min(20.0, duration * 0.75))
+    # Refine the best coarse location at higher temporal resolution.
+    coarse_center = float(best["source_time"])
+    refine_start = max(0.0, coarse_center - 12.0)
+    refine_duration = min(source_duration - refine_start, max(18.0, target_duration * 1.5 + 6.0))
+    server = None
+    refined = None
+    try:
+        server = await open_telegram_range_server(client, candidate["source_url"])
+        refined = await _search_window(
+            server.url,
+            target_groups,
+            usable_regions,
+            refine_start,
+            max(1.0, refine_duration),
+            job_dir,
+            fps=2.0,
+        )
+    except Exception:
+        refined = None
+    finally:
+        if server is not None:
+            await server.close()
+
+    final = refined or best
+    center = float(final["source_time"])
+    margin = max(6.0, min(14.0, target_duration * 0.6))
     start = max(0.0, center - margin)
-    end = min(source_duration, center + margin + duration)
+    end = min(source_duration, center + margin + target_duration)
     return {
         "start": start,
         "end": max(start + 1.0, end),
         "center": center,
-        "score": float(best["score"]),
-        "median_distance": float(best["median_distance"]),
-        "progression": float(best["progression"]),
+        "score": float(final["score"]),
+        "median_distance": float(final["median_distance"]),
+        "progression": float(final["progression"]),
     }
