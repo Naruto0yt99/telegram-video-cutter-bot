@@ -13,6 +13,7 @@ from config import GEMINI_API_KEY
 logger = logging.getLogger("gemini-analyzer")
 
 MODEL = "gemini-3.8-flash"
+FALLBACK_MODELS = ("gemini-3.7-flash", "gemini-3.6-flash")
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 UPLOAD_URL = "https://generativelanguage.googleapis.com/upload/v1beta/files"
 
@@ -93,8 +94,6 @@ def _generate_sync(file_data, prompt, extra_file_data=None):
     if extra_file_data:
         file_datas.extend(extra_file_data)
 
-    # Put the visual inputs first, then the instruction, matching Gemini's video
-    # input guidance and making the target/candidate ordering explicit.
     parts = []
     for item in file_datas:
         parts.append({
@@ -102,31 +101,68 @@ def _generate_sync(file_data, prompt, extra_file_data=None):
                 "mime_type": item.get("mimeType") or item.get("mime_type") or "video/mp4",
                 "file_uri": item["uri"],
             }
-        })
-    parts.append({"text": prompt})
-
-    payload = {"contents": [{"parts": parts}]}
-    with httpx.Client(timeout=None) as client:
-        response = client.post(
-            f"{BASE_URL}/models/{MODEL}:generateContent",
-            headers={
-                "x-goog-api-key": GEMINI_API_KEY,
-                "Content-Type": "application/json",
-            },
-            json=payload,
         )
-        response.raise_for_status()
-        data = response.json()
+    parts.append({"text": prompt})
+    payload = {"contents": [{"parts": parts}]}
 
-    response_parts = (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
-    text = "\n".join(
-        str(part.get("text", ""))
-        for part in response_parts
-        if part.get("text")
-    )
-    if not text:
-        raise RuntimeError(f"Gemini returned no text: {data}")
-    return text
+    models = (MODEL,) + tuple(FALLBACK_MODELS)
+    retryable_statuses = {429, 500, 502, 503, 504}
+    last_error = None
+
+    with httpx.Client(timeout=None) as client:
+        for model_index, model in enumerate(models):
+            for attempt in range(5):
+                try:
+                    response = client.post(
+                        f"{BASE_URL}/models/{model}:generateContent",
+                        headers={
+                            "x-goog-api-key": GEMINI_API_KEY,
+                            "Content-Type": "application/json",
+                        },
+                        json=payload,
+                    )
+                    if response.status_code in retryable_statuses:
+                        body = response.text[:500]
+                        last_error = RuntimeError(
+                            f"Gemini {model} HTTP {response.status_code}: {body}"
+                        )
+                        logger.warning(
+                            "Gemini generateContent transient error model=%s status=%s attempt=%s/%s",
+                            model, response.status_code, attempt + 1, 5,
+                        )
+                        if attempt < 4:
+                            time.sleep(min(2 ** attempt, 16))
+                            continue
+                        break
+                    response.raise_for_status()
+                    data = response.json()
+                    response_parts = (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
+                    text = "\n".join(
+                        str(part.get("text", ""))
+                        for part in response_parts
+                        if part.get("text")
+                    )
+                    if not text:
+                        raise RuntimeError(f"Gemini returned no text: {data}")
+                    return text
+                except httpx.HTTPError as exc:
+                    last_error = exc
+                    logger.warning(
+                        "Gemini request error model=%s attempt=%s/%s: %s",
+                        model, attempt + 1, 5, exc,
+                    )
+                    if attempt < 4:
+                        time.sleep(min(2 ** attempt, 16))
+                        continue
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    raise
+
+            if model_index < len(models) - 1:
+                logger.warning("Gemini model %s exhausted; trying fallback %s", model, models[model_index + 1])
+
+    raise last_error or RuntimeError("Gemini generateContent failed.")
 
 
 def _delete_file_sync(file_name):
