@@ -217,12 +217,19 @@ def _clean_segments(data):
             confidence = max(0.0, min(1.0, float(item.get("confidence", 0))))
         except Exception:
             confidence = 0.0
+        landmarks = item.get("landmarks") or []
+        if isinstance(landmarks, str):
+            landmarks = [landmarks]
+        if not isinstance(landmarks, list):
+            landmarks = []
         clean.append({
             "start_time": start,
             "end_time": end,
             "anime": str(item.get("anime") or "").strip(),
             "season": item.get("season"),
             "episode": item.get("episode"),
+            "arc": str(item.get("arc") or "").strip(),
+            "landmarks": [str(x).strip() for x in landmarks if str(x).strip()][:8],
             "confidence": confidence,
             "source_start_hint": item.get("source_start_hint"),
         })
@@ -253,6 +260,8 @@ Return ONLY JSON in this shape:
       "anime": "Attack on Titan",
       "season": 4,
       "episode": 5,
+      "arc": "",
+      "landmarks": ["specific visual/event landmark"],
       "confidence": 0.95,
       "source_start_hint": 123.4
     }
@@ -269,6 +278,7 @@ Rules:
 - Distinguish original-series episodes from sequels, movies, specials and fillers when possible.
 - Use concrete episode landmarks: location, characters present, costumes/age, exact event,
   fight/action progression, distinctive dialogue context, opening/ending position and scene order.
+- Write 1-8 short factual landmarks that can help a second-stage source search.
 - If the same arc spans several episodes, determine the episode from the actual event shown,
   not just from the arc name.
 - If season/episode is uncertain, use null and lower confidence rather than guessing.
@@ -326,6 +336,8 @@ Target metadata:
 - anime: {segment.get('anime') or 'unknown'}
 - season: {segment.get('season') or 'unknown'}
 - episode: {segment.get('episode') or 'unknown'}
+- arc: {segment.get('arc') or 'unknown'}
+- landmarks: {segment.get('landmarks') or []}
 - edited start: {segment.get('start_time')}
 - edited end: {segment.get('end_time')}
 - candidate source nominal range: {candidate_start} to {candidate_end} seconds
