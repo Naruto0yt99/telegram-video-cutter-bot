@@ -12,19 +12,20 @@ import asyncio
 import json
 import os
 import re
-import socket
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.request
-from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
 
 from telethon import TelegramClient
+from telethon.sessions import SQLiteSession
 from config import FFMPEG_BIN, FFPROBE_BIN, SOURCE_CHAT, TELEGRAM_SESSION, TG_API_HASH, TG_API_ID, TEMP_DIR
 
 HOST = os.getenv("POC_HOST", "127.0.0.1")
@@ -229,6 +230,17 @@ def duration_of(path):
         raise RuntimeError("ffprobe failed")
     return float(p.stdout.strip())
 
+def make_isolated_session():
+    """Make a unique SQLiteSession object so sitecustomize cannot reuse a locked path."""
+    source = Path(str(TELEGRAM_SESSION))
+    source_file = source if source.suffix == ".session" else Path(str(source) + ".session")
+    if not source_file.exists():
+        raise RuntimeError("Telegram USER_SESSION file was not found")
+    temp_dir = Path(tempfile.mkdtemp(prefix="range_poc_session_", dir=str(TEMP_DIR)))
+    base = temp_dir / "session"
+    shutil.copy2(source_file, Path(str(base) + ".session"))
+    return SQLiteSession(str(base)), temp_dir
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--chat", default=os.getenv("POC_SOURCE_CHAT", SOURCE_CHAT))
@@ -243,54 +255,58 @@ def main():
 
     out = Path(TEMP_DIR) / "range_proxy_poc_output.mp4"
     if out.exists(): out.unlink()
+    session, session_dir = make_isolated_session()
     threading.Thread(target=loop_runner, daemon=True).start()
-    client = TelegramClient(TELEGRAM_SESSION, TG_API_ID, TG_API_HASH)
+    client = TelegramClient(session, TG_API_ID, TG_API_HASH)
     submit(client.connect())
-    if not submit(client.is_user_authorized()):
-        raise RuntimeError("Telegram USER_SESSION is not authorized")
-    msg = submit(resolve(client, a.chat, a.message))
-    total, mime = size_of(msg), mime_of(msg)
-    print(f"[POC] chat={a.chat} message_id={msg.id}", flush=True)
-    print(f"[POC] file={getattr(getattr(msg,'file',None),'name',None) or '(unnamed)'} mime={mime}", flush=True)
-    print(f"[POC] source_size={total} bytes ({total/1024/1024:.2f} MiB)", flush=True)
-
-    global BRIDGE
-    BRIDGE = Bridge(client, msg, total, mime)
-    server = Server((HOST, PORT), Handler)
-    port = server.server_address[1]
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    url = f"http://{HOST}:{port}/stream"
-    print(f"[POC] proxy={url}", flush=True)
     try:
-        protocol_tests(url, total)
-        before = M.snap()[0]
-        started = time.monotonic()
-        ffmpeg_cut(url, a.seek, a.duration, out)
-        elapsed = time.monotonic() - started
-        after, chunks, requests = M.snap()
-        if not out.exists() or out.stat().st_size == 0:
-            raise RuntimeError("ffmpeg output missing/empty")
-        out_dur = duration_of(out)
-        used = after - before
-        print("", flush=True)
-        print("========== RANGE PROXY POC RESULT ==========" , flush=True)
-        print("RESULT: PASS", flush=True)
-        print(f"source_bytes={total}", flush=True)
-        print(f"ffmpeg_elapsed={elapsed:.2f}s", flush=True)
-        print(f"output_bytes={out.stat().st_size}", flush=True)
-        print(f"output_duration={out_dur:.3f}s", flush=True)
-        print(f"telegram_bytes_during_ffmpeg={used}", flush=True)
-        print(f"telegram_bytes_ratio={used/total:.2%}", flush=True)
-        print(f"telegram_iter_download_chunks={chunks}", flush=True)
-        print("http_requests:", flush=True)
-        for item in requests:
-            print("  " + json.dumps(item, sort_keys=True), flush=True)
-        print("============================================", flush=True)
+        if not submit(client.is_user_authorized()):
+            raise RuntimeError("Telegram USER_SESSION is not authorized")
+        msg = submit(resolve(client, a.chat, a.message))
+        total, mime = size_of(msg), mime_of(msg)
+        print(f"[POC] chat={a.chat} message_id={msg.id}", flush=True)
+        print(f"[POC] file={getattr(getattr(msg,'file',None),'name',None) or '(unnamed)'} mime={mime}", flush=True)
+        print(f"[POC] source_size={total} bytes ({total/1024/1024:.2f} MiB)", flush=True)
+
+        global BRIDGE
+        BRIDGE = Bridge(client, msg, total, mime)
+        server = Server((HOST, PORT), Handler)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        url = f"http://{HOST}:{port}/stream"
+        print(f"[POC] proxy={url}", flush=True)
+        try:
+            protocol_tests(url, total)
+            before = M.snap()[0]
+            started = time.monotonic()
+            ffmpeg_cut(url, a.seek, a.duration, out)
+            elapsed = time.monotonic() - started
+            after, chunks, requests = M.snap()
+            if not out.exists() or out.stat().st_size == 0:
+                raise RuntimeError("ffmpeg output missing/empty")
+            out_dur = duration_of(out)
+            used = after - before
+            print("", flush=True)
+            print("========== RANGE PROXY POC RESULT ==========" , flush=True)
+            print("RESULT: PASS", flush=True)
+            print(f"source_bytes={total}", flush=True)
+            print(f"ffmpeg_elapsed={elapsed:.2f}s", flush=True)
+            print(f"output_bytes={out.stat().st_size}", flush=True)
+            print(f"output_duration={out_dur:.3f}s", flush=True)
+            print(f"telegram_bytes_during_ffmpeg={used}", flush=True)
+            print(f"telegram_bytes_ratio={used/total:.2%}", flush=True)
+            print(f"telegram_iter_download_chunks={chunks}", flush=True)
+            print("http_requests:", flush=True)
+            for item in requests:
+                print("  " + json.dumps(item, sort_keys=True), flush=True)
+            print("============================================", flush=True)
+        finally:
+            server.shutdown(); server.server_close()
     finally:
-        server.shutdown(); server.server_close()
         submit(client.disconnect())
         LOOP.call_soon_threadsafe(LOOP.stop)
         if out.exists(): out.unlink()
+        shutil.rmtree(session_dir, ignore_errors=True)
 
 if __name__ == "__main__":
     try:
