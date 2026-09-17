@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import random
 import re
@@ -29,13 +28,21 @@ def _output_path(user_id, anime, season, episode):
 
 
 def _random_sources(limit=MAX_CANDIDATES):
-    """Return random library source rows; SQL RANDOM keeps this independent of anime names."""
+    """Return random library sources, lightly preferring smaller qualities for a 5-min test."""
     with get_connection() as conn:
         rows = conn.execute(
             """
             SELECT anime, season, episode, quality, source_url
             FROM library
-            ORDER BY RANDOM()
+            ORDER BY CASE quality
+                WHEN '360p' THEN 0
+                WHEN '480p' THEN 1
+                WHEN '720p' THEN 2
+                WHEN '1080p' THEN 3
+                WHEN '1440p' THEN 4
+                WHEN '2160p' THEN 5
+                ELSE 6
+            END, RANDOM()
             LIMIT ?
             """,
             (int(limit),),
@@ -71,10 +78,10 @@ async def random_command(update, context):
         selected = None
         duration = None
 
-        for index, candidate in enumerate(candidates, start=1):
+        for candidate in candidates:
             try:
                 chat, message_id = _parse_source(candidate["source_url"])
-                message, source_duration, _size = await get_telegram_video_info(
+                _message, source_duration, _size = await get_telegram_video_info(
                     client, chat, message_id
                 )
                 if source_duration < RANDOM_CLIP_SECONDS:
@@ -117,13 +124,20 @@ async def random_command(update, context):
             f"Season: {selected['season']} | Episode: {selected['episode']}\n"
             f"Quality: {selected['quality']}\n"
             f"Random point: {start:.1f}s\n"
-            "Telegram se sirf required range fetch karke 5-min clip bana raha hoon..."
+            "Telegram se required range fetch karke 5-min clip bana raha hoon..."
         )
 
         await _extract_remote_clip(client, selected["source_url"], start, end, output)
 
         if not output.exists() or output.stat().st_size == 0:
             raise RuntimeError("Random clip output empty hai.")
+
+        from config import TELEGRAM_MAX_BYTES
+        if output.stat().st_size > TELEGRAM_MAX_BYTES:
+            raise RuntimeError(
+                f"5-min random clip {output.stat().st_size / 1024 / 1024:.1f} MB bana; "
+                f"configured Telegram limit {TELEGRAM_MAX_BYTES / 1024 / 1024:.0f} MB hai."
+            )
 
         with output.open("rb") as video:
             await update.message.reply_video(
