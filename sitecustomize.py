@@ -20,10 +20,10 @@ try:
 except Exception:
     pass
 
-# FIND matching should use a practical source quality first.  The previous
+# FIND matching should use a practical source quality first. The previous
 # default preferred 2160p/1440p, which makes remote timestamp seeking much
 # heavier on a phone even though Gemini only needs enough visual detail to
-# identify the scene.  Keep the fallback chain intact when lower qualities are
+# identify the scene. Keep the fallback chain intact when lower qualities are
 # unavailable.
 try:
     import database as _find_database
@@ -50,5 +50,25 @@ try:
         return _original_get_best_source(anime, season, episode)
 
     _find_database.get_best_source = _find_get_best_source
+except Exception:
+    pass
+
+# python-telegram-bot defaults to very short HTTP timeouts. A long-running
+# FIND job can legitimately overlap a Telegram API request, especially while
+# Termux/Telethon is busy with media I/O. Increase the defaults globally so a
+# temporary slow API response does not kill the whole bot process.
+try:
+    from telegram.request import HTTPXRequest as _HTTPXRequest
+
+    _original_httpx_init = _HTTPXRequest.__init__
+
+    def _hardened_httpx_init(self, *args, **kwargs):
+        kwargs.setdefault("connect_timeout", 30.0)
+        kwargs.setdefault("read_timeout", 60.0)
+        kwargs.setdefault("write_timeout", 60.0)
+        kwargs.setdefault("pool_timeout", 30.0)
+        _original_httpx_init(self, *args, **kwargs)
+
+    _HTTPXRequest.__init__ = _hardened_httpx_init
 except Exception:
     pass
