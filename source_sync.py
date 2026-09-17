@@ -7,6 +7,7 @@ from telethon.tl.types import Message
 from config import SOURCE_CHAT
 from database import add_source, get_connection
 from telegram_media import is_video_message, get_message_video_name
+from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
 
@@ -28,6 +29,13 @@ _EPISODE_PATTERNS = [
 
 _EP_ONLY_PATTERNS = [
     re.compile(r"\b(?:Episode|Ep|E)\s*[-._ ]?(?P<episode>\d{1,4})\b", re.I),
+]
+
+_SPECIAL_PATTERNS = [
+    ("movie", re.compile(r"\b(?:Movie|Film)\s*(?P<episode>\d{1,3})\b", re.I)),
+    ("ova", re.compile(r"\bOVA\s*(?P<episode>\d{1,3})\b", re.I)),
+    ("oad", re.compile(r"\bOAD\s*(?P<episode>\d{1,3})\b", re.I)),
+    ("special", re.compile(r"\bSpecial\s*(?P<episode>\d{1,3})\b", re.I)),
 ]
 
 _CONTENT_MARKERS = re.compile(
@@ -54,12 +62,16 @@ def _episode_from_text(text: str):
     for pattern in _EPISODE_PATTERNS:
         match = pattern.search(text)
         if match:
-            return match.group("season"), match.group("episode"), match
+            return match.group("season"), match.group("episode"), match, "season"
+    for content_type, pattern in _SPECIAL_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return content_type, match.group("episode"), match, content_type
     for pattern in _EP_ONLY_PATTERNS:
         match = pattern.search(text)
         if match:
-            return None, match.group("episode"), match
-    return None, None, None
+            return None, match.group("episode"), match, "season"
+    return None, None, None, None
 
 
 def _anime_from_text(text: str, marker):
@@ -79,34 +91,55 @@ def _anime_from_text(text: str, marker):
     return prefix if len(prefix) >= 2 else None
 
 
+def _canonical_from_candidates(*values):
+    for value in values:
+        if not value:
+            continue
+        canonical = canonical_anime(value)
+        if canonical:
+            return canonical
+    return None
+
+
 def parse_episode_metadata(message: Message):
-    filename = get_message_video_name(message)
+    filename = _clean_caption(get_message_video_name(message))
     caption = _clean_caption(getattr(message, "message", "") or "")
 
-    season, episode, marker = _episode_from_text(caption)
-    source_text = caption
+    # Use caption and filename together. This is important for uploads with
+    # no caption where the filename contains the anime/episode metadata.
+    combined = _clean_caption(f"{caption} {filename}")
+
+    season, episode, marker, content_type = _episode_from_text(caption)
+    marker_source = caption
+
     if episode is None:
-        source_text = _clean_caption(f"{caption} {filename}")
-        season, episode, marker = _episode_from_text(source_text)
+        season, episode, marker, content_type = _episode_from_text(combined)
+        marker_source = combined
 
     if episode is None or not marker:
         return None
 
-    anime = _anime_from_text(source_text, marker)
+    anime_from_caption = _anime_from_text(caption, marker) if marker_source == caption else _anime_from_text(marker_source, marker)
+    anime_from_filename = _anime_from_text(filename, _episode_from_text(filename)[2]) if _episode_from_text(filename)[2] else None
+    anime = _canonical_from_candidates(anime_from_caption, anime_from_filename, caption, filename)
     if not anime:
         return None
 
-    quality = _detect_quality(source_text) or _detect_quality(filename) or "auto"
+    quality = _detect_quality(combined) or "auto"
 
-    if season is None:
-        if re.search(r"\b(?:season|s)\s*1\b", source_text, re.I):
-            season = "1"
-        else:
-            return None
+    if content_type == "season":
+        if season is None:
+            if re.search(r"\b(?:season|s)\s*1\b", combined, re.I):
+                season = "1"
+            else:
+                return None
+        season_value = str(int(season))
+    else:
+        season_value = content_type
 
     return {
         "anime": anime,
-        "season": str(int(season)),
+        "season": season_value,
         "episode": str(int(episode)),
         "quality": quality,
     }
@@ -173,7 +206,7 @@ def _message_link(message: Message):
 
 
 async def sync_source_library(client):
-    """Index episode metadata from SOURCE_CHAT without downloading media."""
+    """Index only recognized anime episode/video sources from SOURCE_CHAT."""
     if client is None:
         return {"indexed": 0, "skipped": 0, "last_message_id": 0}
 
@@ -252,6 +285,7 @@ async def sync_source_library(client):
 
 
 def render_library_html(animes, get_seasons, get_episodes, get_all_sources_for_episode):
+    # Legacy renderer retained for compatibility with older callers.
     lines = ["📚 <b>ANIME LIBRARY</b>", ""]
     preferred = ["2160p", "1440p", "1080p", "720p", "480p", "360p", "auto"]
 
@@ -263,17 +297,6 @@ def render_library_html(animes, get_seasons, get_episodes, get_all_sources_for_e
                 sources = get_all_sources_for_episode(anime, season, episode)
                 if not sources:
                     continue
-
-                best_quality = next((q for q in preferred if q in sources), None)
-                if not best_quality:
-                    continue
-
-                best_url = sources[best_quality]
-                episode_link = (
-                    f'<a href="{escape(best_url, quote=True)}">'
-                    f'Episode {escape(str(episode))}</a>'
-                )
-
                 quality_links = []
                 for quality in preferred:
                     url = sources.get(quality)
@@ -282,12 +305,10 @@ def render_library_html(animes, get_seasons, get_episodes, get_all_sources_for_e
                         quality_links.append(
                             f'<a href="{escape(url, quote=True)}">{label}</a>'
                         )
-
                 lines.append(
-                    f"    🎞️ <b>{episode_link}</b> — "
+                    f"    🎞️ <b>Episode {escape(str(episode))}</b> — "
                     + " · ".join(quality_links)
                 )
-
         lines.append("")
 
     return "\n".join(lines).strip()
