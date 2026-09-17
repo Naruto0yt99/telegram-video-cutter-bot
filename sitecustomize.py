@@ -51,6 +51,23 @@ try:
 except Exception:
     pass
 
+# Use the dedicated parser for both /clip and /clips so multi-word anime names
+# such as "Naruto Shippuden" work without downloading the whole episode.
+try:
+    from telegram.ext import CommandHandler as _CommandHandler
+    _original_command_handler_init = _CommandHandler.__init__
+
+    def _patched_command_handler_init(self, callback, commands, *args, **kwargs):
+        _original_command_handler_init(self, callback, commands, *args, **kwargs)
+        command_values = {commands} if isinstance(commands, str) else set(commands)
+        if {str(value).lower() for value in command_values} & {"clip", "clips"}:
+            from clip_handler import clip_command as _source_clip_command
+            self.callback = _source_clip_command
+
+    _CommandHandler.__init__ = _patched_command_handler_init
+except Exception:
+    pass
+
 # Telethon's default SQLite session is single-writer. Give each bot process an
 # isolated runtime copy of the authenticated session to avoid stale-process
 # SQLite locks while keeping the canonical session as the source of truth.
