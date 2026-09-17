@@ -167,26 +167,66 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def library_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    animes = get_animes()
-    if not animes:
-        await update.message.reply_text(
-            "📚 Library abhi empty hai.\n"
-            "AnimeNation012 ka automatic source scan background me chal raha ho sakta hai."
+    try:
+        animes = get_animes()
+        logger.info("/library requested: anime_count=%s", len(animes))
+
+        if not animes:
+            with get_connection() as conn:
+                row = conn.execute("SELECT COUNT(*) AS count FROM library").fetchone()
+                total = int(row["count"])
+            logger.warning("/library empty: library row count=%s", total)
+            await update.message.reply_text(
+                "📚 Library abhi empty hai.\n"
+                "AnimeNation012 ka automatic source scan background me chal raha ho sakta hai."
+            )
+            return
+
+        text = render_library_html(
+            animes,
+            get_seasons,
+            get_episodes,
+            get_all_sources_for_episode,
         )
-        return
 
-    text = render_library_html(
-        animes,
-        get_seasons,
-        get_episodes,
-        get_all_sources_for_episode,
-    )
+        # Telegram text messages have a length limit. Keep complete HTML lines
+        # together so clickable source links are never broken across messages.
+        max_chars = 3800
+        chunks = []
+        current = []
+        current_len = 0
 
-    await update.message.reply_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
+        for line in text.splitlines():
+            addition = len(line) + (1 if current else 0)
+            if current and current_len + addition > max_chars:
+                chunks.append("\n".join(current))
+                current = []
+                current_len = 0
+            current.append(line)
+            current_len += addition
+
+        if current:
+            chunks.append("\n".join(current))
+
+        logger.info("/library rendered: chars=%s chunks=%s", len(text), len(chunks))
+
+        for index, chunk in enumerate(chunks, start=1):
+            if index == 1:
+                await update.message.reply_text(
+                    chunk,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+            else:
+                await update.message.reply_text(
+                    f"📚 <b>LIBRARY — {index}/{len(chunks)}</b>\n\n{chunk}",
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+
+    except Exception as exc:
+        logger.exception("/library failed")
+        await update.message.reply_text(f"❌ Library load failed: {exc}")
 
 
 async def save_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -440,13 +480,10 @@ async def clip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             end = parse_time(args[5])
             source = get_best_source(anime, season, episode)
             if not source:
-                raise ValueError("Episode source nahi mila.")
+                raise ValueError("Source episode library me nahi mila.")
             if telethon_client is None:
                 raise ValueError("Telegram source client connected nahi hai.")
-            chat, message_id = parse_telegram_message_link(source)
-            input_path = await download_telethon_message(
-                telethon_client, chat, message_id, user_id
-            )
+            input_path = await download_telethon_message(telethon_client, source, user_id)
         else:
             raise ValueError(
                 "Usage:\n/clip 01:20 - 01:50\n"
