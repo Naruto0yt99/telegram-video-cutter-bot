@@ -128,7 +128,10 @@ def _generate_sync(file_data, prompt, extra_file_data=None):
                         )
                         logger.warning(
                             "Gemini generateContent transient error model=%s status=%s attempt=%s/%s",
-                            model, response.status_code, attempt + 1, 5,
+                            model,
+                            response.status_code,
+                            attempt + 1,
+                            5,
                         )
                         if attempt < 4:
                             time.sleep(min(2 ** attempt, 16))
@@ -149,7 +152,10 @@ def _generate_sync(file_data, prompt, extra_file_data=None):
                     last_error = exc
                     logger.warning(
                         "Gemini request error model=%s attempt=%s/%s: %s",
-                        model, attempt + 1, 5, exc,
+                        model,
+                        attempt + 1,
+                        5,
+                        exc,
                     )
                     if attempt < 4:
                         time.sleep(min(2 ** attempt, 16))
@@ -160,7 +166,11 @@ def _generate_sync(file_data, prompt, extra_file_data=None):
                     raise
 
             if model_index < len(models) - 1:
-                logger.warning("Gemini model %s exhausted; trying fallback %s", model, models[model_index + 1])
+                logger.warning(
+                    "Gemini model %s exhausted; trying fallback %s",
+                    model,
+                    models[model_index + 1],
+                )
 
     raise last_error or RuntimeError("Gemini generateContent failed.")
 
@@ -268,13 +278,7 @@ Rules:
     return await asyncio.to_thread(work)
 
 
-async def verify_candidate_window(
-    candidate_video_path,
-    segment,
-    candidate_start,
-    candidate_end,
-    target_video_path=None,
-):
+async def verify_candidate_window(candidate_video_path, segment, candidate_start, candidate_end, target_video_path=None):
     candidate_path = Path(candidate_video_path)
     if not candidate_path.exists():
         raise FileNotFoundError(str(candidate_path))
@@ -325,15 +329,9 @@ start_time/end_time MUST be timestamps inside Video 2 (the candidate video).
 They must tightly bound the portion that visually corresponds to Video 1.
 If the candidate does not contain the target scene, return match=false and confidence <= 0.5.
 """
-
             if target_file is None:
                 raise RuntimeError("Target video required for visual verification.")
-
-            text = _generate_sync(
-                target_file,
-                prompt,
-                extra_file_data=[candidate_file],
-            )
+            text = _generate_sync(target_file, prompt, extra_file_data=[candidate_file])
             return extract_json(text)
         finally:
             _delete_file_sync(candidate_file["name"])
