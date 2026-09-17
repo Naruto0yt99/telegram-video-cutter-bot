@@ -68,6 +68,40 @@ try:
 except Exception:
     pass
 
+# Register the lightweight /random diagnostic command without touching bot.py.
+# It chooses any random usable library episode and returns a random 5-minute clip.
+try:
+    from telegram.ext import Application as _Application
+    from telegram.ext import CommandHandler as _RandomCommandHandler
+    from random_command import random_command as _random_command
+
+    _original_application_add_handler = _Application.add_handler
+    _random_handler_registered = set()
+
+    def _patched_application_add_handler(self, handler, group=0):
+        result = _original_application_add_handler(self, handler, group=group)
+        if isinstance(handler, _RandomCommandHandler):
+            return result
+        try:
+            commands = getattr(handler, "commands", set()) or set()
+            normalized = {str(value).lower() for value in commands}
+            if "library" in normalized and id(self) not in _random_handler_registered:
+                _original_application_add_handler(
+                    self,
+                    _RandomCommandHandler("random", _random_command),
+                    group=group,
+                )
+                _random_handler_registered.add(id(self))
+                import logging as _random_logging
+                _random_logging.getLogger("anime-bot").info("Registered /random diagnostic command.")
+        except Exception:
+            pass
+        return result
+
+    _Application.add_handler = _patched_application_add_handler
+except Exception:
+    pass
+
 # Telethon's default SQLite session is single-writer. Give each bot process an
 # isolated runtime copy of the authenticated session to avoid stale-process
 # SQLite locks while keeping the canonical session as the source of truth.
