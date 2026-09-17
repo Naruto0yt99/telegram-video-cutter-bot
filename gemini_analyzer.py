@@ -75,10 +75,7 @@ def _wait_until_active_sync(file_name):
             response.raise_for_status()
             data = response.json()
             raw_state = data.get("state")
-            if isinstance(raw_state, dict):
-                state = raw_state.get("name")
-            else:
-                state = raw_state
+            state = raw_state.get("name") if isinstance(raw_state, dict) else raw_state
             state = str(state or "").upper()
             if state == "ACTIVE":
                 return data
@@ -96,12 +93,13 @@ def _generate_sync(file_data, prompt, extra_file_data=None):
 
     parts = []
     for item in file_datas:
-        parts.append({
+        file_part = {
             "file_data": {
                 "mime_type": item.get("mimeType") or item.get("mime_type") or "video/mp4",
                 "file_uri": item["uri"],
             }
-        )
+        }
+        parts.append(file_part)
     parts.append({"text": prompt})
     payload = {"contents": [{"parts": parts}]}
 
@@ -139,7 +137,10 @@ def _generate_sync(file_data, prompt, extra_file_data=None):
                         break
                     response.raise_for_status()
                     data = response.json()
-                    response_parts = (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
+                    candidates = data.get("candidates") or []
+                    content = candidates[0].get("content") if candidates else None
+                    response_parts = content.get("parts") if isinstance(content, dict) else []
+                    response_parts = response_parts or []
                     text = "\n".join(
                         str(part.get("text", ""))
                         for part in response_parts
@@ -271,14 +272,21 @@ Rules:
 - Keep real short shots even when they are under one second.
 - Confidence must be between 0 and 1.
 """
-            return _clean_segments(extract_json(_generate_sync(uploaded, prompt)))
+            result = extract_json(_generate_sync(uploaded, prompt))
+            return _clean_segments(result)
         finally:
             _delete_file_sync(uploaded["name"])
 
     return await asyncio.to_thread(work)
 
 
-async def verify_candidate_window(candidate_video_path, segment, candidate_start, candidate_end, target_video_path=None):
+async def verify_candidate_window(
+    candidate_video_path,
+    segment,
+    candidate_start,
+    candidate_end,
+    target_video_path=None,
+):
     candidate_path = Path(candidate_video_path)
     if not candidate_path.exists():
         raise FileNotFoundError(str(candidate_path))
@@ -331,7 +339,11 @@ If the candidate does not contain the target scene, return match=false and confi
 """
             if target_file is None:
                 raise RuntimeError("Target video required for visual verification.")
-            text = _generate_sync(target_file, prompt, extra_file_data=[candidate_file])
+            text = _generate_sync(
+                target_file,
+                prompt,
+                extra_file_data=[candidate_file],
+            )
             return extract_json(text)
         finally:
             _delete_file_sync(candidate_file["name"])
