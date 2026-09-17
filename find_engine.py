@@ -44,6 +44,12 @@ def _source_for_region(region):
 
 
 async def _extract_remote_clip(client, source_url, start, end, output):
+    """Fetch only the requested Telegram byte ranges and cut without re-encoding.
+
+    The source episode is never downloaded in full. FFmpeg asks the local range
+    proxy only for bytes needed around the requested timestamp, then remuxes the
+    selected packets into a small MP4 that Telegram can upload.
+    """
     server = await open_telegram_range_server(client, source_url)
     try:
         start = max(0.0, float(start))
@@ -55,18 +61,16 @@ async def _extract_remote_clip(client, source_url, start, end, output):
             "-y",
             "-seekable", "1",
             "-multiple_requests", "1",
-            "-initial_request_size", "2M",
-            "-request_size", "2M",
-            "-short_seek_size", "2M",
+            "-initial_request_size", "512K",
+            "-request_size", "512K",
+            "-short_seek_size", "512K",
             "-ss", str(start),
             "-i", server.url,
             "-t", str(duration),
             "-map", "0:v:0?",
             "-map", "0:a:0?",
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "20",
-            "-c:a", "aac",
+            "-c", "copy",
+            "-avoid_negative_ts", "make_zero",
             "-movflags", "+faststart",
             str(output),
         )
@@ -131,7 +135,7 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
                     f"Scene {index}/{len(regions)}\n"
                     f"{anime} S{season} E{episode}\n"
                     f"Approx source: {source_start:.1f}s → {source_end:.1f}s\n\n"
-                    "✂️ Direct clip extraction..."
+                    "⚡ Direct clip export..."
                 )
             except Exception:
                 pass
