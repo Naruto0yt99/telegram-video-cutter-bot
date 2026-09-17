@@ -10,6 +10,7 @@ from telegram_media import is_video_message, get_message_video_name
 from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
+PARSER_VERSION = 2
 
 
 _QUALITY_PATTERNS = [
@@ -104,14 +105,10 @@ def _canonical_from_candidates(*values):
 def parse_episode_metadata(message: Message):
     filename = _clean_caption(get_message_video_name(message))
     caption = _clean_caption(getattr(message, "message", "") or "")
-
-    # Use caption and filename together. This is important for uploads with
-    # no caption where the filename contains the anime/episode metadata.
     combined = _clean_caption(f"{caption} {filename}")
 
     season, episode, marker, content_type = _episode_from_text(caption)
     marker_source = caption
-
     if episode is None:
         season, episode, marker, content_type = _episode_from_text(combined)
         marker_source = combined
@@ -120,7 +117,8 @@ def parse_episode_metadata(message: Message):
         return None
 
     anime_from_caption = _anime_from_text(caption, marker) if marker_source == caption else _anime_from_text(marker_source, marker)
-    anime_from_filename = _anime_from_text(filename, _episode_from_text(filename)[2]) if _episode_from_text(filename)[2] else None
+    filename_parts = _episode_from_text(filename)
+    anime_from_filename = _anime_from_text(filename, filename_parts[2]) if filename_parts[2] else None
     anime = _canonical_from_candidates(anime_from_caption, anime_from_filename, caption, filename)
     if not anime:
         return None
@@ -153,10 +151,14 @@ def _ensure_sync_table():
                 source_chat TEXT PRIMARY KEY,
                 last_message_id INTEGER NOT NULL DEFAULT 0,
                 initial_complete INTEGER NOT NULL DEFAULT 0,
+                parser_version INTEGER NOT NULL DEFAULT 1,
                 updated_at TEXT NOT NULL
             )
             """
         )
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(source_sync_state)").fetchall()]
+        if "parser_version" not in columns:
+            conn.execute("ALTER TABLE source_sync_state ADD COLUMN parser_version INTEGER NOT NULL DEFAULT 1")
         conn.commit()
 
 
@@ -164,10 +166,12 @@ def _get_sync_state():
     _ensure_sync_table()
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT last_message_id, initial_complete FROM source_sync_state WHERE source_chat = ?",
+            "SELECT last_message_id, initial_complete, parser_version FROM source_sync_state WHERE source_chat = ?",
             (str(SOURCE_CHAT),),
         ).fetchone()
     if not row:
+        return 0, False
+    if int(row[2] or 1) != PARSER_VERSION:
         return 0, False
     return int(row[0]), bool(row[1])
 
@@ -176,14 +180,15 @@ def _set_sync_state(last_message_id: int, initial_complete: bool):
     with get_connection() as conn:
         conn.execute(
             """
-            INSERT INTO source_sync_state(source_chat, last_message_id, initial_complete, updated_at)
-            VALUES (?, ?, ?, datetime('now'))
+            INSERT INTO source_sync_state(source_chat, last_message_id, initial_complete, parser_version, updated_at)
+            VALUES (?, ?, ?, ?, datetime('now'))
             ON CONFLICT(source_chat) DO UPDATE SET
                 last_message_id = excluded.last_message_id,
                 initial_complete = excluded.initial_complete,
+                parser_version = excluded.parser_version,
                 updated_at = excluded.updated_at
             """,
-            (str(SOURCE_CHAT), int(last_message_id), int(initial_complete)),
+            (str(SOURCE_CHAT), int(last_message_id), int(initial_complete), PARSER_VERSION),
         )
         conn.commit()
 
@@ -224,10 +229,11 @@ async def sync_source_library(client):
 
     entity = await client.get_entity(SOURCE_CHAT)
     logger.info(
-        "Starting source sync: chat=%s last_message_id=%s initial_complete=%s",
+        "Starting source sync: chat=%s last_message_id=%s initial_complete=%s parser_version=%s",
         SOURCE_CHAT,
         last_id,
         initial_complete,
+        PARSER_VERSION,
     )
 
     iter_kwargs = {"entity": entity, "reverse": True}
@@ -285,7 +291,6 @@ async def sync_source_library(client):
 
 
 def render_library_html(animes, get_seasons, get_episodes, get_all_sources_for_episode):
-    # Legacy renderer retained for compatibility with older callers.
     lines = ["📚 <b>ANIME LIBRARY</b>", ""]
     preferred = ["2160p", "1440p", "1080p", "720p", "480p", "360p", "auto"]
 
