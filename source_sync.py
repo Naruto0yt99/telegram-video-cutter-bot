@@ -10,7 +10,7 @@ from telegram_media import is_video_message, get_message_video_name
 from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
-PARSER_VERSION = 9
+PARSER_VERSION = 10
 
 
 _QUALITY_PATTERNS = [
@@ -71,6 +71,21 @@ def _episode_from_text(text: str):
     for pattern in _EPISODE_PATTERNS:
         match = pattern.search(text)
         if match:
+            # Some Naruto source captions use "Episode 01 [349]". The
+            # bracketed number is the channel's canonical/global episode id,
+            # while "01" is only the season-local episode number.
+            global_match = re.search(
+                r"\s*[\[(]\s*(?P<episode>\d{1,4})\s*[\])]",
+                text[match.end():],
+                re.I,
+            )
+            if global_match:
+                return (
+                    match.group("season"),
+                    global_match.group("episode"),
+                    match,
+                    "season",
+                )
             return match.group("season"), match.group("episode"), match, "season"
     for content_type, pattern in _SPECIAL_PATTERNS:
         match = pattern.search(text)
@@ -172,9 +187,19 @@ def parse_episode_metadata(message: Message, topic_text: str = ""):
 
     if content_type == "season":
         if season is None:
-            if re.search(r"\b(?:season|s)\s*1\b", combined, re.I):
+            # A few Naruto Shippuden uploads only show the global episode
+            # number, e.g. "Episode - 01(361)". For the season layout used by
+            # this source channel, episodes 349-360 are Season 16 and
+            # 361-372 are Season 17.
+            if anime == "Naruto Shippuden":
+                global_episode = int(episode)
+                if 349 <= global_episode <= 360:
+                    season = "16"
+                elif 361 <= global_episode <= 372:
+                    season = "17"
+            if season is None and re.search(r"\b(?:season|s)\s*1\b", combined, re.I):
                 season = "1"
-            else:
+            if season is None:
                 return None
         season_value = str(int(season))
     else:
