@@ -1,0 +1,29 @@
+name: Bot Quality
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  python-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Compile all Python
+        run: python -m compileall -q .
+      - name: Import core modules
+        run: python -c "import bot, run_bot, find_engine, gemini_analyzer, clip_handler, telegram_remote, ffmpeg_utils, database"
+      - name: Smoke-test time parsing
+        run: python -c "from ffmpeg_utils import parse_time; assert parse_time('12:30') == 750; assert abs(parse_time('01:02:03.500')-3723.5)<1e-6"
+      - name: Smoke-test FFmpeg
+        run: ffmpeg -hide_banner -version >/dev/null
