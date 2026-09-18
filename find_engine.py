@@ -15,6 +15,25 @@ from utils import safe_filename, unique_path
 
 logger = logging.getLogger("simple-find")
 
+
+def _progress_bar(percent, width=20):
+    percent = max(0, min(100, int(percent)))
+    filled = int(round(width * percent / 100))
+    return "█" * filled + "░" * (width - filled)
+
+
+async def _show_find_progress(message, percent, title, detail=""):
+    if message is None:
+        return
+    text = f"🎯 FIND — {percent}% [{_progress_bar(percent)}]\\n\\n{title}"
+    if detail:
+        text += f"\\n{detail}"
+    try:
+        await message.edit_text(text)
+    except Exception:
+        pass
+
+
 QUALITY_ORDER = ("2160p", "1440p", "1080p", "720p", "480p", "360p", "auto")
 
 
@@ -145,39 +164,66 @@ async def _make_edit_sample(input_video, start, duration, output):
     return output
 
 
-async def _verify_region(input_video, client, source_url, region, output_dir):
-    try: hint = float(region.get("source_start_hint"))
-    except (TypeError, ValueError): return None
+async def _verify_region(input_video, client, source_url, region, output_dir, progress_message=None, scene_label=""):
+    try:
+        hint = float(region.get("source_start_hint"))
+    except (TypeError, ValueError):
+        return None
+
     edit_start = float(region["start_time"])
     edit_length = max(0.8, float(region["end_time"]) - edit_start)
-    sample_len = min(10.0, edit_length)
+    sample_len = min(8.0, edit_length)
     edit_sample = output_dir / f"verify_edit_{int(edit_start * 1000)}.mp4"
     await _make_edit_sample(input_video, edit_start, sample_len, edit_sample)
-    windows = [(max(0.0, hint-20), sample_len+40), (max(0.0, hint-90), sample_len+180), (max(0.0, hint-600), sample_len+1200)]
+
+    # Keep every remote verification probe short. The previous implementation
+    # could request a ~20-minute source window, which caused huge Telegram
+    # downloads when Gemini's first timestamp hint was wrong.
+    centers = [0, -60, 60, -180, 180, -360, 360, -600, 600]
+    probe_duration = 45.0
     best = None
     try:
-        for ws, wd in windows:
-            src = output_dir / f"verify_source_{int(ws)}.mp4"
+        for probe_index, offset in enumerate(centers, start=1):
+            center = max(0.0, hint + offset)
+            ws = max(0.0, center - probe_duration / 2)
+            wd = probe_duration
+            src = output_dir / f"verify_source_{int(ws)}_{probe_index}.mp4"
+            await _show_find_progress(
+                progress_message,
+                15,
+                f"🔎 {scene_label} — exact source search",
+                f"Probe {probe_index}/{len(centers)} • around {ws:.0f}s",
+            )
             try:
-                await _extract_remote_clip(client, source_url, ws, ws+wd, src)
+                await _extract_remote_clip(client, source_url, ws, ws + wd, src)
                 result = await asyncio.to_thread(verify_source_match, edit_sample, src, ws)
                 if result and result.get("match"):
-                    conf = float(result.get("confidence",0) or 0)
-                    off = float(result.get("offset_in_source_window",0) or 0)
-                    sd = float(result.get("source_duration",0) or 0) or edit_length * float(result.get("speed",1) or 1)
-                    sp = float(result.get("speed",1) or 1)
-                    cand = {"start":max(0,ws+off),"source_duration":max(.5,sd),"speed":max(.25,min(sp,4)),"confidence":conf}
-                    if best is None or conf > best["confidence"]: best=cand
-                    if conf >= .92: break
-            finally: src.unlink(missing_ok=True)
-    finally: edit_sample.unlink(missing_ok=True)
+                    conf = float(result.get("confidence", 0) or 0)
+                    off = float(result.get("offset_in_source_window", 0) or 0)
+                    sd = float(result.get("source_duration", 0) or 0) or edit_length * float(result.get("speed", 1) or 1)
+                    sp = float(result.get("speed", 1) or 1)
+                    cand = {
+                        "start": max(0, ws + off),
+                        "source_duration": max(.5, sd),
+                        "speed": max(.25, min(sp, 4)),
+                        "confidence": conf,
+                    }
+                    if best is None or conf > best["confidence"]:
+                        best = cand
+                    if conf >= .92:
+                        break
+            finally:
+                src.unlink(missing_ok=True)
+    finally:
+        edit_sample.unlink(missing_ok=True)
     return best
+
 
 async def _process_fast_scene(input_video, telethon_client, region, index, total, output_dir, progress_message=None):
     source, anime, season, episode, quality = _source_for_region(region)
     if not source: return None
     edit_start=float(region["start_time"]); edit_end=float(region["end_time"]); edit_length=max(.5,edit_end-edit_start)
-    match=await _verify_region(input_video,telethon_client,source,region,output_dir)
+    match=await _verify_region(input_video,telethon_client,source,region,output_dir,progress_message, f"Scene {index}/{total}")
     if not match: return None
     start=match["start"]; source_duration=match["source_duration"]; speed=match["speed"]
     end=start+source_duration
@@ -196,17 +242,39 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
     if not regions: raise RuntimeError("Gemini ko koi usable anime scene nahi mila.")
     output_dir=Path(TEMP_DIR)/str(user_id)/"find_clips"; output_dir.mkdir(parents=True,exist_ok=True)
     semaphore=asyncio.Semaphore(3)
-    async def worker(i,r):
+    completed = 0
+    progress_lock = asyncio.Lock()
+    total_regions = len(regions)
+
+    async def worker(i, r):
+        nonlocal completed
         async with semaphore:
             try:
-                if progress_message:
-                    try: await progress_message.edit_text(f"🎯 FIND — matching {i}/{len(regions)} scenes\n\n📺 {r.get('anime','?')} S{r.get('season','?')} E{r.get('episode','?')}\n🔎 Progressive exact search...")
-                    except Exception: pass
-                return await _process_fast_scene(input_video,telethon_client,r,i,len(regions),output_dir,progress_message)
-            except Exception: logger.exception("Scene %s failed",i); return None
-    results=await asyncio.gather(*(worker(i,r) for i,r in enumerate(regions,1)))
+                await _show_find_progress(
+                    progress_message,
+                    15,
+                    f"🔎 Scene {i}/{total_regions} — exact source search",
+                    f"📺 {r.get('anime','?')} S{r.get('season','?')} E{r.get('episode','?')}\n⚙️ Progressive targeted probes...",
+                )
+                return await _process_fast_scene(input_video, telethon_client, r, i, total_regions, output_dir, progress_message)
+            except Exception:
+                logger.exception("Scene %s failed", i)
+                return None
+            finally:
+                async with progress_lock:
+                    completed += 1
+                    percent = 15 + int(75 * completed / total_regions)
+                    await _show_find_progress(
+                        progress_message,
+                        percent,
+                        f"🧩 Scenes processed: {completed}/{total_regions}",
+                        "⏳ Remaining scenes are still being searched...",
+                    )
+
+    results = await asyncio.gather(*(worker(i, r) for i, r in enumerate(regions, 1)))
     clips=sorted([x for x in results if x],key=lambda x:x["index"])
     if not clips: raise RuntimeError("Koi scene reliably match nahi hua.")
+    await _show_find_progress(progress_message, 90, "🎬 Scene search complete", f"Matched {len(clips)}/{len(regions)} scenes\n🔧 Building the final merged video...")
     merged = unique_path(output_dir, "find_final.mp4")
 
     # concat demuxer requires matching stream parameters. Normalize every
