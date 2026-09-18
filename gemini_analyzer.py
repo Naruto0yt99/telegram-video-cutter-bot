@@ -123,7 +123,7 @@ def _generate_video_prompt(file_name: str, prompt: str, temperature=0.0):
                 {"text": prompt},
             ],
         }],
-        "generationConfig": {"temperature": temperature, "responseMimeType": "application/json"},
+        "generationConfig": {"responseMimeType": "application/json"},
     }
     return _generate_with_fallback(payload)
 
@@ -164,7 +164,7 @@ characters/anime are similar.
                 {"text": prompt},
             ],
         }],
-        "generationConfig": {"temperature": 0.0, "responseMimeType": "application/json"},
+        "generationConfig": {"responseMimeType": "application/json"},
     }
     data = _generate_with_fallback(payload)
     parsed = _parse_json(_text_from_response(data))
