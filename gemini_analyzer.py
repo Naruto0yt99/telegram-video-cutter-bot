@@ -181,6 +181,7 @@ def _analyze_video_sync(path: Path):
     # This keeps FIND best-effort instead of failing before Telegram extraction.
     if not isinstance(regions, list) or not regions:
         logger.warning("Gemini pass=1 returned no regions; running permissive fallback")
+        catalog = _catalog_text()
         fallback_prompt = f"""
 Watch the uploaded video and identify the anime footage in it.
 This is a BEST-EFFORT extraction task. Do not refuse because the exact anime,
