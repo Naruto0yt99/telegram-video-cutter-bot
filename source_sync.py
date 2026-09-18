@@ -139,7 +139,7 @@ def parse_episode_metadata(message: Message, topic_text: str = ""):
 
     topic_text = _clean_caption(topic_text)
     topic_season = None
-    topic_match = re.search(r"\\b(?:Season|S)\\s*[-._ ]?(\\d{1,3})\\b", topic_text, re.I)
+    topic_match = re.search(r"\b(?:Season|S)\s*[-._ ]?(\d{1,3})\b", topic_text, re.I)
     if topic_match:
         topic_season = str(int(topic_match.group(1)))
 
