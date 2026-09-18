@@ -113,20 +113,31 @@ def _parse_range(header, size):
     if not header:
         return 0, min(size - 1, MAX_RANGE_BYTES - 1)
 
-    match = re.fullmatch(r"bytes=(\d+)-(\d*)", header.strip())
-    if not match:
-        raise ValueError("Unsupported Range header")
+    value = header.strip()
+    match = re.fullmatch(r"bytes=(\d+)-(\d*)", value)
+    if match:
+        start = int(match.group(1))
+        end = int(match.group(2)) if match.group(2) else size - 1
+        if start >= size:
+            raise ValueError("Range starts beyond file")
+        end = min(end, size - 1)
+        if end < start:
+            raise ValueError("Invalid byte range")
+        if end - start + 1 > MAX_RANGE_BYTES:
+            end = start + MAX_RANGE_BYTES - 1
+        return start, end
 
-    start = int(match.group(1))
-    end = int(match.group(2)) if match.group(2) else size - 1
-    if start >= size:
-        raise ValueError("Range starts beyond file")
-    end = min(end, size - 1)
-    if end < start:
-        raise ValueError("Invalid byte range")
-    if end - start + 1 > MAX_RANGE_BYTES:
-        end = start + MAX_RANGE_BYTES - 1
-    return start, end
+    # FFmpeg/HTTP clients may ask for the final N bytes to read an MP4
+    # footer/moov atom. Supporting suffix ranges is essential for fast seeking.
+    suffix = re.fullmatch(r"bytes=-(\d+)", value)
+    if suffix:
+        length = int(suffix.group(1))
+        if length <= 0:
+            raise ValueError("Invalid suffix range")
+        length = min(length, MAX_RANGE_BYTES, size)
+        return size - length, size - 1
+
+    raise ValueError("Unsupported Range header")
 
 
 async def _read_one_chunk(client, media, offset, request_size):
@@ -155,7 +166,7 @@ async def _read_range_once(client, media, start, end, request_size):
     needed = end - aligned_start + 1
     chunk_offsets = list(range(aligned_start, aligned_start + needed, request_size))
     pieces = {}
-    parallelism = 4
+    parallelism = 6
 
     for batch_start in range(0, len(chunk_offsets), parallelism):
         batch = chunk_offsets[batch_start : batch_start + parallelism]
