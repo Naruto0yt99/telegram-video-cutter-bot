@@ -192,25 +192,43 @@ def verify_source_candidates(edit_path: Path, candidate_paths, candidate_starts)
     if not edit_name:
         return None
 
+    # Upload all candidate windows concurrently. Sequential uploads were a
+    # major latency source when FIND had several scenes.
+    existing = [
+        (idx, Path(path), float(candidate_starts[idx]))
+        for idx, path in enumerate(candidate_paths)
+        if Path(path).exists()
+    ]
+    uploaded_results = await asyncio.gather(
+        *(asyncio.to_thread(_upload_file, path) for _, path, _ in existing),
+        return_exceptions=True,
+    )
     candidate_files = []
-    for path in candidate_paths:
-        if not Path(path).exists():
+    candidate_meta = []
+    for (original_index, path, start_time), uploaded in zip(existing, uploaded_results):
+        if isinstance(uploaded, Exception):
+            logger.warning("Gemini candidate upload failed index=%s: %s", original_index, uploaded)
             continue
-        uploaded = _upload_file(Path(path))
         name = uploaded.get("name")
         if name:
             candidate_files.append(name)
+            candidate_meta.append((len(candidate_files), original_index, start_time))
 
     if not candidate_files:
         return None
 
-    _wait_file_active(edit_name)
-    for name in candidate_files:
-        _wait_file_active(name)
+    # Wait for all Gemini files concurrently as well.
+    await asyncio.gather(
+        asyncio.to_thread(_wait_file_active, edit_name),
+        *(asyncio.to_thread(_wait_file_active, name) for name in candidate_files),
+    )
 
-    candidate_lines = []
-    for idx, start_time in enumerate(candidate_starts[:len(candidate_files)], 1):
-        candidate_lines.append(f"Candidate {idx}: starts at {float(start_time):.3f}s in the episode.")
+    # Keep the uploaded-file numbering paired with its real source start.
+    # This prevents a skipped upload from shifting candidate timestamps.
+    candidate_lines = [
+        f"Candidate {display_index}: starts at {float(start_time):.3f}s in the episode."
+        for display_index, _, start_time in candidate_meta
+    ]
 
     prompt = f"""
 VIDEO 1 is the edited anime scene.
