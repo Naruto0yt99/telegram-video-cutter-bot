@@ -59,7 +59,8 @@ def _upload_file(path: Path):
 
 
 def _wait_file_active(name: str):
-    # Mobile/Termux uploads and Gemini video processing can take longer than 45s.\n    deadline = time.monotonic() + 180.0
+    # Mobile/Termux uploads and Gemini video processing can take longer than 45s.
+    deadline = time.monotonic() + 180.0
     with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
         while time.monotonic() < deadline:
             response = client.get(f"{API_ROOT}/v1beta/{name}", headers=_headers())
