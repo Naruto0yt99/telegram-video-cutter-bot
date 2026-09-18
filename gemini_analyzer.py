@@ -19,7 +19,7 @@ MODEL = "gemini-3.5-flash-lite"
 FALLBACK_MODELS = ("gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash")
 API_ROOT = "https://generativelanguage.googleapis.com"
 MODEL_ATTEMPTS = 1
-REQUEST_TIMEOUT = httpx.Timeout(connect=20.0, read=90.0, write=120.0, pool=20.0)
+REQUEST_TIMEOUT = httpx.Timeout(connect=30.0, read=300.0, write=300.0, pool=30.0)
 
 
 def _headers():
@@ -59,7 +59,7 @@ def _upload_file(path: Path):
 
 
 def _wait_file_active(name: str):
-    deadline = time.monotonic() + 45.0
+    # Mobile/Termux uploads and Gemini video processing can take longer than 45s.\n    deadline = time.monotonic() + 180.0
     with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
         while time.monotonic() < deadline:
             response = client.get(f"{API_ROOT}/v1beta/{name}", headers=_headers())
