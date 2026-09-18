@@ -548,24 +548,23 @@ async def _stream_remote_split(update, status, source_client, source_url, output
 
         while not wait_task.done():
             await asyncio.sleep(1.5)
-            for part in sorted(output_dir.glob("part_*.mp4")):
+            parts = sorted(output_dir.glob("part_*.mp4"))
+            finalized = parts[:-1] if len(parts) >= 2 else []
+            for part in finalized:
                 if part in sent or not part.exists() or part.stat().st_size <= 0:
                     continue
-                size1 = part.stat().st_size
-                await asyncio.sleep(0.25)
-                if not part.exists() or part.stat().st_size != size1:
-                    continue
                 index = int(part.stem.rsplit("_", 1)[1])
+                display_index = index + 1
                 await status.edit_text(
-                    f"✂️ SPLIT\\n\\n📚 {anime} S{season} E{episode}\\n"
-                    f"🧩 Part {index}/{total_parts}\\n"
-                    f"📤 Sending completed part...\\n"
+                    f"✂️ SPLIT\n\n📚 {anime} S{season} E{episode}\n"
+                    f"🧩 Part {display_index}/{total_parts}\n"
+                    f"📤 Sending completed part...\n"
                     "ℹ️ Source is being read only once."
                 )
                 await send_file(
                     update,
                     part,
-                    f"✂️ {anime} S{season} E{episode} — Part {index}/{total_parts}",
+                    f"✂️ {anime} S{season} E{episode} — Part {display_index}/{total_parts}",
                 )
                 sent.add(part)
                 part.unlink(missing_ok=True)
@@ -576,14 +575,15 @@ async def _stream_remote_split(update, status, source_client, source_url, output
             if part in sent or not part.exists() or part.stat().st_size <= 0:
                 continue
             index = int(part.stem.rsplit("_", 1)[1])
+            display_index = index + 1
             await status.edit_text(
-                f"✂️ SPLIT\\n\\n📚 {anime} S{season} E{episode}\\n"
-                f"🧩 Part {index}/{total_parts}\\n📤 Sending..."
+                f"✂️ SPLIT\n\n📚 {anime} S{season} E{episode}\n"
+                f"🧩 Part {display_index}/{total_parts}\n📤 Sending..."
             )
             await send_file(
                 update,
                 part,
-                f"✂️ {anime} S{season} E{episode} — Part {index}/{total_parts}",
+                f"✂️ {anime} S{season} E{episode} — Part {display_index}/{total_parts}",
             )
             sent.add(part)
             part.unlink(missing_ok=True)
