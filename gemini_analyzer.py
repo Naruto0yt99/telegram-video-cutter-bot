@@ -187,7 +187,7 @@ This is a BEST-EFFORT extraction task. Do not refuse because the exact anime,
 season, episode, or timestamp is uncertain.
 
 Return JSON only with this exact shape:
-{"regions":[{"start_time":0,"end_time":5,"anime":"NARUTO","season":1,"episode":27,"source_start_hint":755,"confidence":0.5}]}
+{{"regions":[{{"start_time":0,"end_time":5,"anime":"NARUTO","season":1,"episode":27,"source_start_hint":755,"confidence":0.5}}]}}
 
 Rules:
 - Return every obvious contiguous anime segment.
