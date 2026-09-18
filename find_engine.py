@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import uuid
 from pathlib import Path
 
 from config import FFMPEG_BIN, TEMP_DIR
@@ -14,6 +15,11 @@ from telegram_remote import open_telegram_range_server
 from utils import safe_filename, unique_path
 
 logger = logging.getLogger("simple-find")
+
+# Limit total remote FFmpeg/range-server work across all scenes. FIND already
+# searches multiple scenes in parallel; an additional per-scene limit could
+# otherwise create 9+ simultaneous Telegram range streams on a phone.
+REMOTE_EXTRACTION_SEMAPHORE = asyncio.Semaphore(4)
 
 
 def _progress_bar(percent, width=20):
@@ -98,6 +104,11 @@ def _source_for_region(region):
 
 async def _extract_remote_clip(client, source_url, start, end, output, speed=1.0):
     """Extract only the requested Telegram interval; preserve edit speed when needed."""
+    async with REMOTE_EXTRACTION_SEMAPHORE:
+        return await _extract_remote_clip_limited(client, source_url, start, end, output, speed)
+
+
+async def _extract_remote_clip_limited(client, source_url, start, end, output, speed=1.0):
     server = await open_telegram_range_server(client, source_url)
     try:
         start = max(0.0, float(start))
@@ -180,7 +191,10 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
     edit_start = float(region["start_time"])
     edit_length = max(0.8, float(region["end_time"]) - edit_start)
     sample_len = min(8.0, edit_length)
-    edit_sample = output_dir / f"verify_edit_{int(edit_start * 1000)}.mp4"
+    # Every scene runs concurrently, so filenames must be unique even when
+    # two scenes start at the same edit timestamp or probe the same source time.
+    scene_token = f"{int(edit_start * 1000)}_{uuid.uuid4().hex[:8]}"
+    edit_sample = output_dir / f"verify_edit_{scene_token}.mp4"
     await _make_edit_sample(input_video, edit_start, sample_len, edit_sample)
 
     # Start with the most likely windows. Only expand to the wider +/-5/10 min
@@ -191,11 +205,12 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
         (-300, 300, -600, 600),
     )
     candidates = []
+    result = None
 
     async def extract_candidate(probe_index, offset, batch_total):
         center = max(0.0, hint + offset)
         ws = max(0.0, center - probe_duration / 2)
-        src = output_dir / f"verify_source_{int(ws)}_{probe_index}.mp4"
+        src = output_dir / f"verify_source_{scene_token}_{int(ws)}_{probe_index}.mp4"
         await _show_find_progress(
             progress_message,
             15,
@@ -255,8 +270,11 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
                     sd = float(result.get("source_duration", 0) or 0)
                     sp = float(result.get("speed", 1) or 1)
                     return {
-                        "start": max(0.0, selected["start"] + off),
-                        "source_duration": max(0.5, sd or edit_length * sp),
+                        "start": max(0.0, selected["start"] + max(0.0, min(off, probe_duration - 0.5))),
+                        # Gemini can occasionally return a wildly wrong duration.
+                        # The edited scene length and speed are sufficient to derive
+                        # the required original interval, so keep those authoritative.
+                        "source_duration": max(0.5, edit_length * sp),
                         "speed": max(0.25, min(sp, 4.0)),
                         "confidence": float(result.get("confidence", 0) or 0),
                     }
