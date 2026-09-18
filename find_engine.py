@@ -78,44 +78,58 @@ def _source_for_region(region):
     return source, anime, resolved_season, episode, quality
 
 
-async def _extract_remote_clip(client, source_url, start, end, output):
-    """Fetch only the requested Telegram byte ranges and cut without re-encoding.
-
-    The source episode is never downloaded in full. FFmpeg asks the local range
-    proxy only for bytes needed around the requested timestamp, then remuxes the
-    selected packets into a small MP4 that Telegram can upload.
-    """
+async def _extract_remote_clip(client, source_url, start, end, output, speed=1.0):
+    """Extract only the requested Telegram interval; preserve edit speed when needed."""
     server = await open_telegram_range_server(client, source_url)
     try:
         start = max(0.0, float(start))
-        duration = max(0.5, float(end) - start)
-        await run_command(
-            FFMPEG_BIN,
-            "-hide_banner",
-            "-loglevel", "warning",
-            "-y",
-            "-seekable", "1",
-            "-multiple_requests", "1",
-            "-initial_request_size", "2M",
-            "-request_size", "2M",
-            "-short_seek_size", "4M",
-            "-ss", str(start),
-            "-i", server.url,
-            "-t", str(duration),
-            "-map", "0:v:0?",
-            "-map", "0:a:0?",
-            "-c", "copy",
-            "-avoid_negative_ts", "make_zero",
-            "-movflags", "+faststart",
-            str(output),
-        )
+        source_duration = max(0.5, float(end) - start)
+        speed = max(0.25, min(float(speed or 1.0), 4.0))
+
+        common = [
+            FFMPEG_BIN, "-hide_banner", "-loglevel", "warning", "-y",
+            "-seekable", "1", "-multiple_requests", "1",
+            "-initial_request_size", "2M", "-request_size", "2M",
+            "-short_seek_size", "4M", "-ss", str(start),
+            "-i", server.url, "-t", str(source_duration),
+            "-map", "0:v:0?", "-map", "0:a:0?",
+        ]
+
+        if abs(speed - 1.0) < 0.03:
+            await run_command(
+                *common,
+                "-c:v", "copy", "-c:a", "copy",
+                "-avoid_negative_ts", "make_zero",
+                "-movflags", "+faststart", str(output),
+            )
+        else:
+            # speed = original duration / edited duration.
+            # Compress/expand the source interval so its playback matches the edit.
+            atempo = speed
+            audio_filters = []
+            while atempo > 2.0:
+                audio_filters.append("atempo=2.0")
+                atempo /= 2.0
+            while atempo < 0.5:
+                audio_filters.append("atempo=0.5")
+                atempo /= 0.5
+            audio_filters.append(f"atempo={atempo:.6f}")
+
+            await run_command(
+                *common,
+                "-vf", f"setpts=PTS/{speed:.8f}",
+                "-af", ",".join(audio_filters),
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                "-c:a", "aac", "-b:a", "192k",
+                "-avoid_negative_ts", "make_zero",
+                "-movflags", "+faststart", str(output),
+            )
     finally:
         await server.close()
 
     if not output.exists() or output.stat().st_size == 0:
         raise RuntimeError("FFmpeg ne clip output nahi banaya.")
     return output
-
 
 async def _make_edit_sample(input_video, start, duration, output):
     duration = max(1.0, min(float(duration), 12.0))
@@ -193,12 +207,49 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
     results=await asyncio.gather(*(worker(i,r) for i,r in enumerate(regions,1)))
     clips=sorted([x for x in results if x],key=lambda x:x["index"])
     if not clips: raise RuntimeError("Koi scene reliably match nahi hua.")
-    merged=unique_path(output_dir,"find_final.mp4")
-    list_path=output_dir/"concat.txt"
-    list_path.write_text("\n".join("file '"+str(Path(x["path"])).replace("'","'\\\\''")+"'" for x in clips),encoding="utf-8")
+    merged = unique_path(output_dir, "find_final.mp4")
+
+    # concat demuxer requires matching stream parameters. Normalize every
+    # matched scene to the highest quality represented in the result before
+    # concatenation, while preserving each scene's exact timeline.
+    quality_rank = {"360p": 360, "480p": 480, "720p": 720, "1080p": 1080, "1440p": 1440, "2160p": 2160, "auto": 720}
+    target_height = max(quality_rank.get(str(x.get("quality", "auto")), 720) for x in clips)
+    target_width = int(round(target_height * 16 / 9))
+    normalized = []
+
+    for x in clips:
+        src = Path(x["path"])
+        dst = unique_path(output_dir, f"normalized_{x['index']:02d}")
+        await run_command(
+            FFMPEG_BIN, "-hide_banner", "-loglevel", "warning", "-y",
+            "-i", str(src),
+            "-vf", f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
+                   f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2,setsar=1",
+            "-r", "30",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart", str(dst),
+        )
+        normalized.append(dst)
+
+    list_path = output_dir / "concat.txt"
+    list_path.write_text(
+        "\n".join(
+            "file '" + str(p).replace("'", "'\\''") + "'"
+            for p in normalized
+        ),
+        encoding="utf-8",
+    )
     try:
-        await run_command(FFMPEG_BIN,"-y","-f","concat","-safe","0","-i",str(list_path),"-c","copy","-movflags","+faststart",str(merged))
-    finally: list_path.unlink(missing_ok=True)
+        await run_command(
+            FFMPEG_BIN, "-hide_banner", "-loglevel", "warning", "-y",
+            "-f", "concat", "-safe", "0", "-i", str(list_path),
+            "-c", "copy", "-movflags", "+faststart", str(merged),
+        )
+    finally:
+        list_path.unlink(missing_ok=True)
+        for p in normalized:
+            p.unlink(missing_ok=True)
     report=["📋 SCENE DETAILS",""]
     for x in clips:
         report += [f"{x['index']:02d} │ {x['anime']} S{x['season']} E{x['episode']}",f"   EDIT {x['edit_start']:.2f}s → {x['edit_end']:.2f}s",f"   RAW  {x['start']:.2f}s → {x['end']:.2f}s",f"   ⚡ Speed: {x['speed']:.2f}×",f"   🎯 Confidence: {x['confidence']:.0%}",""]
