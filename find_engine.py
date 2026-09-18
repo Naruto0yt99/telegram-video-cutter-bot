@@ -227,7 +227,9 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
             return None
 
         candidate_index = int(result.get("candidate_index", 0) or 0)
-        selected = next((x for x in candidates if x["index"] == candidate_index), None)
+        # Gemini numbers only the successfully uploaded candidate videos.
+        # Map that display index back to the corresponding extracted window.
+        selected = candidates[candidate_index - 1] if 1 <= candidate_index <= len(candidates) else None
         if selected is None:
             return None
 
