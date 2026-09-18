@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import re
 import shutil
@@ -6,6 +7,7 @@ from html import escape
 from pathlib import Path
 
 from telethon import TelegramClient
+from telethon.sessions import MemorySession
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -72,6 +74,7 @@ logging.basicConfig(
 logger = logging.getLogger("anime-bot")
 
 telethon_client = None
+bot_mtproto_client = None
 source_sync_task = None
 job_lock = asyncio.Lock()
 active_videos = {}
@@ -101,18 +104,18 @@ def is_owner(user_id: int) -> bool:
 async def send_file(update: Update, path: Path, caption: str):
     size = path.stat().st_size
     if size > TELEGRAM_MAX_BYTES:
-        await update.message.reply_text(
-            f"⚠️ Output {size / 1024 / 1024:.1f} MB hai.\n"
-            f"Configured Telegram limit: {TELEGRAM_MAX_BYTES / 1024 / 1024:.0f} MB."
+        if bot_mtproto_client is None:
+            raise RuntimeError("Large Telegram file ke liye MTProto sender connected nahi hai.")
+        await bot_mtproto_client.send_file(
+            update.effective_chat.id,
+            str(path),
+            caption=caption,
+            supports_streaming=True,
         )
         return
 
     with path.open("rb") as f:
-        await update.message.reply_video(
-            video=f,
-            caption=caption,
-            supports_streaming=True,
-        )
+        await update.message.reply_video(video=f, caption=caption, supports_streaming=True)
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -549,7 +552,7 @@ async def receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         cleanup_user_temp(user_id)
-        path = await download_bot_video(message, user_id)
+        path = await download_bot_video(message, user_id, bot_mtproto_client)
         active_videos[user_id] = str(path)
         await message.reply_text(
             "✅ Original video set ho gaya.\n\n"
@@ -579,24 +582,32 @@ async def _run_source_sync():
 
 
 async def post_init(application: Application):
-    global telethon_client, source_sync_task
+    global telethon_client, bot_mtproto_client, source_sync_task
     init_db()
     if TG_API_ID and TG_API_HASH:
         telethon_client = TelegramClient(TELEGRAM_SESSION, TG_API_ID, TG_API_HASH)
         await telethon_client.start()
         logger.info("Telethon source client connected.")
+        bot_mtproto_client = TelegramClient(MemorySession(), TG_API_ID, TG_API_HASH)
+        await bot_mtproto_client.start(bot_token=BOT_TOKEN)
+        logger.info("Telethon bot media client connected.")
         source_sync_task = asyncio.create_task(_run_source_sync())
     else:
         logger.warning("TG_API_ID/TG_API_HASH missing. Telegram source features disabled.")
 
 
 async def post_shutdown(application: Application):
-    global telethon_client, source_sync_task
+    global telethon_client, bot_mtproto_client, source_sync_task
     if source_sync_task and not source_sync_task.done():
         source_sync_task.cancel()
         try:
             await source_sync_task
         except asyncio.CancelledError:
+            pass
+    if bot_mtproto_client:
+        try:
+            await bot_mtproto_client.disconnect()
+        except Exception:
             pass
     if telethon_client:
         try:
