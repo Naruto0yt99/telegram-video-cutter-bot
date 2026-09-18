@@ -91,7 +91,7 @@ def _episode_from_text(text: str):
     for candidate in _NUMBERED_EPISODE_PATTERN.finditer(text):
         match = candidate
     if match:
-        return "1", match.group("episode"), match, "season"
+        return None, match.group("episode"), match, "season"
 
     return None, None, None, None
 
