@@ -91,30 +91,51 @@ def read_remote_video_meta(path):
 
 
 async def download_bot_video(message, user_id):
-    """Register an incoming Telegram video without downloading it.
+    """Download an incoming Telegram video locally for /clip and /split.
 
-    The normal Bot API file download is intentionally NOT used here. A tiny
-    metadata file is stored locally and the actual media is later read by the
-    Telethon USER_SESSION through Telegram's range API when /clip or /split
-    needs a portion of the video.
+    The old metadata-only implementation required the USER_SESSION to read the
+    private bot conversation later. That caused the reported access error because
+    the USER_SESSION does not necessarily have access to that chat.
     """
     if not is_video_message(message):
         raise ValueError("Telegram message me video nahi hai.")
 
-    chat_id = getattr(message, "chat_id", None)
-    message_id = getattr(message, "message_id", None)
-    if chat_id is None or message_id is None:
-        raise RuntimeError("Telegram message reference nahi mila.")
+    bot = getattr(message, "_bot", None)
+    if bot is None:
+        raise RuntimeError("Telegram Bot API object unavailable.")
 
-    path = _remote_meta_path(user_id, message_id)
-    payload = {
-        "chat_id": int(chat_id),
-        "message_id": int(message_id),
-        "filename": get_message_video_name(message),
-    }
-    path.write_text(json.dumps(payload), encoding="utf-8")
+    file_id = None
+    video = getattr(message, "video", None)
+    if video is not None:
+        file_id = getattr(video, "file_id", None)
+
+    if not file_id:
+        document = getattr(message, "document", None)
+        if document is not None:
+            file_id = getattr(document, "file_id", None)
+
+    if not file_id:
+        raise RuntimeError("Telegram video ka file_id nahi mila.")
+
+    user_dir = ensure_dir(Path(TEMP_DIR) / str(user_id) / "original")
+    filename = safe_filename(get_message_video_name(message))
+    if not Path(filename).suffix:
+        filename += ".mp4"
+
+    path = Path(user_dir) / filename
+    if path.exists():
+        path = Path(user_dir) / (
+            f"{Path(filename).stem}_{getattr(message, 'message_id', 'video')}"
+            f"{Path(filename).suffix}"
+        )
+
+    telegram_file = await bot.get_file(file_id)
+    await telegram_file.download_to_drive(custom_path=str(path))
+
+    if not path.exists() or path.stat().st_size == 0:
+        raise RuntimeError("Telegram video download empty hai.")
+
     return path
-
 
 def parse_telegram_message_link(url):
     """
