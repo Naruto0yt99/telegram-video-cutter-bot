@@ -180,7 +180,7 @@ characters/anime are similar.
 
 
 
-def verify_source_candidates(edit_path: Path, candidate_paths, candidate_starts):
+async def verify_source_candidates(edit_path: Path, candidate_paths, candidate_starts):
     """Compare one edit sample against several candidate source windows in one Gemini call."""
     if not edit_path.exists() or not candidate_paths:
         return None
