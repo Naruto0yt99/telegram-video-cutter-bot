@@ -121,7 +121,7 @@ async def clip_command(update, context):
             )
             return
 
-        await status.edit_text(
+        await bot_module.safe_edit_text(status, 
             f"🎬 <b>CLIP</b>\n📚 Source: <b>{anime} S{season} E{episode}</b>\n🔎 Finding source...",
             parse_mode="HTML",
         )
@@ -129,7 +129,7 @@ async def clip_command(update, context):
         source, resolved_season, resolved_episode = _resolve_source(anime, season, episode)
         if not source:
             raise ValueError(f"{anime} S{season} E{episode} ka source library me nahi mila.")
-        await status.edit_text(
+        await bot_module.safe_edit_text(status, 
             f"🎬 <b>CLIP</b>\n📚 Source: <b>{anime} S{resolved_season} E{resolved_episode}</b>\n🔌 Connecting to Telegram source...",
             parse_mode="HTML",
         )
@@ -138,7 +138,7 @@ async def clip_command(update, context):
         if source_client is None:
             raise ValueError("Telegram source client connected nahi hai.")
 
-        await status.edit_text(
+        await bot_module.safe_edit_text(status, 
             f"🎬 <b>CLIP</b>\n📚 <b>{anime} S{resolved_season} E{resolved_episode}</b>\n📥 Fetching {format_time(start)} → {format_time(end)}...",
             parse_mode="HTML",
         )
@@ -146,7 +146,7 @@ async def clip_command(update, context):
         safe = re.sub(r"[^A-Za-z0-9._-]+", "_", f"clips_{anime}_S{resolved_season}E{resolved_episode}")
         output = unique_path(output_dir, safe + ".mp4")
         await _extract_remote_clip(source_client, source, start, end, output)
-        await status.edit_text(
+        await bot_module.safe_edit_text(status, 
             f"🎬 <b>CLIP</b>\n📚 <b>{anime} S{resolved_season} E{resolved_episode}</b>\n✂️ Clip ready\n📤 Sending...",
             parse_mode="HTML",
         )
@@ -156,7 +156,7 @@ async def clip_command(update, context):
             f"✂️ {anime} S{resolved_season} E{resolved_episode} {format_time(start)} - {format_time(end)}",
         )
         try:
-            await status.edit_text(
+            await bot_module.safe_edit_text(status, 
                 f"✅ <b>Done</b> — {anime} S{resolved_season} E{resolved_episode}\n✂️ {format_time(start)} → {format_time(end)}",
                 parse_mode="HTML",
             )
