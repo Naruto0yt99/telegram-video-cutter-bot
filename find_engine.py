@@ -3,7 +3,10 @@ import re
 from pathlib import Path
 
 from config import FFMPEG_BIN, TEMP_DIR
-from database import get_all_sources_for_episode
+from database import (
+    get_all_sources_for_episode,
+    get_all_sources_for_episode_any_season,
+)
 from ffmpeg_utils import run_command
 from gemini_analyzer import analyze_video
 from telegram_remote import open_telegram_range_server
@@ -31,16 +34,47 @@ def _source_for_region(region):
     if not anime or season is None or episode is None:
         return None, anime, season, episode, None
 
+    # First use the exact season/episode Gemini returned.
     sources = get_all_sources_for_episode(anime, season, episode)
+    resolved_season = season
+
+    # Some anime/source libraries continue episode numbering across seasons,
+    # while Gemini may assign the same episode to a different season. If the
+    # exact season has no source, safely fall back only when this episode exists
+    # in exactly one indexed season. This avoids guessing when episode numbers
+    # repeat across multiple seasons.
     if not sources:
-        return None, anime, season, episode, None
+        by_season = get_all_sources_for_episode_any_season(anime, episode)
+        if len(by_season) == 1:
+            resolved_season_text, sources = next(iter(by_season.items()))
+            resolved_season = _number(resolved_season_text)
+            logger.warning(
+                "Scene season mismatch: Gemini=%s S%s E%s; using indexed S%s E%s",
+                anime,
+                season,
+                episode,
+                resolved_season,
+                episode,
+            )
+        elif by_season:
+            logger.warning(
+                "Scene source ambiguous: anime=%r episode=%r exists in seasons=%s; "
+                "Gemini requested S%s",
+                anime,
+                episode,
+                sorted(by_season.keys()),
+                season,
+            )
+
+    if not sources:
+        return None, anime, resolved_season, episode, None
 
     for quality in QUALITY_ORDER:
         if quality in sources:
-            return sources[quality], anime, season, episode, quality
+            return sources[quality], anime, resolved_season, episode, quality
 
     quality, source = next(iter(sources.items()))
-    return source, anime, season, episode, quality
+    return source, anime, resolved_season, episode, quality
 
 
 async def _extract_remote_clip(client, source_url, start, end, output):
