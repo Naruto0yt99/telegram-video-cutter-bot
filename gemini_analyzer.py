@@ -176,8 +176,45 @@ def _analyze_video_sync(path: Path):
     data = _generate_video_prompt(name, _analysis_prompt(_catalog_text()), temperature=0.0)
     parsed = _parse_json(_text_from_response(data))
     regions = parsed.get("regions") if isinstance(parsed, dict) else None
+
+    # Retry once with a permissive prompt if the first JSON response has no regions.
+    # This keeps FIND best-effort instead of failing before Telegram extraction.
     if not isinstance(regions, list) or not regions:
-        raise RuntimeError("Gemini returned no usable anime regions")
+        logger.warning("Gemini pass=1 returned no regions; running permissive fallback")
+        fallback_prompt = f"""
+Watch the uploaded video and identify the anime footage in it.
+This is a BEST-EFFORT extraction task. Do not refuse because the exact anime,
+season, episode, or timestamp is uncertain.
+
+Return JSON only with this exact shape:
+{"regions":[{"start_time":0,"end_time":5,"anime":"NARUTO","season":1,"episode":27,"source_start_hint":755,"confidence":0.5}]}
+
+Rules:
+- Return every obvious contiguous anime segment.
+- start_time/end_time are seconds inside the uploaded edit.
+- source_start_hint is the best approximate timestamp in the original episode, in seconds.
+- If season/episode is uncertain, still make your best estimate; do not return empty regions.
+- Approximate timestamps are acceptable and may be off by several minutes.
+- Do not explain anything outside the JSON.
+
+Catalog: {catalog}
+"""
+        fallback_data = _generate_video_prompt(name, fallback_prompt, temperature=0.1)
+        fallback_parsed = _parse_json(_text_from_response(fallback_data))
+        if isinstance(fallback_parsed, dict):
+            regions = fallback_parsed.get("regions")
+            if not isinstance(regions, list) or not regions:
+                for key in ("clips", "scenes", "segments"):
+                    candidate = fallback_parsed.get(key)
+                    if isinstance(candidate, list) and candidate:
+                        fallback_parsed["regions"] = candidate
+                        regions = candidate
+                        break
+            if isinstance(regions, list) and regions:
+                parsed = fallback_parsed
+
+    if not isinstance(regions, list) or not regions:
+        raise RuntimeError("Gemini returned no usable anime regions after fallback")
     return parsed
 
 
