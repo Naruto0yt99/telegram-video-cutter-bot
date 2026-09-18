@@ -58,6 +58,7 @@ from ffmpeg_utils import (
 from find_engine import find_and_build, _extract_remote_clip
 from yt_downloader import download_video_from_url
 from source_sync import sync_source_library, render_library_html
+from utils import unique_path
 
 
 logging.basicConfig(
