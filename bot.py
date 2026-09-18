@@ -587,9 +587,21 @@ async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         input_path = await _get_active_video(user_id)
         if input_path is None:
             raise ValueError("Pehle original video bhejo.")
+
+        await status.edit_text(
+            f"✂️ SPLIT\n\n📱 Active original video\n"
+            f"⏱️ Part size: {part_duration}s\n\n⚙️ Splitting..."
+        )
         parts = await split_video(input_path, part_duration)
         for index, part in enumerate(parts, start=1):
+            await status.edit_text(
+                f"✂️ SPLIT\n\n🧩 Sending part {index}/{len(parts)}..."
+            )
             await send_file(update, part, f"✂️ Part {index}/{len(parts)}")
+            part.unlink(missing_ok=True)
+        await status.edit_text(
+            f"✂️ SPLIT COMPLETE ✅\n\n🧩 {len(parts)} parts sent."
+        )
     except Exception as exc:
         await update.message.reply_text(f"❌ {exc}")
 
