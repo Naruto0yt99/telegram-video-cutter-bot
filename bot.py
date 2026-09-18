@@ -626,11 +626,32 @@ async def run_remote_part(server_url, start_time, duration, output):
         "-t", str(duration),
         "-map", "0:v:0?",
         "-map", "0:a:0?",
-        "-c", "copy",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "20",
+        "-c:a", "aac",
+        "-b:a", "128k",
         "-avoid_negative_ts", "make_zero",
         "-movflags", "+faststart",
         str(output),
     )
+
+    if not output.exists() or output.stat().st_size <= 0:
+        raise RuntimeError("Remote split output empty bana hai.")
+
+    stdout, _ = await run_command(
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(output),
+    )
+    try:
+        verified_duration = float(stdout.strip())
+    except (TypeError, ValueError):
+        verified_duration = 0.0
+    if verified_duration <= 0.05:
+        raise RuntimeError(f"Remote split output duration invalid: {verified_duration}")
 
 
 async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
