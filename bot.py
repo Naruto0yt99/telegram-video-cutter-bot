@@ -486,6 +486,7 @@ def unique_source_clip_path(user_id, anime, season, episode):
 
 async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    status = await update.message.reply_text("✂️ SPLIT STARTED\n\n🔎 Finding source...")
     try:
         raw = " ".join(context.args).strip()
         source_match = re.match(r"^(\d+)\s+(.+?)\s+[Ss](\d+)\s+[Ee](\d+)$", raw)
@@ -496,23 +497,49 @@ async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             episode = source_match.group(4)
             if part_duration <= 0:
                 raise ValueError("Split duration positive hona chahiye.")
+
             source_url = get_best_source(anime, season, episode)
             if not source_url:
                 raise ValueError(f"{anime} S{season} E{episode} library me nahi mila.")
+
+            await status.edit_text(
+                f"✂️ SPLIT\n\n📚 {anime} S{season} E{episode}\n"
+                f"⏱️ Part size: {part_duration}s\n\n🔌 Connecting to Telegram source..."
+            )
             from telethon_runtime import ensure_telethon_client
             from telegram_remote import get_telegram_video_info
             from find_engine import _extract_remote_clip
             source_client = await ensure_telethon_client()
+
+            await status.edit_text(
+                f"✂️ SPLIT\n\n📚 {anime} S{season} E{episode}\n"
+                "📡 Reading episode duration..."
+            )
             chat_id, message_id = parse_telegram_message_link(source_url)
             _, total_duration, _ = await get_telegram_video_info(source_client, chat_id, message_id)
+
             output_dir = user_temp_dir(user_id) / f"split_{re.sub(r'[^A-Za-z0-9_-]+', '_', anime)}_S{season}E{episode}"
             output_dir.mkdir(parents=True, exist_ok=True)
             total_parts = max(1, int((total_duration + part_duration - 0.001) // part_duration))
+
+            await status.edit_text(
+                f"✂️ SPLIT\n\n📚 {anime} S{season} E{episode}\n"
+                f"⏱️ Duration: {format_time(total_duration)}\n"
+                f"🧩 Parts: {total_parts}\n\n"
+                "🚀 Starting..."
+            )
+
             cursor = 0.0
             index = 1
             while cursor < total_duration - 0.01:
                 part_end = min(cursor + part_duration, total_duration)
                 output = output_dir / f"part_{index:03d}.mp4"
+                await status.edit_text(
+                    f"✂️ SPLIT\n\n📚 {anime} S{season} E{episode}\n"
+                    f"🧩 Part {index}/{total_parts}\n"
+                    f"⏱️ {format_time(cursor)} → {format_time(part_end)}\n"
+                    "📡 Extracting from Telegram..."
+                )
                 try:
                     await _extract_remote_clip(source_client, source_url, cursor, part_end, output)
                     await send_file(
@@ -524,7 +551,12 @@ async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     output.unlink(missing_ok=True)
                 cursor = part_end
                 index += 1
+
             shutil.rmtree(output_dir, ignore_errors=True)
+            await status.edit_text(
+                f"✂️ SPLIT COMPLETE ✅\n\n📚 {anime} S{season} E{episode}\n"
+                f"🧩 {total_parts} parts sent."
+            )
             return
 
         part_duration = 30
