@@ -261,11 +261,18 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
                         "confidence": float(result.get("confidence", 0) or 0),
                     }
 
-        # Wide pass: use the remaining four windows only when the fast pass
-        # failed or returned a low-confidence match.
+        # Wide pass: if Gemini saw a possible match but was not confident,
+        # retry with all seven windows so the nearby candidate is not discarded.
+        # If there was no match at all, use only the four wider offsets.
+        had_low_confidence_match = bool(
+            result and result.get("match")
+        )
         for candidate in candidates:
             candidate["path"].unlink(missing_ok=True)
-        candidates = await run_batch(probe_batches[1], 3)
+        if had_low_confidence_match:
+            candidates = await run_batch(probe_batches[0] + probe_batches[1], 0)
+        else:
+            candidates = await run_batch(probe_batches[1], 3)
         if candidates:
             result = await verify_source_candidates(
                 edit_sample,
