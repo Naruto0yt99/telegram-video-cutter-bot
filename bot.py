@@ -695,7 +695,7 @@ async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"✂️ SPLIT\n\n📚 {anime} S{season} E{episode}\n"
                 f"⏱️ Duration: {format_time(total_duration)}\n"
                 f"🧩 Parts: {total_parts}\n\n"
-                "⚡ Preparing parts in parallel..."
+                "🔌 Opening remote video stream..."
             )
 
             await _stream_remote_split(
