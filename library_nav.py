@@ -1,6 +1,8 @@
 import base64
 import logging
 import re
+import unicodedata
+from difflib import get_close_matches
 from html import escape
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -44,10 +46,18 @@ _TOPIC_EXCLUDES = {
 
 
 def _norm(value: str) -> str:
-    value = (value or "").lower().replace("&", " and ")
-    value = re.sub(r"[._|•·]+", " ", value)
-    value = re.sub(r"\s+", " ", value).strip(" -_:[]()")
+    # NFKC converts mathematical/bold/italic Unicode alphabets back to normal
+    # characters, so users can type anime names in almost any decorative font.
+    value = unicodedata.normalize("NFKC", value or "")
+    value = value.casefold().replace("&", " and ")
+    value = re.sub(r"[^\w\s]+", " ", value, flags=re.UNICODE)
+    value = re.sub(r"_+", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
     return value
+
+
+def _compact(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", _norm(value))
 
 
 def canonical_anime(value: str):
@@ -57,6 +67,11 @@ def canonical_anime(value: str):
 
     if norm in _CANONICAL:
         return _CANONICAL[norm]
+
+    compact = _compact(value)
+    for key, canonical in _CANONICAL.items():
+        if _compact(key) == compact:
+            return canonical
 
     # Prefer the longest known title so "Naruto Shippuden" does not become
     # the shorter "Naruto" title when both words are present.
