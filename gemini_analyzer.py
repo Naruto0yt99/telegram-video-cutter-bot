@@ -154,7 +154,7 @@ def _analysis_prompt(catalog: str):
 Watch the uploaded YouTube anime edit and list every contiguous anime clip.
 Do ONLY timestamp identification. Do not search, compare, fingerprint, verify, or explain.
 For each clip return the closest catalog anime, season, episode, approximate START time in the original episode, and the clip start/end inside the uploaded edit.
-Use seconds as numbers. Best-effort timestamps are required; a few seconds of offset is acceptable.
+Use seconds as numbers. Best-effort timestamps are required. The source timestamp may be off by up to about 5 minutes; still return your best estimate rather than refusing or returning no result.
 Return ONLY JSON.
 
 Catalog: {catalog}
