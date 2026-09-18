@@ -405,52 +405,37 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⏳ Ek find job already chal raha hai.")
         return
 
-    status = await update.message.reply_text("🎯 FIND STARTED\n\n1️⃣ Video download ho raha hai...")
+    status = await update.message.reply_text("🎯 FIND — 0%\n\n📥 Edited video download ho raha hai...")
     user_id = update.effective_user.id
 
     try:
         async with job_lock:
             video_path = await download_video_from_url(url, user_id)
-            await safe_edit_text(status, "🎯 FIND\n\n1️⃣ Video downloaded ✅\n2️⃣ Gemini scene analysis...")
-            result = await find_and_build(
-                input_video=video_path,
-                user_id=user_id,
-                telethon_client=telethon_client,
-                progress_message=status,
-            )
-
+            await safe_edit_text(status, "🎯 FIND — 10%\n\n✅ Edited video ready\n🧠 Gemini shot-by-shot analysis...")
+            result = await find_and_build(input_video=video_path, user_id=user_id, telethon_client=telethon_client, progress_message=status)
             clips = result.get("clips", [])
-            await safe_edit_text(status, 
-                "🎯 FIND\n\n"
-                f"Gemini scenes: {result.get('total', len(clips))}\n"
-                f"Clips ready: {len(clips)}\n\n"
-                "📤 Clips bheje ja rahe hain..."
+            total = int(result.get("total", len(clips)))
+            merged = Path(result["output"])
+            caption = (
+                "🎬 FIND RESULT\n\n"
+                f"🎞️ Scenes: {total}\n"
+                f"📺 Sources: {len(result.get('sources') or [])} episodes\n"
+                f"⏱️ Duration: {format_time(sum(float(x.get('edit_duration', 0)) for x in clips))}\n"
+                "🎥 Quality: highest available\n\n"
+                "🤖 AnimeClipCutter"
             )
-
-            for item in clips:
-                caption = (
-                    f"🎬 Video\n"
-                    f"Clip {item['index']}\n"
-                    f"{item['anime']} S{item['season']} E{item['episode']} "
-                    f"{format_time(item['start'])} - {format_time(item['end'])}\n"
-                    f"⚠️ Approximate timestamp — manually adjust with /clips if needed."
-                )
-                await send_file(update, Path(item["path"]), caption)
-
-            if len(clips) < result.get("total", len(clips)):
-                await safe_edit_text(status, 
-                    "🎯 FIND COMPLETE\n\n"
-                    f"{len(clips)}/{result.get('total')} clips ready.\n"
-                    "Jin scenes ka source nahi mila, unhe skip kiya gaya."
-                )
-            else:
-                await safe_edit_text(status, "🎯 FIND COMPLETE ✅\n\nSab approximate clips bhej diye.")
+            await safe_edit_text(status, "🎯 FIND — 97%\n\n📤 Final video upload ho raha hai...")
+            await send_file(update, merged, caption)
+            report = result.get("report", "📋 SCENE DETAILS\n\nNo report available.")
+            for i in range(0, len(report), 3500):
+                part = report[i:i+3500]
+                await update.message.reply_text(part)
+            await safe_edit_text(status, f"🎯 FIND COMPLETE {'✅' if len(clips) == total else '⚠️'}\n\nMatched: {len(clips)}/{total}\nFinal merged video + scene details bhej diye.")
     except Exception as exc:
         logger.exception("Find failed")
         await safe_edit_text(status, f"❌ FIND FAILED\n\n{exc}")
     finally:
         cleanup_user_temp(user_id)
-
 
 async def _get_active_video(user_id: int):
     path_text = active_videos.get(user_id)
