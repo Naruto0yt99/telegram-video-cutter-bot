@@ -15,7 +15,7 @@ from utils import safe_filename, unique_path
 
 logger = logging.getLogger("simple-find")
 
-QUALITY_ORDER = ("720p", "1080p", "480p", "360p", "1440p", "2160p", "auto")
+QUALITY_ORDER = ("2160p", "1440p", "1080p", "720p", "480p", "360p", "auto")
 
 
 def _number(value):
