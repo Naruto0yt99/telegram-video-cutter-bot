@@ -136,8 +136,15 @@ async def download_bot_video(message, user_id, mtproto_client=None):
                 downloaded = await mtproto_client.download_media(mt_message, file=str(path))
                 if downloaded:
                     path = Path(downloaded)
-        except Exception:
-            pass
+        except Exception as exc:
+            import logging
+            logging.getLogger("anime-bot.telegram-media").warning(
+                "MTProto bot-media download failed for chat=%s message=%s: %s",
+                getattr(message, "chat_id", None),
+                getattr(message, "message_id", None),
+                exc,
+                exc_info=True,
+            )
 
     if not path.exists() or path.stat().st_size == 0:
         telegram_file = await bot.get_file(file_id)
