@@ -90,7 +90,7 @@ def read_remote_video_meta(path):
     return data
 
 
-async def download_bot_video(message, user_id):
+async def download_bot_video(message, user_id, mtproto_client=None):
     """Download an incoming Telegram video locally for /clip and /split.
 
     The old metadata-only implementation required the USER_SESSION to read the
@@ -129,8 +129,19 @@ async def download_bot_video(message, user_id):
             f"{Path(filename).suffix}"
         )
 
-    telegram_file = await bot.get_file(file_id)
-    await telegram_file.download_to_drive(custom_path=str(path))
+    if mtproto_client is not None:
+        try:
+            mt_message = await mtproto_client.get_messages(message.chat_id, ids=message.message_id)
+            if mt_message and mt_message.media:
+                downloaded = await mtproto_client.download_media(mt_message, file=str(path))
+                if downloaded:
+                    path = Path(downloaded)
+        except Exception:
+            pass
+
+    if not path.exists() or path.stat().st_size == 0:
+        telegram_file = await bot.get_file(file_id)
+        await telegram_file.download_to_drive(custom_path=str(path))
 
     if not path.exists() or path.stat().st_size == 0:
         raise RuntimeError("Telegram video download empty hai.")
