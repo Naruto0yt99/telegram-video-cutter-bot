@@ -28,6 +28,7 @@ from config import (
     TELEGRAM_SESSION,
     TEMP_DIR,
     TELEGRAM_MAX_BYTES,
+    FFMPEG_BIN,
     validate_bot_config,
 )
 
@@ -504,12 +505,108 @@ def unique_source_clip_path(user_id, anime, season, episode):
     return unique_path(user_temp_dir(user_id), name + ".mp4")
 
 
+async def _stream_remote_split(update, status, source_client, source_url, output_dir, part_duration, total_parts, anime, season, episode):
+    """Split a Telegram source in one sequential FFmpeg pass.
+
+    Some Telegram MP4 uploads keep the MP4 index (moov) at the end. In that
+    case a separate FFmpeg seek for every part makes the range proxy scan the
+    episode again and again. One segment-muxer pass avoids that repeated scan.
+    """
+    from telegram_remote import open_telegram_range_server
+
+    server = await open_telegram_range_server(source_client, source_url)
+    process = None
+    wait_task = None
+    stderr_task = None
+    sent = set()
+    try:
+        pattern = output_dir / "part_%03d.mp4"
+        process = await asyncio.create_subprocess_exec(
+            FFMPEG_BIN,
+            "-hide_banner",
+            "-loglevel", "warning",
+            "-y",
+            "-seekable", "1",
+            "-multiple_requests", "1",
+            "-initial_request_size", "2M",
+            "-request_size", "2M",
+            "-short_seek_size", "4M",
+            "-i", server.url,
+            "-map", "0:v:0?",
+            "-map", "0:a:0?",
+            "-c", "copy",
+            "-f", "segment",
+            "-segment_time", str(part_duration),
+            "-reset_timestamps", "1",
+            "-segment_format_options", "movflags=+faststart",
+            str(pattern),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        wait_task = asyncio.create_task(process.wait())
+        stderr_task = asyncio.create_task(process.stderr.read())
+
+        while not wait_task.done():
+            await asyncio.sleep(1.5)
+            for part in sorted(output_dir.glob("part_*.mp4")):
+                if part in sent or not part.exists() or part.stat().st_size <= 0:
+                    continue
+                size1 = part.stat().st_size
+                await asyncio.sleep(0.25)
+                if not part.exists() or part.stat().st_size != size1:
+                    continue
+                index = int(part.stem.rsplit("_", 1)[1])
+                await status.edit_text(
+                    f"✂️ SPLIT\\n\\n📚 {anime} S{season} E{episode}\\n"
+                    f"🧩 Part {index}/{total_parts}\\n"
+                    f"📤 Sending completed part...\\n"
+                    "ℹ️ Source is being read only once."
+                )
+                await send_file(
+                    update,
+                    part,
+                    f"✂️ {anime} S{season} E{episode} — Part {index}/{total_parts}",
+                )
+                sent.add(part)
+                part.unlink(missing_ok=True)
+
+        return_code = await wait_task
+        stderr = (await stderr_task).decode(errors="replace").strip()
+        for part in sorted(output_dir.glob("part_*.mp4")):
+            if part in sent or not part.exists() or part.stat().st_size <= 0:
+                continue
+            index = int(part.stem.rsplit("_", 1)[1])
+            await status.edit_text(
+                f"✂️ SPLIT\\n\\n📚 {anime} S{season} E{episode}\\n"
+                f"🧩 Part {index}/{total_parts}\\n📤 Sending..."
+            )
+            await send_file(
+                update,
+                part,
+                f"✂️ {anime} S{season} E{episode} — Part {index}/{total_parts}",
+            )
+            sent.add(part)
+            part.unlink(missing_ok=True)
+
+        if return_code != 0:
+            raise RuntimeError(stderr or "FFmpeg remote split failed.")
+        if len(sent) != total_parts:
+            raise RuntimeError(
+                f"Remote split incomplete: {len(sent)}/{total_parts} parts generated."
+            )
+    finally:
+        if process is not None and process.returncode is None:
+            process.kill()
+            await process.wait()
+        await server.close()
+
+
 async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    status = await update.message.reply_text("✂️ SPLIT STARTED\n\n🔎 Finding source...")
+    status = await update.message.reply_text("✂️ SPLIT STARTED\\n\\n🔎 Finding source...")
     try:
         raw = " ".join(context.args).strip()
-        source_match = re.match(r"^(\d+)\s+(.+?)\s+[Ss](\d+)\s+[Ee](\d+)$", raw)
+        source_match = re.match(r"^(\\d+)\\s+(.+?)\\s+[Ss](\\d+)\\s+[Ee](\\d+)$", raw)
         if source_match:
             part_duration = int(source_match.group(1))
             anime = source_match.group(2).strip()
@@ -523,16 +620,15 @@ async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 raise ValueError(f"{anime} S{season} E{episode} library me nahi mila.")
 
             await status.edit_text(
-                f"✂️ SPLIT\n\n📚 {anime} S{season} E{episode}\n"
-                f"⏱️ Part size: {part_duration}s\n\n🔌 Connecting to Telegram source..."
+                f"✂️ SPLIT\\n\\n📚 {anime} S{season} E{episode}\\n"
+                f"⏱️ Part size: {part_duration}s\\n\\n🔌 Connecting to Telegram source..."
             )
             from telethon_runtime import ensure_telethon_client
             from telegram_remote import get_telegram_video_info
-            from find_engine import _extract_remote_clip
             source_client = await ensure_telethon_client()
 
             await status.edit_text(
-                f"✂️ SPLIT\n\n📚 {anime} S{season} E{episode}\n"
+                f"✂️ SPLIT\\n\\n📚 {anime} S{season} E{episode}\\n"
                 "📡 Reading episode duration..."
             )
             chat_id, message_id = parse_telegram_message_link(source_url)
@@ -543,39 +639,30 @@ async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             total_parts = max(1, int((total_duration + part_duration - 0.001) // part_duration))
 
             await status.edit_text(
-                f"✂️ SPLIT\n\n📚 {anime} S{season} E{episode}\n"
-                f"⏱️ Duration: {format_time(total_duration)}\n"
-                f"🧩 Parts: {total_parts}\n\n"
-                "🚀 Starting..."
+                f"✂️ SPLIT\\n\\n📚 {anime} S{season} E{episode}\\n"
+                f"⏱️ Duration: {format_time(total_duration)}\\n"
+                f"🧩 Parts: {total_parts}\\n\\n"
+                "🚀 Starting one-pass remote split..."
             )
 
-            cursor = 0.0
-            index = 1
-            while cursor < total_duration - 0.01:
-                part_end = min(cursor + part_duration, total_duration)
-                output = output_dir / f"part_{index:03d}.mp4"
-                await status.edit_text(
-                    f"✂️ SPLIT\n\n📚 {anime} S{season} E{episode}\n"
-                    f"🧩 Part {index}/{total_parts}\n"
-                    f"⏱️ {format_time(cursor)} → {format_time(part_end)}\n"
-                    "📡 Extracting from Telegram..."
-                )
-                try:
-                    await _extract_remote_clip(source_client, source_url, cursor, part_end, output)
-                    await send_file(
-                        update,
-                        output,
-                        f"✂️ {anime} S{season} E{episode} — Part {index}/{total_parts}",
-                    )
-                finally:
-                    output.unlink(missing_ok=True)
-                cursor = part_end
-                index += 1
+            await _stream_remote_split(
+                update,
+                status,
+                source_client,
+                source_url,
+                output_dir,
+                part_duration,
+                total_parts,
+                anime,
+                season,
+                episode,
+            )
 
             shutil.rmtree(output_dir, ignore_errors=True)
             await status.edit_text(
-                f"✂️ SPLIT COMPLETE ✅\n\n📚 {anime} S{season} E{episode}\n"
-                f"🧩 {total_parts} parts sent."
+                f"✂️ SPLIT COMPLETE ✅\\n\\n📚 {anime} S{season} E{episode}\\n"
+                f"🧩 {total_parts} parts sent.\\n"
+                "📡 Telegram source was read in one FFmpeg pass."
             )
             return
 
@@ -589,21 +676,22 @@ async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             raise ValueError("Pehle original video bhejo.")
 
         await status.edit_text(
-            f"✂️ SPLIT\n\n📱 Active original video\n"
-            f"⏱️ Part size: {part_duration}s\n\n⚙️ Splitting..."
+            f"✂️ SPLIT\\n\\n📱 Active original video\\n"
+            f"⏱️ Part size: {part_duration}s\\n\\n⚙️ Splitting..."
         )
         parts = await split_video(input_path, part_duration)
         for index, part in enumerate(parts, start=1):
             await status.edit_text(
-                f"✂️ SPLIT\n\n🧩 Sending part {index}/{len(parts)}..."
+                f"✂️ SPLIT\\n\\n🧩 Sending part {index}/{len(parts)}..."
             )
             await send_file(update, part, f"✂️ Part {index}/{len(parts)}")
             part.unlink(missing_ok=True)
         await status.edit_text(
-            f"✂️ SPLIT COMPLETE ✅\n\n🧩 {len(parts)} parts sent."
+            f"✂️ SPLIT COMPLETE ✅\\n\\n🧩 {len(parts)} parts sent."
         )
     except Exception as exc:
-        await update.message.reply_text(f"❌ {exc}")
+        logger.exception("Split failed")
+        await status.edit_text(f"❌ SPLIT FAILED\\n\\n{exc}")
 
 
 async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
