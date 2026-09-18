@@ -10,7 +10,7 @@ from telegram_media import is_video_message, get_message_video_name
 from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
-PARSER_VERSION = 4
+PARSER_VERSION = 6
 
 
 _QUALITY_PATTERNS = [
@@ -126,7 +126,7 @@ def _canonical_from_candidates(*values):
     return None
 
 
-def parse_episode_metadata(message: Message):
+def parse_episode_metadata(message: Message, topic_text: str = ""):
     filename = _clean_caption(get_message_video_name(message))
     caption = _clean_caption(getattr(message, "message", "") or "")
     combined = _clean_caption(f"{caption} {filename}")
@@ -137,8 +137,17 @@ def parse_episode_metadata(message: Message):
         season, episode, marker, content_type = _episode_from_text(combined)
         marker_source = combined
 
+    topic_text = _clean_caption(topic_text)
+    topic_season = None
+    topic_match = re.search(r"\\b(?:Season|S)\\s*[-._ ]?(\\d{1,3})\\b", topic_text, re.I)
+    if topic_match:
+        topic_season = str(int(topic_match.group(1)))
+
     if episode is None or not marker:
         return None
+
+    if content_type == "season" and season is None and topic_season:
+        season = topic_season
 
     anime_from_caption = _anime_from_text(caption, marker) if marker_source == caption else _anime_from_text(marker_source, marker)
     filename_parts = _episode_from_text(filename)
@@ -234,6 +243,33 @@ def _message_link(message: Message):
     return None
 
 
+async def _topic_text_for_message(client, entity, message, cache):
+    reply = getattr(message, "reply_to", None)
+    top_id = getattr(reply, "reply_to_top_id", None) if reply else None
+    if not top_id:
+        return ""
+    if top_id in cache:
+        return cache[top_id]
+    try:
+        root = await client.get_messages(entity, ids=top_id)
+        text = _clean_caption(getattr(root, "message", "") or "") if root else ""
+    except Exception:
+        logger.debug("Could not read topic root id=%s", top_id, exc_info=True)
+        text = ""
+    cache[top_id] = text
+    return text
+
+
+def _reset_index_for_parser_upgrade(last_version: int):
+    if last_version == PARSER_VERSION:
+        return
+    prefix = f"https://t.me/{SOURCE_CHAT}/%"
+    with get_connection() as conn:
+        conn.execute("DELETE FROM library WHERE source_url LIKE ?", (prefix,))
+        conn.commit()
+    logger.info("Rebuilding source index after parser upgrade %s -> %s", last_version, PARSER_VERSION)
+
+
 async def sync_source_library(client):
     """Index only recognized anime episode/video sources from SOURCE_CHAT."""
     if client is None:
@@ -241,6 +277,18 @@ async def sync_source_library(client):
 
     _ensure_sync_table()
     last_id, initial_complete = _get_sync_state()
+
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT parser_version FROM source_sync_state WHERE source_chat = ?",
+            (str(SOURCE_CHAT),),
+        ).fetchone()
+    stored_version = int(row[0]) if row and row[0] is not None else 0
+    if stored_version != PARSER_VERSION:
+        _reset_index_for_parser_upgrade(stored_version)
+        last_id = 0
+        initial_complete = False
+        _set_sync_state(0, False)
 
     if initial_complete and not _library_has_sources():
         last_id = 0
@@ -250,6 +298,7 @@ async def sync_source_library(client):
     indexed = 0
     skipped = 0
     newest_seen = last_id
+    topic_cache = {}
 
     entity = await client.get_entity(SOURCE_CHAT)
     logger.info(
@@ -272,7 +321,8 @@ async def sync_source_library(client):
             skipped += 1
             continue
 
-        metadata = parse_episode_metadata(message)
+        topic_text = await _topic_text_for_message(client, entity, message, topic_cache)
+        metadata = parse_episode_metadata(message, topic_text)
         link = _message_link(message)
 
         if not metadata or not link:
