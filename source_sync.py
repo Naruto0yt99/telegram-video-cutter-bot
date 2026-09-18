@@ -145,7 +145,8 @@ def _naruto_global_episode(anime, season, episode):
     if anime != "Naruto Shippuden" or season not in {"16", "17"}:
         return None
     local = int(episode)
-    if not 1 <= local <= 20:
+    max_local = {"16": 12, "17": 12}[season]
+    if not 1 <= local <= max_local:
         return None
     base = {"16": 348, "17": 360}[season]
     return str(base + local)
