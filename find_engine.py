@@ -217,8 +217,7 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
         if not candidates:
             return None
 
-        result = await asyncio.to_thread(
-            verify_source_candidates,
+        result = await verify_source_candidates(
             edit_sample,
             [x["path"] for x in candidates],
             [x["start"] for x in candidates],
