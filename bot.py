@@ -59,6 +59,7 @@ from find_engine import find_and_build, _extract_remote_clip
 from yt_downloader import download_video_from_url
 from source_sync import sync_source_library, render_library_html
 from utils import unique_path
+from clip_handler import clip_command as source_clip_command
 
 
 logging.basicConfig(
@@ -584,8 +585,8 @@ def main():
     application.add_handler(CommandHandler("save", save_command))
     application.add_handler(CommandHandler("edit", edit_handler))
     application.add_handler(CommandHandler("find", find_command))
-    application.add_handler(CommandHandler("clip", clip_command))
-    application.add_handler(CommandHandler("clips", clip_command))
+    application.add_handler(CommandHandler("clip", source_clip_command))
+    application.add_handler(CommandHandler("clips", source_clip_command))
     application.add_handler(CommandHandler("split", split_command))
     application.add_handler(CommandHandler("next", next_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
