@@ -8,7 +8,6 @@ from library_nav import canonical_anime
 from telegram_remote import open_telegram_range_server
 from find_engine import _extract_remote_clip
 from utils import unique_path
-from bot import safe_edit_text
 
 
 _SOURCE_RE = re.compile(
@@ -116,7 +115,7 @@ async def clip_command(update, context):
 
         anime = _resolve_anime(requested_anime)
         if not anime:
-            await safe_edit_text(status, 
+            await bot_module.safe_edit_text(status, 
                 f"❌ Anime <code>{requested_anime}</code> library me nahi mila.",
                 parse_mode="HTML",
             )
