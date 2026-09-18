@@ -115,13 +115,15 @@ async def clip_command(update, context):
         source, resolved_season, resolved_episode = _resolve_source(anime, season, episode)
         if not source:
             raise ValueError(f"{anime} S{season} E{episode} ka source library me nahi mila.")
-        if bot_module.telethon_client is None:
+        from telethon_runtime import ensure_telethon_client
+        source_client = await ensure_telethon_client()
+        if source_client is None:
             raise ValueError("Telegram source client connected nahi hai.")
 
         output_dir = bot_module.user_temp_dir(user_id)
         safe = re.sub(r"[^A-Za-z0-9._-]+", "_", f"clips_{anime}_S{resolved_season}E{resolved_episode}")
         output = unique_path(output_dir, safe + ".mp4")
-        await _extract_remote_clip(bot_module.telethon_client, source, start, end, output)
+        await _extract_remote_clip(source_client, source, start, end, output)
         await bot_module.send_file(
             update,
             output,
