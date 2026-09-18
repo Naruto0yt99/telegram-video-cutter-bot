@@ -129,22 +129,53 @@ def _parse_range(header, size):
     return start, end
 
 
-async def _read_range_once(client, media, start, end, request_size):
-    aligned_start = (start // ALIGN_BYTES) * ALIGN_BYTES
-    needed = end - aligned_start + 1
-    result = bytearray()
+async def _read_one_chunk(client, media, offset, request_size):
+    """Read one Telegram MTProto chunk.
 
+    Telethon's Telegram GetFile limit makes ~512 KiB the practical maximum
+    request size. The old implementation fetched those chunks strictly one
+    after another, so a 2-minute FFmpeg seek could become dozens of sequential
+    network round trips. Run a small bounded number of independent chunks in
+    parallel instead.
+    """
     async for chunk in client.iter_download(
         media,
-        offset=aligned_start,
+        offset=offset,
         request_size=request_size,
         chunk_size=request_size,
     ):
-        if not chunk:
-            break
-        result.extend(bytes(chunk))
-        if len(result) >= needed:
-            break
+        if chunk:
+            return bytes(chunk)
+        break
+    return b""
+
+
+async def _read_range_once(client, media, start, end, request_size):
+    aligned_start = (start // ALIGN_BYTES) * ALIGN_BYTES
+    needed = end - aligned_start + 1
+    chunk_offsets = list(range(aligned_start, aligned_start + needed, request_size))
+    pieces = {}
+    parallelism = 4
+
+    for batch_start in range(0, len(chunk_offsets), parallelism):
+        batch = chunk_offsets[batch_start : batch_start + parallelism]
+        values = await asyncio.gather(
+            *(_read_one_chunk(client, media, offset, request_size) for offset in batch),
+            return_exceptions=True,
+        )
+        for offset, value in zip(batch, values):
+            if isinstance(value, Exception):
+                raise value
+            if not value:
+                raise RuntimeError(f"Telegram returned an empty chunk at offset {offset}.")
+            pieces[offset] = value
+
+    result = bytearray()
+    for offset in chunk_offsets:
+        chunk = pieces.get(offset)
+        if chunk is None:
+            raise RuntimeError(f"Telegram chunk missing at offset {offset}.")
+        result.extend(chunk)
 
     trim_start = start - aligned_start
     return bytes(result[trim_start : trim_start + (end - start + 1)])
