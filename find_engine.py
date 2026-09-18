@@ -101,7 +101,15 @@ async def _extract_remote_clip(client, source_url, start, end, output, speed=1.0
     server = await open_telegram_range_server(client, source_url)
     try:
         start = max(0.0, float(start))
-        source_duration = max(0.5, float(end) - start)
+        end = max(start + 0.05, float(end))
+        # Clamp remote seeks to the real episode duration so a bad Gemini
+        # timestamp near/after EOF cannot make FFmpeg fail before extraction.
+        max_start = max(0.0, float(server.duration) - 0.05)
+        start = min(start, max_start)
+        end = min(end, float(server.duration))
+        if end <= start:
+            raise RuntimeError("Requested source interval is outside the episode.")
+        source_duration = max(0.05, end - start)
         speed = max(0.25, min(float(speed or 1.0), 4.0))
 
         common = [
@@ -175,16 +183,16 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
     edit_sample = output_dir / f"verify_edit_{int(edit_start * 1000)}.mp4"
     await _make_edit_sample(input_video, edit_start, sample_len, edit_sample)
 
-    # Do not call Gemini once per probe. The old 9-probe loop uploaded and
-    # processed a new source video on every attempt, so one scene could spend
-    # many minutes waiting on repeated Gemini file processing. Build a small
-    # set of candidate windows locally, then let one Gemini request compare all
-    # candidates against the edit sample.
-    centers = [0, -120, 120, -300, 300, -600, 600]
+    # Start with the most likely windows. Only expand to the wider +/-5/10 min
+    # probes when the fast pass does not produce a sufficiently confident match.
     probe_duration = max(12.0, min(16.0, edit_length * 2.0))
+    probe_batches = (
+        (0, -120, 120),
+        (-300, 300, -600, 600),
+    )
     candidates = []
 
-    async def extract_candidate(probe_index, offset):
+    async def extract_candidate(probe_index, offset, batch_total):
         center = max(0.0, hint + offset)
         ws = max(0.0, center - probe_duration / 2)
         src = output_dir / f"verify_source_{int(ws)}_{probe_index}.mp4"
@@ -192,7 +200,7 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
             progress_message,
             15,
             f"🔎 {scene_label} — exact source search",
-            f"Candidate {probe_index}/{len(centers)} • around {ws:.0f}s",
+            f"Candidate {probe_index}/{batch_total} • around {ws:.0f}s",
         )
         try:
             await _extract_remote_clip(client, source_url, ws, ws + probe_duration, src)
@@ -201,47 +209,91 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
             logger.exception("Candidate extraction failed probe=%s around=%s", probe_index, ws)
             return None
 
-    try:
-        # Limit remote Telegram work so the phone does not open seven large
-        # range/FFmpeg operations at once.
+    async def run_batch(offsets, index_base):
+        batch_total = len(offsets)
         sem = asyncio.Semaphore(3)
 
         async def guarded(i, offset):
             async with sem:
-                return await extract_candidate(i, offset)
+                return await extract_candidate(index_base + i, offset, batch_total)
 
         extracted = await asyncio.gather(
-            *(guarded(i, offset) for i, offset in enumerate(centers, 1))
+            *(guarded(i, offset) for i, offset in enumerate(offsets, 1))
         )
-        candidates = [x for x in extracted if x]
-        if not candidates:
-            return None
+        return [x for x in extracted if x]
 
-        result = await verify_source_candidates(
-            edit_sample,
-            [x["path"] for x in candidates],
-            [x["start"] for x in candidates],
-        )
+    def usable_result(result):
         if not result or not result.get("match"):
-            return None
+            return False
+        try:
+            return float(result.get("confidence", 0) or 0) >= 0.60
+        except (TypeError, ValueError):
+            return False
 
-        candidate_index = int(result.get("candidate_index", 0) or 0)
-        # Gemini numbers only the successfully uploaded candidate videos.
-        # Map that display index back to the corresponding extracted window.
-        selected = candidates[candidate_index - 1] if 1 <= candidate_index <= len(candidates) else None
-        if selected is None:
-            return None
+    try:
+        # Fast pass: 3 nearby candidates. This avoids uploading/processing all
+        # seven windows for the common case where Gemini's timestamp hint is close.
+        candidates = await run_batch(probe_batches[0], 0)
+        if candidates:
+            result = await verify_source_candidates(
+                edit_sample,
+                [x["path"] for x in candidates],
+                [x["start"] for x in candidates],
+            )
+            logger.info(
+                "FIND source verification fast pass scene=%s match=%s confidence=%s candidate=%s",
+                scene_label,
+                bool(result and result.get("match")),
+                result.get("confidence") if result else None,
+                result.get("candidate_index") if result else None,
+            )
+            if usable_result(result):
+                candidate_index = int(result.get("candidate_index", 0) or 0)
+                selected = candidates[candidate_index - 1] if 1 <= candidate_index <= len(candidates) else None
+                if selected is not None:
+                    off = float(result.get("offset_in_candidate", 0) or 0)
+                    sd = float(result.get("source_duration", 0) or 0)
+                    sp = float(result.get("speed", 1) or 1)
+                    return {
+                        "start": max(0.0, selected["start"] + off),
+                        "source_duration": max(0.5, sd or edit_length * sp),
+                        "speed": max(0.25, min(sp, 4.0)),
+                        "confidence": float(result.get("confidence", 0) or 0),
+                    }
 
-        conf = float(result.get("confidence", 0) or 0)
-        off = float(result.get("offset_in_candidate", 0) or 0)
-        sd = float(result.get("source_duration", 0) or 0)
-        sp = float(result.get("speed", 1) or 1)
-        return {
-            "start": max(0.0, selected["start"] + off),
-            "source_duration": max(0.5, sd or edit_length * sp),
-            "speed": max(0.25, min(sp, 4.0)),
-            "confidence": conf,
-        }
+        # Wide pass: use the remaining four windows only when the fast pass
+        # failed or returned a low-confidence match.
+        for candidate in candidates:
+            candidate["path"].unlink(missing_ok=True)
+        candidates = await run_batch(probe_batches[1], 3)
+        if candidates:
+            result = await verify_source_candidates(
+                edit_sample,
+                [x["path"] for x in candidates],
+                [x["start"] for x in candidates],
+            )
+            logger.info(
+                "FIND source verification wide pass scene=%s match=%s confidence=%s candidate=%s",
+                scene_label,
+                bool(result and result.get("match")),
+                result.get("confidence") if result else None,
+                result.get("candidate_index") if result else None,
+            )
+            if result and result.get("match"):
+                candidate_index = int(result.get("candidate_index", 0) or 0)
+                selected = candidates[candidate_index - 1] if 1 <= candidate_index <= len(candidates) else None
+                if selected is not None:
+                    conf = float(result.get("confidence", 0) or 0)
+                    off = float(result.get("offset_in_candidate", 0) or 0)
+                    sd = float(result.get("source_duration", 0) or 0)
+                    sp = float(result.get("speed", 1) or 1)
+                    return {
+                        "start": max(0.0, selected["start"] + off),
+                        "source_duration": max(0.5, sd or edit_length * sp),
+                        "speed": max(0.25, min(sp, 4.0)),
+                        "confidence": conf,
+                    }
+        return None
     finally:
         edit_sample.unlink(missing_ok=True)
         for candidate in candidates:
