@@ -507,18 +507,24 @@ async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _, total_duration, _ = await get_telegram_video_info(source_client, chat_id, message_id)
             output_dir = user_temp_dir(user_id) / f"split_{re.sub(r'[^A-Za-z0-9_-]+', '_', anime)}_S{season}E{episode}"
             output_dir.mkdir(parents=True, exist_ok=True)
+            total_parts = max(1, int((total_duration + part_duration - 0.001) // part_duration))
             cursor = 0.0
-            parts = []
             index = 1
             while cursor < total_duration - 0.01:
                 part_end = min(cursor + part_duration, total_duration)
                 output = output_dir / f"part_{index:03d}.mp4"
-                await _extract_remote_clip(source_client, source_url, cursor, part_end, output)
-                parts.append(output)
+                try:
+                    await _extract_remote_clip(source_client, source_url, cursor, part_end, output)
+                    await send_file(
+                        update,
+                        output,
+                        f"✂️ {anime} S{season} E{episode} — Part {index}/{total_parts}",
+                    )
+                finally:
+                    output.unlink(missing_ok=True)
                 cursor = part_end
                 index += 1
-            for index, part in enumerate(parts, start=1):
-                await send_file(update, part, f"✂️ {anime} S{season} E{episode} — Part {index}/{len(parts)}")
+            shutil.rmtree(output_dir, ignore_errors=True)
             return
 
         part_duration = 30
