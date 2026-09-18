@@ -284,15 +284,14 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
                 selected = candidates[candidate_index - 1] if 1 <= candidate_index <= len(candidates) else None
                 if selected is not None:
                     off = float(result.get("offset_in_candidate", 0) or 0)
-                    sd = float(result.get("source_duration", 0) or 0)
-                    sp = float(result.get("speed", 1) or 1)
+                    sp = max(0.25, min(float(result.get("speed", 1) or 1), 4.0))
                     return {
                         "start": max(0.0, selected["start"] + max(0.0, min(off, probe_duration - 0.5))),
                         # Gemini can occasionally return a wildly wrong duration.
                         # The edited scene length and speed are sufficient to derive
                         # the required original interval, so keep those authoritative.
                         "source_duration": max(0.5, edit_length * sp),
-                        "speed": max(0.25, min(sp, 4.0)),
+                        "speed": sp,
                         "confidence": float(result.get("confidence", 0) or 0),
                     }
 
@@ -327,12 +326,11 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
                 if selected is not None:
                     conf = float(result.get("confidence", 0) or 0)
                     off = float(result.get("offset_in_candidate", 0) or 0)
-                    sd = float(result.get("source_duration", 0) or 0)
-                    sp = float(result.get("speed", 1) or 1)
+                    sp = max(0.25, min(float(result.get("speed", 1) or 1), 4.0))
                     return {
-                        "start": max(0.0, selected["start"] + off),
-                        "source_duration": max(0.5, sd or edit_length * sp),
-                        "speed": max(0.25, min(sp, 4.0)),
+                        "start": max(0.0, selected["start"] + max(0.0, min(off, probe_duration - 0.5))),
+                        "source_duration": max(0.5, edit_length * sp),
+                        "speed": sp,
                         "confidence": conf,
                     }
         return None
