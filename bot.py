@@ -264,26 +264,26 @@ async def edit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Keep anime names with spaces intact.
         add_match = re.match(
-            r"^add\\s+(.+?)\\s+[Ss](\\d+)\\s+[Ee](\\d+)\\s+(\\S+)\\s+(https?://\\S+)$",
+            r"^add\s+(.+?)\s+[Ss](\d+)\s+[Ee](\d+)\s+(\S+)\s+(https?://\S+)$",
             raw,
             re.IGNORECASE,
         )
         delete_match = re.match(
-            r"^delete\\s+(.+?)\\s+[Ss](\\d+)\\s+[Ee](\\d+)\\s+(\\S+)$",
+            r"^delete\s+(.+?)\s+[Ss](\d+)\s+[Ee](\d+)\s+(\S+)$",
             raw,
             re.IGNORECASE,
         )
         episode_match = re.match(
-            r"^delete_episode\\s+(.+?)\\s+[Ss](\\d+)\\s+[Ee](\\d+)$",
+            r"^delete_episode\s+(.+?)\s+[Ss](\d+)\s+[Ee](\d+)$",
             raw,
             re.IGNORECASE,
         )
         season_match = re.match(
-            r"^delete_season\\s+(.+?)\\s+[Ss](\\d+)$",
+            r"^delete_season\s+(.+?)\s+[Ss](\d+)$",
             raw,
             re.IGNORECASE,
         )
-        anime_delete_match = re.match(r"^delete_anime\\s+(.+)$", raw, re.IGNORECASE)
+        anime_delete_match = re.match(r"^delete_anime\s+(.+)$", raw, re.IGNORECASE)
 
         if add_match:
             anime, season, episode, quality, url = add_match.groups()
