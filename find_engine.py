@@ -8,7 +8,7 @@ from database import (
     get_all_sources_for_episode_any_season,
 )
 from ffmpeg_utils import run_command
-from gemini_analyzer import analyze_video
+from gemini_analyzer import analyze_video, verify_source_match
 from telegram_remote import open_telegram_range_server
 from utils import safe_filename, unique_path
 
@@ -116,7 +116,63 @@ async def _extract_remote_clip(client, source_url, start, end, output):
     return output
 
 
+async def _make_edit_sample(input_video, start, duration, output):
+    duration = max(1.0, min(float(duration), 12.0))
+    await run_command(
+        FFMPEG_BIN, "-hide_banner", "-loglevel", "warning", "-y",
+        "-ss", str(max(0.0, float(start))), "-i", str(input_video),
+        "-t", str(duration), "-an",
+        "-vf", "scale=480:-2", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30",
+        str(output),
+    )
+    if not output.exists() or output.stat().st_size == 0:
+        raise RuntimeError("Edit sample nahi bana.")
+    return output
+
+
+async def _verify_region(input_video, client, source_url, region, output_dir):
+    hint = float(region.get("source_start_hint"))
+    edit_start = float(region["start_time"])
+    edit_length = max(1.0, float(region["end_time"]) - edit_start)
+    sample_len = min(12.0, edit_length)
+    edit_sample = output_dir / f"verify_edit_{int(edit_start * 1000)}.mp4"
+    await _make_edit_sample(input_video, edit_start, sample_len, edit_sample)
+
+    # First pass: a compact +/-60s window around Gemini's hint.
+    # Fallback: a wider +/-5min window only when the first pass cannot match.
+    windows = [(max(0.0, hint - 60.0), sample_len + 120.0)]
+    windows.append((max(0.0, hint - 300.0), sample_len + 600.0))
+
+    best = None
+    try:
+        for window_start, window_duration in windows:
+            source_sample = output_dir / f"verify_source_{int(window_start)}.mp4"
+            try:
+                await _extract_remote_clip(
+                    client, source_url, window_start, window_start + window_duration, source_sample
+                )
+                result = await asyncio.to_thread(
+                    verify_source_match, edit_sample, source_sample, window_start
+                )
+                if result and result.get("match"):
+                    confidence = float(result.get("confidence", 0.0))
+                    if best is None or confidence > best[0]:
+                        best = (confidence, result, window_start)
+                    if confidence >= 0.85:
+                        break
+            finally:
+                source_sample.unlink(missing_ok=True)
+    finally:
+        edit_sample.unlink(missing_ok=True)
+
+    if not best:
+        return None
+    _, result, window_start = best
+    return max(0.0, window_start + float(result.get("offset_in_source_window", 0.0)))
+
+
 async def _process_fast_scene(
+    input_video,
     telethon_client,
     region,
     index,
@@ -124,12 +180,7 @@ async def _process_fast_scene(
     output_dir,
     progress_message=None,
 ):
-    """Fast/best-effort scene extraction.
-
-    Gemini supplies an approximate source timestamp. We try that point first
-    and then nearby offsets up to +/- 5 minutes. The current priority is to
-    return a usable clip quickly rather than spend minutes on full verification.
-    """
+    """Gemini identifies the episode; a source-window Gemini pass refines the timestamp."""
     source, anime, season, episode, quality = _source_for_region(region)
     if not source:
         logger.warning(
@@ -146,61 +197,60 @@ async def _process_fast_scene(
     edit_start = float(region["start_time"])
     edit_end = float(region["end_time"])
     clip_length = max(0.5, edit_end - edit_start)
+    candidate_start = source_start
 
-    # Best-effort fallback positions. Accuracy can be improved later.
-    offsets = (0, -30, 30, -60, 60, -120, 120, -180, 180, -300, 300)
-
-    for offset in offsets:
-        candidate_start = max(0.0, source_start + offset)
-        candidate_end = candidate_start + clip_length
-        output = unique_path(
-            output_dir,
-            safe_filename(
-                f"find_{index:02d}_{anime}_S{season}E{episode}_{int(candidate_start)}"
-            ) + ".mp4",
+    try:
+        refined = await _verify_region(
+            input_video, telethon_client, source, region, output_dir
+        )
+        if refined is not None:
+            candidate_start = refined
+    except Exception:
+        logger.warning(
+            "Scene %s visual verification failed; using Gemini hint",
+            index,
+            exc_info=True,
         )
 
-        if progress_message and offset == 0:
-            try:
-                await progress_message.edit_text(
-                    "🎯 FIND\n\n"
-                    f"Scene {index}/{total}\n"
-                    f"{anime} S{season} E{episode}\n"
-                    f"Gemini approx: {source_start:.1f}s\n\n"
-                    "⚡ Fast Telegram clip extraction..."
-                )
-            except Exception:
-                pass
+    candidate_end = candidate_start + clip_length
+    output = unique_path(
+        output_dir,
+        safe_filename(
+            f"find_{index:02d}_{anime}_S{season}E{episode}_{int(candidate_start)}"
+        ) + ".mp4",
+    )
 
+    if progress_message:
         try:
-            await _extract_remote_clip(
-                telethon_client,
-                source,
-                candidate_start,
-                candidate_end,
-                output,
+            await progress_message.edit_text(
+                "🎯 FIND\\n\\n"
+                f"Scene {index}/{total}\\n"
+                f"{anime} S{season} E{episode}\\n"
+                f"Source: {candidate_start:.1f}s\\n\\n"
+                "🔎 Visual verification + Telegram extraction..."
             )
-            return {
-                "path": output,
-                "index": index,
-                "anime": anime,
-                "season": season,
-                "episode": episode,
-                "start": candidate_start,
-                "end": candidate_end,
-                "quality": quality,
-                "offset": offset,
-            }
         except Exception:
-            output.unlink(missing_ok=True)
-            logger.info(
-                "Scene %s extraction failed at offset %+ss",
-                index,
-                offset,
-                exc_info=True,
-            )
+            pass
 
-    return None
+    try:
+        await _extract_remote_clip(
+            telethon_client, source, candidate_start, candidate_end, output
+        )
+        return {
+            "path": output,
+            "index": index,
+            "anime": anime,
+            "season": season,
+            "episode": episode,
+            "start": candidate_start,
+            "end": candidate_end,
+            "quality": quality,
+            "offset": candidate_start - source_start,
+        }
+    except Exception:
+        output.unlink(missing_ok=True)
+        logger.info("Scene %s extraction failed", index, exc_info=True)
+        return None
 
 
 async def find_and_build(input_video, user_id, telethon_client, progress_message=None):
@@ -227,6 +277,7 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
         async with semaphore:
             try:
                 return await _process_fast_scene(
+                    input_video,
                     telethon_client,
                     region,
                     index,
