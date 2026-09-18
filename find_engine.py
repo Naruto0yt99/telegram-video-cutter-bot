@@ -140,9 +140,13 @@ async def _verify_region(input_video, client, source_url, region, output_dir):
     await _make_edit_sample(input_video, edit_start, sample_len, edit_sample)
 
     # First pass: a compact +/-60s window around Gemini's hint.
-    # Fallback: a wider +/-5min window only when the first pass cannot match.
-    windows = [(max(0.0, hint - 60.0), sample_len + 120.0)]
-    windows.append((max(0.0, hint - 300.0), sample_len + 600.0))
+    # If Gemini's approximate timestamp is wrong, search a much wider
+    # candidate window before accepting anything. This prevents a visually
+    # similar scene elsewhere in the episode from being returned as the match.
+    windows = [
+        (max(0.0, hint - 60.0), sample_len + 120.0),
+        (max(0.0, hint - 600.0), sample_len + 1200.0),
+    ]
 
     best = None
     try:
@@ -159,7 +163,7 @@ async def _verify_region(input_video, client, source_url, region, output_dir):
                     confidence = float(result.get("confidence", 0.0))
                     if best is None or confidence > best[0]:
                         best = (confidence, result, window_start)
-                    if confidence >= 0.85:
+                    if confidence >= 0.92:
                         break
             finally:
                 source_sample.unlink(missing_ok=True)
