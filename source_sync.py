@@ -177,7 +177,7 @@ def parse_episode_metadata(message: Message, topic_text: str = ""):
         season = topic_season
 
     anime_from_caption = _anime_from_text(caption, marker) if marker_source == caption else _anime_from_text(marker_source, marker)
-    filename_parts = _episode_from_text(filename)
+    # Global-episode captions such as "☞ Episode - 01(361)" have no anime title before the marker.\n    # Fall back to canonical title detection from the full caption before requiring a prefix.\n    if not anime_from_caption:\n        anime_from_caption = canonical_anime(caption)\n    filename_parts = _episode_from_text(filename)
     anime_from_filename = _anime_from_text(filename, filename_parts[2]) if filename_parts[2] else None
     anime = _canonical_from_candidates(anime_from_caption, anime_from_filename, caption, filename)
     if not anime:
