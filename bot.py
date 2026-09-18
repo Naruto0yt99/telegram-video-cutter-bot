@@ -11,6 +11,7 @@ from telethon import TelegramClient
 from telethon.sessions import MemorySession
 from telegram import Update
 from telegram.constants import ParseMode
+from telegram.error import NetworkError
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -673,7 +674,7 @@ async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"✂️ SPLIT\n\n📚 {anime} S{season} E{episode}\n"
                 f"⏱️ Duration: {format_time(total_duration)}\n"
                 f"🧩 Parts: {total_parts}\n\n"
-                "🚀 Starting one-pass remote split..."
+                "⚡ Preparing parts in parallel..."
             )
 
             await _stream_remote_split(
@@ -693,7 +694,7 @@ async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status.edit_text(
                 f"✂️ SPLIT COMPLETE ✅\n\n📚 {anime} S{season} E{episode}\n"
                 f"🧩 {total_parts} parts sent.\n"
-                "📡 Telegram source was read in one FFmpeg pass."
+                "⚡ Parts prepared in parallel and sent in order."
             )
             return
 
@@ -825,6 +826,15 @@ def main():
     application = (
         Application.builder()
         .token(BOT_TOKEN)
+        .connect_timeout(30)
+        .read_timeout(60)
+        .write_timeout(60)
+        .pool_timeout(30)
+        .get_updates_connect_timeout(30)
+        .get_updates_read_timeout(60)
+        .get_updates_write_timeout(60)
+        .get_updates_pool_timeout(30)
+        .get_updates_http_version("1.1")
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()
@@ -844,7 +854,15 @@ def main():
     application.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, receive_video))
     application.add_error_handler(error_handler)
     logger.info("Bot starting...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            bootstrap_retries=-1,
+            drop_pending_updates=False,
+        )
+    except NetworkError:
+        logger.exception("Telegram network connection failed during polling.")
+        raise
 
 
 if __name__ == "__main__":
