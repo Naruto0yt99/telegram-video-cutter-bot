@@ -128,6 +128,57 @@ def _generate_video_prompt(file_name: str, prompt: str, temperature=0.0):
     return _generate_with_fallback(payload)
 
 
+def verify_source_match(edit_path: Path, source_path: Path, source_window_start: float):
+    """Compare an edit sample with a candidate source window and locate the match."""
+    if not edit_path.exists() or not source_path.exists():
+        return None
+    edit_file = _upload_file(edit_path)
+    source_file = _upload_file(source_path)
+    edit_name = edit_file.get("name")
+    source_name = source_file.get("name")
+    if not edit_name or not source_name:
+        return None
+    _wait_file_active(edit_name)
+    _wait_file_active(source_name)
+    prompt = f"""
+Compare these two videos. VIDEO 1 is an edited anime clip; VIDEO 2 is a candidate
+window from the original episode. The edit may contain crop, zoom, subtitles,
+speed changes, color changes, overlays, or transitions.
+
+The candidate window starts at {float(source_window_start):.3f} seconds in the episode.
+Find where the actual anime footage from VIDEO 1 occurs inside VIDEO 2.
+
+Return ONLY JSON:
+{{"match":true,"confidence":0.0,"offset_in_source_window":0.0}}
+
+Use visual action, characters, camera movement, and scene continuity. Ignore music,
+subtitles, logos, and editing effects. Do not mark a match merely because the
+characters/anime are similar.
+"""
+    payload = {
+        "contents": [{
+            "role": "user",
+            "parts": [
+                {"file_data": {"mime_type": "video/mp4", "file_uri": f"{API_ROOT}/v1beta/{edit_name}"}},
+                {"file_data": {"mime_type": "video/mp4", "file_uri": f"{API_ROOT}/v1beta/{source_name}"}},
+                {"text": prompt},
+            ],
+        }],
+        "generationConfig": {"temperature": 0.0, "responseMimeType": "application/json"},
+    }
+    data = _generate_with_fallback(payload)
+    parsed = _parse_json(_text_from_response(data))
+    if not isinstance(parsed, dict):
+        return None
+    try:
+        parsed["confidence"] = float(parsed.get("confidence", 0.0) or 0.0)
+        parsed["offset_in_source_window"] = float(parsed.get("offset_in_source_window", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return None
+    parsed["match"] = bool(parsed.get("match"))
+    return parsed
+
+
 def _parse_json(text: str):
     text = (text or "").strip()
     if not text:
