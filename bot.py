@@ -420,7 +420,7 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
             clips = result.get("clips", [])
-            await status.edit_text(
+            await safe_edit_text(status, 
                 "🎯 FIND\n\n"
                 f"Gemini scenes: {result.get('total', len(clips))}\n"
                 f"Clips ready: {len(clips)}\n\n"
@@ -438,16 +438,16 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await send_file(update, Path(item["path"]), caption)
 
             if len(clips) < result.get("total", len(clips)):
-                await status.edit_text(
+                await safe_edit_text(status, 
                     "🎯 FIND COMPLETE\n\n"
                     f"{len(clips)}/{result.get('total')} clips ready.\n"
                     "Jin scenes ka source nahi mila, unhe skip kiya gaya."
                 )
             else:
-                await status.edit_text("🎯 FIND COMPLETE ✅\n\nSab approximate clips bhej diye.")
+                await safe_edit_text(status, "🎯 FIND COMPLETE ✅\n\nSab approximate clips bhej diye.")
     except Exception as exc:
         logger.exception("Find failed")
-        await status.edit_text(f"❌ FIND FAILED\n\n{exc}")
+        await safe_edit_text(status, f"❌ FIND FAILED\n\n{exc}")
     finally:
         cleanup_user_temp(user_id)
 
@@ -562,7 +562,7 @@ async def _stream_remote_split(update, status, source_client, source_url, output
     async def update_progress():
         ready = len(generated)
         running = total_parts - ready - len(errors)
-        await status.edit_text(
+        await safe_edit_text(status, 
             f"✂️ SPLIT\n\n📚 {anime} S{season} E{episode}\n"
             f"⏱️ Duration: {format_time(server.duration)}\n"
             f"🧩 Parts: {total_parts}\n"
@@ -571,7 +571,7 @@ async def _stream_remote_split(update, status, source_client, source_url, output
         )
 
     try:
-        await status.edit_text(
+        await safe_edit_text(status, 
             f"✂️ SPLIT\n\n📚 {anime} S{season} E{episode}\n"
             f"🧩 Parts: {total_parts}\n"
             "⚡ Preparing parts in parallel..."
@@ -591,7 +591,7 @@ async def _stream_remote_split(update, status, source_client, source_url, output
             failed = ", ".join(str(index + 1) for index in sorted(errors))
             raise RuntimeError(f"Parts failed: {failed}")
 
-        await status.edit_text(
+        await safe_edit_text(status, 
             f"✂️ SPLIT\n\n📚 {anime} S{season} E{episode}\n"
             f"🧩 {total_parts}/{total_parts} parts ready\n"
             "📤 Sending parts in order..."
@@ -602,7 +602,7 @@ async def _stream_remote_split(update, status, source_client, source_url, output
             if part is None:
                 raise RuntimeError(f"Part {index + 1} missing.")
             display_index = index + 1
-            await status.edit_text(
+            await safe_edit_text(status, 
                 f"✂️ SPLIT\n\n📚 {anime} S{season} E{episode}\n"
                 f"🧩 Part {display_index}/{total_parts}\n"
                 "📤 Sending..."
@@ -682,7 +682,7 @@ async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not source_url:
                 raise ValueError(f"{anime} S{season} E{episode} library me nahi mila.")
 
-            await status.edit_text(
+            await safe_edit_text(status, 
                 f"✂️ SPLIT\n\n📚 {anime} S{season} E{episode}\n"
                 f"⏱️ Part size: {part_duration}s\n\n🔌 Connecting to Telegram source..."
             )
@@ -690,7 +690,7 @@ async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             from telegram_remote import get_telegram_video_info
             source_client = await ensure_telethon_client()
 
-            await status.edit_text(
+            await safe_edit_text(status, 
                 f"✂️ SPLIT\n\n📚 {anime} S{season} E{episode}\n"
                 "📡 Reading episode duration..."
             )
@@ -701,7 +701,7 @@ async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             output_dir.mkdir(parents=True, exist_ok=True)
             total_parts = max(1, int((total_duration + part_duration - 0.001) // part_duration))
 
-            await status.edit_text(
+            await safe_edit_text(status, 
                 f"✂️ SPLIT\n\n📚 {anime} S{season} E{episode}\n"
                 f"⏱️ Duration: {format_time(total_duration)}\n"
                 f"🧩 Parts: {total_parts}\n\n"
@@ -722,7 +722,7 @@ async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
             shutil.rmtree(output_dir, ignore_errors=True)
-            await status.edit_text(
+            await safe_edit_text(status, 
                 f"✂️ SPLIT COMPLETE ✅\n\n📚 {anime} S{season} E{episode}\n"
                 f"🧩 {total_parts} parts sent.\n"
                 "⚡ Parts prepared in parallel and sent in order."
@@ -738,23 +738,23 @@ async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if input_path is None:
             raise ValueError("Pehle original video bhejo.")
 
-        await status.edit_text(
+        await safe_edit_text(status, 
             f"✂️ SPLIT\n\n📱 Active original video\n"
             f"⏱️ Part size: {part_duration}s\n\n⚙️ Splitting..."
         )
         parts = await split_video(input_path, part_duration)
         for index, part in enumerate(parts, start=1):
-            await status.edit_text(
+            await safe_edit_text(status, 
                 f"✂️ SPLIT\n\n🧩 Sending part {index}/{len(parts)}..."
             )
             await send_file(update, part, f"✂️ Part {index}/{len(parts)}")
             part.unlink(missing_ok=True)
-        await status.edit_text(
+        await safe_edit_text(status, 
             f"✂️ SPLIT COMPLETE ✅\n\n🧩 {len(parts)} parts sent."
         )
     except Exception as exc:
         logger.exception("Split failed")
-        await status.edit_text(f"❌ SPLIT FAILED\n\n{exc}")
+        await safe_edit_text(status, f"❌ SPLIT FAILED\n\n{exc}")
 
 
 async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
