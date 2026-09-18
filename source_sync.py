@@ -10,7 +10,7 @@ from telegram_media import is_video_message, get_message_video_name
 from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
-PARSER_VERSION = 10
+PARSER_VERSION = 11
 
 
 _QUALITY_PATTERNS = [
@@ -71,9 +71,6 @@ def _episode_from_text(text: str):
     for pattern in _EPISODE_PATTERNS:
         match = pattern.search(text)
         if match:
-            # Some Naruto source captions use "Episode 01 [349]". The
-            # bracketed number is the channel's canonical/global episode id,
-            # while "01" is only the season-local episode number.
             global_match = re.search(
                 r"\s*[\[(]\s*(?P<episode>\d{1,4})\s*[\])]",
                 text[match.end():],
@@ -85,42 +82,35 @@ def _episode_from_text(text: str):
                     global_match.group("episode"),
                     match,
                     "season",
+                    True,
                 )
-            return match.group("season"), match.group("episode"), match, "season"
+            return match.group("season"), match.group("episode"), match, "season", False
+
     for content_type, pattern in _SPECIAL_PATTERNS:
         match = pattern.search(text)
         if match:
-            return content_type, match.group("episode"), match, content_type
-    # Captions such as "Episode - 01 [349]" or "Episode - 01(361)"
-    # contain both the season-local episode number and the canonical/global
-    # episode number. The bracketed/parenthesized number is the source-library
-    # episode identifier used by this channel, so prefer it when present.
+            return content_type, match.group("episode"), match, content_type, True
+
     global_match = re.search(
         r"\b(?:Episode|Ep)\s*[-._ :]*\d{1,4}\s*[\[(]\s*(?P<episode>\d{1,4})\s*[\])]",
         text,
         re.I,
     )
     if global_match:
-        return None, global_match.group("episode"), global_match, "season"
+        return None, global_match.group("episode"), global_match, "season", True
 
     for pattern in _EP_ONLY_PATTERNS:
         match = pattern.search(text)
         if match:
-            season = match.groupdict().get("season")
-            return season, match.group("episode"), match, "season"
+            return None, match.group("episode"), match, "season", False
 
-    # Common channel naming style: "Naruto 027 720p" or
-    # "Naruto Shippuden 027 [1080p]". If no explicit Episode/S/E marker
-    # exists, treat the final standalone number as the episode and default
-    # to Season 1. This makes the source index useful with plain numbered
-    # episode filenames while avoiding most resolution/codec numbers.
     match = None
     for candidate in _NUMBERED_EPISODE_PATTERN.finditer(text):
         match = candidate
     if match:
-        return None, match.group("episode"), match, "season"
+        return None, match.group("episode"), match, "season", False
 
-    return None, None, None, None
+    return None, None, None, None, False
 
 
 def _anime_from_text(text: str, marker):
@@ -137,8 +127,6 @@ def _anime_from_text(text: str, marker):
         if len(inner) >= 2:
             prefix = inner
     prefix = re.sub(r"\s{2,}", " ", prefix).strip(" -_.")
-    # Remove common leading/trailing release punctuation left after stripping
-    # the episode marker.
     prefix = prefix.strip(" -_.[](){}")
     return prefix if len(prefix) >= 2 else None
 
@@ -153,15 +141,30 @@ def _canonical_from_candidates(*values):
     return None
 
 
-def parse_episode_metadata(message: Message, topic_text: str = ""):
+def _naruto_global_episode(anime, season, episode):
+    if anime != "Naruto Shippuden" or season not in {"16", "17"}:
+        return None
+    local = int(episode)
+    if not 1 <= local <= 20:
+        return None
+    base = {"16": 348, "17": 360}[season]
+    return str(base + local)
+
+
+def parse_episode_metadata(
+    message: Message,
+    topic_text: str = "",
+    context_anime: str | None = None,
+    context_season: str | None = None,
+):
     filename = _clean_caption(get_message_video_name(message))
     caption = _clean_caption(getattr(message, "message", "") or "")
     combined = _clean_caption(f"{caption} {filename}")
 
-    season, episode, marker, content_type = _episode_from_text(caption)
+    season, episode, marker, content_type, has_global_episode = _episode_from_text(caption)
     marker_source = caption
     if episode is None:
-        season, episode, marker, content_type = _episode_from_text(combined)
+        season, episode, marker, content_type, has_global_episode = _episode_from_text(combined)
         marker_source = combined
 
     topic_text = _clean_caption(topic_text)
@@ -175,37 +178,43 @@ def parse_episode_metadata(message: Message, topic_text: str = ""):
 
     if content_type == "season" and season is None and topic_season:
         season = topic_season
+    if content_type == "season" and season is None and context_season:
+        season = context_season
 
     anime_from_caption = _anime_from_text(caption, marker) if marker_source == caption else _anime_from_text(marker_source, marker)
     filename_parts = _episode_from_text(filename)
     anime_from_filename = _anime_from_text(filename, filename_parts[2]) if filename_parts[2] else None
-    # Global-episode captions such as "Episode - 01(361)" have no anime title before the marker.
-    # Fall back to canonical title detection from the full caption before requiring a prefix.
+
     if not anime_from_caption:
         anime_from_caption = canonical_anime(caption)
-    anime = _canonical_from_candidates(anime_from_caption, anime_from_filename, caption, filename)
+    anime = _canonical_from_candidates(anime_from_caption, anime_from_filename, caption, filename, context_anime)
     if not anime:
         return None
 
     quality = _detect_quality(combined) or "auto"
 
     if content_type == "season":
+        if season is None and anime == "Naruto Shippuden":
+            global_episode = int(episode)
+            if 349 <= global_episode <= 360:
+                season = "16"
+            elif 361 <= global_episode <= 372:
+                season = "17"
+        if season is None and re.search(r"\b(?:season|s)\s*1\b", combined, re.I):
+            season = "1"
         if season is None:
-            # A few Naruto Shippuden uploads only show the global episode
-            # number, e.g. "Episode - 01(361)". For the season layout used by
-            # this source channel, episodes 349-360 are Season 16 and
-            # 361-372 are Season 17.
-            if anime == "Naruto Shippuden":
-                global_episode = int(episode)
-                if 349 <= global_episode <= 360:
-                    season = "16"
-                elif 361 <= global_episode <= 372:
-                    season = "17"
-            if season is None and re.search(r"\b(?:season|s)\s*1\b", combined, re.I):
-                season = "1"
-            if season is None:
-                return None
+            return None
+
         season_value = str(int(season))
+
+        # For S16/S17, the channel sometimes switches from global numbering
+        # like "(361)" to local numbering like "Episode - 03". When the
+        # season is known from the surrounding batch, normalize the local
+        # number back to the global source-library episode id.
+        if not has_global_episode:
+            normalized = _naruto_global_episode(anime, season_value, episode)
+            if normalized:
+                episode = normalized
     else:
         season_value = content_type
 
@@ -312,7 +321,6 @@ def _reset_index_for_parser_upgrade(last_version: int):
 
 
 async def sync_source_library(client):
-    """Index only recognized anime episode/video sources from SOURCE_CHAT."""
     if client is None:
         return {"indexed": 0, "skipped": 0, "last_message_id": 0}
 
@@ -340,6 +348,8 @@ async def sync_source_library(client):
     skipped = 0
     newest_seen = last_id
     topic_cache = {}
+    context_anime = None
+    context_season = None
 
     entity = await client.get_entity(SOURCE_CHAT)
     logger.info(
@@ -363,12 +373,18 @@ async def sync_source_library(client):
             continue
 
         topic_text = await _topic_text_for_message(client, entity, message, topic_cache)
-        metadata = parse_episode_metadata(message, topic_text)
+        metadata = parse_episode_metadata(
+            message,
+            topic_text,
+            context_anime=context_anime,
+            context_season=context_season,
+        )
         link = _message_link(message)
 
-        # Temporary diagnostic for the Naruto target range. This lets us
-        # inspect the real Telegram caption/filename/topic format instead of
-        # guessing parser regexes.
+        if metadata:
+            context_anime = metadata["anime"]
+            context_season = metadata["season"]
+
         if 11750 <= message_id <= 11790:
             logger.info(
                 "SOURCE DEBUG id=%s video_name=%r caption=%r topic=%r metadata=%r",
@@ -420,7 +436,6 @@ async def sync_source_library(client):
 
 def render_library_html(animes, get_seasons, get_episodes, get_all_sources_for_episode):
     lines = ["📚 <b>ANIME LIBRARY</b>", ""]
-    preferred = ["2160p", "1440p", "1080p", "720p", "480p", "360p", "auto"]
 
     for anime in animes:
         lines.append(f"🎬 <b>{escape(anime)}</b>")
@@ -431,13 +446,12 @@ def render_library_html(animes, get_seasons, get_episodes, get_all_sources_for_e
                 if not sources:
                     continue
                 quality_links = []
+                preferred = ["2160p", "1440p", "1080p", "720p", "480p", "360p", "auto"]
                 for quality in preferred:
                     url = sources.get(quality)
                     if url:
                         label = "Source" if quality == "auto" else quality
-                        quality_links.append(
-                            f'<a href="{escape(url, quote=True)}">{label}</a>'
-                        )
+                        quality_links.append(f'<a href="{escape(url, quote=True)}">{label}</a>')
                 lines.append(
                     f"    🎞️ <b>Episode {escape(str(episode))}</b> — "
                     + " · ".join(quality_links)
