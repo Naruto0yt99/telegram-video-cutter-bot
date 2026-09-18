@@ -484,10 +484,43 @@ def unique_source_clip_path(user_id, anime, season, episode):
 async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     try:
-        args = context.args
+        raw = " ".join(context.args).strip()
+        source_match = re.match(r"^(\d+)\s+(.+?)\s+[Ss](\d+)\s+[Ee](\d+)$", raw)
+        if source_match:
+            part_duration = int(source_match.group(1))
+            anime = source_match.group(2).strip()
+            season = source_match.group(3)
+            episode = source_match.group(4)
+            if part_duration <= 0:
+                raise ValueError("Split duration positive hona chahiye.")
+            source_url = get_best_source(anime, season, episode)
+            if not source_url:
+                raise ValueError(f"{anime} S{season} E{episode} library me nahi mila.")
+            from telethon_runtime import ensure_telethon_client
+            from telegram_remote import get_telegram_video_info
+            from find_engine import _extract_remote_clip
+            source_client = await ensure_telethon_client()
+            chat_id, message_id = parse_telegram_message_link(source_url)
+            _, total_duration, _ = await get_telegram_video_info(source_client, chat_id, message_id)
+            output_dir = user_temp_dir(user_id) / f"split_{re.sub(r'[^A-Za-z0-9_-]+', '_', anime)}_S{season}E{episode}"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            cursor = 0.0
+            parts = []
+            index = 1
+            while cursor < total_duration - 0.01:
+                part_end = min(cursor + part_duration, total_duration)
+                output = output_dir / f"part_{index:03d}.mp4"
+                await _extract_remote_clip(source_client, source_url, cursor, part_end, output)
+                parts.append(output)
+                cursor = part_end
+                index += 1
+            for index, part in enumerate(parts, start=1):
+                await send_file(update, part, f"✂️ {anime} S{season} E{episode} — Part {index}/{len(parts)}")
+            return
+
         part_duration = 30
-        if args and args[0].isdigit():
-            part_duration = int(args[0])
+        if context.args and context.args[0].isdigit():
+            part_duration = int(context.args[0])
         if part_duration <= 0:
             raise ValueError("Split duration 1 second se zyada hona chahiye.")
         input_path = await _get_active_video(user_id)
