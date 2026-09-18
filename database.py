@@ -311,6 +311,42 @@ def get_all_sources_for_episode(
         }
 
 
+def get_all_sources_for_episode_any_season(
+    anime,
+    episode,
+):
+    """Return episode sources grouped by season for safe season-mismatch fallback."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT season, quality, source_url
+            FROM library
+            WHERE LOWER(anime) = LOWER(?)
+              AND episode = ?
+            ORDER BY
+                CAST(season AS INTEGER),
+                CASE
+                    WHEN quality = '2160p' THEN 1
+                    WHEN quality = '1440p' THEN 2
+                    WHEN quality = '1080p' THEN 3
+                    WHEN quality = '720p' THEN 4
+                    WHEN quality = '480p' THEN 5
+                    WHEN quality = '360p' THEN 6
+                    ELSE 7
+                END
+            """,
+            (
+                anime,
+                str(episode),
+            ),
+        ).fetchall()
+
+        grouped = {}
+        for row in rows:
+            grouped.setdefault(str(row["season"]), {})[row["quality"]] = row["source_url"]
+        return grouped
+
+
 def get_best_source(
     anime,
     season,
