@@ -1,5 +1,6 @@
 import asyncio
 import json
+import fcntl
 import logging
 import re
 import shutil
@@ -78,6 +79,7 @@ bot_mtproto_client = None
 source_sync_task = None
 job_lock = asyncio.Lock()
 active_videos = {}
+_instance_lock_handle = None
 
 
 def user_temp_dir(user_id: int) -> Path:
@@ -673,7 +675,22 @@ async def post_shutdown(application: Application):
 
 
 def main():
+    global _instance_lock_handle
     validate_bot_config()
+
+    # Prevent accidental duplicate bot.py processes from polling Telegram at
+    # the same time. The lock is held for the lifetime of this process.
+    lock_path = Path(TEMP_DIR) / "bot_instance.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    _instance_lock_handle = lock_path.open("a+")
+    try:
+        fcntl.flock(_instance_lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        logger.error("Another bot.py instance is already running; exiting.")
+        _instance_lock_handle.close()
+        _instance_lock_handle = None
+        return
+
     application = (
         Application.builder()
         .token(BOT_TOKEN)
