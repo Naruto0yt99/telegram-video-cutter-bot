@@ -12,6 +12,7 @@ from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
@@ -60,6 +61,7 @@ from yt_downloader import download_video_from_url
 from source_sync import sync_source_library, render_library_html
 from utils import unique_path
 from clip_handler import clip_command as source_clip_command
+from library_nav import library_command as nav_library_command, library_callback as nav_library_callback
 
 
 logging.basicConfig(
@@ -581,7 +583,8 @@ def main():
     )
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("library", library_command))
+    application.add_handler(CommandHandler("library", nav_library_command))
+    application.add_handler(CallbackQueryHandler(nav_library_callback, pattern=r"^la:|^ls:|^lb$"))
     application.add_handler(CommandHandler("save", save_command))
     application.add_handler(CommandHandler("edit", edit_handler))
     application.add_handler(CommandHandler("find", find_command))
