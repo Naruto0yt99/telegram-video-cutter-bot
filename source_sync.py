@@ -10,7 +10,7 @@ from telegram_media import is_video_message, get_message_video_name
 from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
-PARSER_VERSION = 8
+PARSER_VERSION = 9
 
 
 _QUALITY_PATTERNS = [
@@ -24,7 +24,7 @@ _QUALITY_PATTERNS = [
 
 _EPISODE_PATTERNS = [
     re.compile(r"\bS(?P<season>\d{1,3})\s*[._-]?\s*E(?P<episode>\d{1,4})\b", re.I),
-    re.compile(r"\bSeason\s*(?P<season>\d{1,3})\s*[,._-]?\s*Episode\s*(?P<episode>\d{1,4})\b", re.I),
+    re.compile(r"\bSeason\s*[:=-]?\s*(?P<season>\d{1,3})\s*[,._-]?\s*(?:⌬\s*)?Episode\s*[:=-]?\s*(?P<episode>\d{1,4})\b", re.I),
     re.compile(r"\bS(?P<season>\d{1,3})\s+(?:EP?|Episode)\s*[-._ ]?(?P<episode>\d{1,4})\b", re.I),
 ]
 
@@ -76,6 +76,18 @@ def _episode_from_text(text: str):
         match = pattern.search(text)
         if match:
             return content_type, match.group("episode"), match, content_type
+    # Captions such as "Episode - 01 [349]" or "Episode - 01(361)"
+    # contain both the season-local episode number and the canonical/global
+    # episode number. The bracketed/parenthesized number is the source-library
+    # episode identifier used by this channel, so prefer it when present.
+    global_match = re.search(
+        r"\b(?:Episode|Ep)\s*[-._ :]*\d{1,4}\s*[\[(]\s*(?P<episode>\d{1,4})\s*[\])]",
+        text,
+        re.I,
+    )
+    if global_match:
+        return None, global_match.group("episode"), global_match, "season"
+
     for pattern in _EP_ONLY_PATTERNS:
         match = pattern.search(text)
         if match:
