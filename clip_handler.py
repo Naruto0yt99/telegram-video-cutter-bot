@@ -8,6 +8,7 @@ from library_nav import canonical_anime
 from telegram_remote import open_telegram_range_server
 from find_engine import _extract_remote_clip
 from utils import unique_path
+from bot import safe_edit_text
 
 
 _SOURCE_RE = re.compile(
@@ -67,7 +68,7 @@ def _resolve_source(anime: str, season: str, episode: str):
     if len(grouped) == 1:
         resolved_season = next(iter(grouped))
         sources = grouped[resolved_season]
-        for quality in ("720p", "1080p", "480p", "360p", "1440p", "2160p", "auto"):
+        for quality in ("2160p", "1440p", "1080p", "720p", "480p", "360p", "auto"):
             if quality in sources:
                 return sources[quality], str(resolved_season), episode
 
@@ -115,7 +116,7 @@ async def clip_command(update, context):
 
         anime = _resolve_anime(requested_anime)
         if not anime:
-            await status.edit_text(
+            await safe_edit_text(status, 
                 f"❌ Anime <code>{requested_anime}</code> library me nahi mila.",
                 parse_mode="HTML",
             )
