@@ -132,183 +132,74 @@ async def _make_edit_sample(input_video, start, duration, output):
 
 
 async def _verify_region(input_video, client, source_url, region, output_dir):
-    hint = float(region.get("source_start_hint"))
+    try: hint = float(region.get("source_start_hint"))
+    except (TypeError, ValueError): return None
     edit_start = float(region["start_time"])
-    edit_length = max(1.0, float(region["end_time"]) - edit_start)
-    sample_len = min(12.0, edit_length)
+    edit_length = max(0.8, float(region["end_time"]) - edit_start)
+    sample_len = min(10.0, edit_length)
     edit_sample = output_dir / f"verify_edit_{int(edit_start * 1000)}.mp4"
     await _make_edit_sample(input_video, edit_start, sample_len, edit_sample)
-
-    # First pass: a compact +/-60s window around Gemini's hint.
-    # If Gemini's approximate timestamp is wrong, search a much wider
-    # candidate window before accepting anything. This prevents a visually
-    # similar scene elsewhere in the episode from being returned as the match.
-    windows = [
-        (max(0.0, hint - 60.0), sample_len + 120.0),
-        (max(0.0, hint - 600.0), sample_len + 1200.0),
-    ]
-
+    windows = [(max(0.0, hint-20), sample_len+40), (max(0.0, hint-90), sample_len+180), (max(0.0, hint-600), sample_len+1200)]
     best = None
     try:
-        for window_start, window_duration in windows:
-            source_sample = output_dir / f"verify_source_{int(window_start)}.mp4"
+        for ws, wd in windows:
+            src = output_dir / f"verify_source_{int(ws)}.mp4"
             try:
-                await _extract_remote_clip(
-                    client, source_url, window_start, window_start + window_duration, source_sample
-                )
-                result = await asyncio.to_thread(
-                    verify_source_match, edit_sample, source_sample, window_start
-                )
+                await _extract_remote_clip(client, source_url, ws, ws+wd, src)
+                result = await asyncio.to_thread(verify_source_match, edit_sample, src, ws)
                 if result and result.get("match"):
-                    confidence = float(result.get("confidence", 0.0))
-                    if best is None or confidence > best[0]:
-                        best = (confidence, result, window_start)
-                    if confidence >= 0.92:
-                        break
-            finally:
-                source_sample.unlink(missing_ok=True)
-    finally:
-        edit_sample.unlink(missing_ok=True)
+                    conf = float(result.get("confidence",0) or 0)
+                    off = float(result.get("offset_in_source_window",0) or 0)
+                    sd = float(result.get("source_duration",0) or 0) or edit_length * float(result.get("speed",1) or 1)
+                    sp = float(result.get("speed",1) or 1)
+                    cand = {"start":max(0,ws+off),"source_duration":max(.5,sd),"speed":max(.25,min(sp,4)),"confidence":conf}
+                    if best is None or conf > best["confidence"]: best=cand
+                    if conf >= .92: break
+            finally: src.unlink(missing_ok=True)
+    finally: edit_sample.unlink(missing_ok=True)
+    return best
 
-    if not best:
-        return None
-    _, result, window_start = best
-    return max(0.0, window_start + float(result.get("offset_in_source_window", 0.0)))
-
-
-async def _process_fast_scene(
-    input_video,
-    telethon_client,
-    region,
-    index,
-    total,
-    output_dir,
-    progress_message=None,
-):
-    """Gemini identifies the episode; a source-window Gemini pass refines the timestamp."""
+async def _process_fast_scene(input_video, telethon_client, region, index, total, output_dir, progress_message=None):
     source, anime, season, episode, quality = _source_for_region(region)
-    if not source:
-        logger.warning(
-            "Scene %s source missing anime=%r season=%r episode=%r",
-            index, anime, season, episode,
-        )
-        return None
-
-    try:
-        source_start = float(region.get("source_start_hint"))
-    except (TypeError, ValueError):
-        return None
-
-    edit_start = float(region["start_time"])
-    edit_end = float(region["end_time"])
-    clip_length = max(0.5, edit_end - edit_start)
-    candidate_start = source_start
-
-    try:
-        refined = await _verify_region(
-            input_video, telethon_client, source, region, output_dir
-        )
-        if refined is not None:
-            candidate_start = refined
-    except Exception:
-        logger.warning(
-            "Scene %s visual verification failed; using Gemini hint",
-            index,
-            exc_info=True,
-        )
-
-    candidate_end = candidate_start + clip_length
-    output = unique_path(
-        output_dir,
-        safe_filename(
-            f"find_{index:02d}_{anime}_S{season}E{episode}_{int(candidate_start)}"
-        ) + ".mp4",
-    )
-
-    if progress_message:
-        try:
-            await progress_message.edit_text(
-                "🎯 FIND\\n\\n"
-                f"Scene {index}/{total}\\n"
-                f"{anime} S{season} E{episode}\\n"
-                f"Source: {candidate_start:.1f}s\\n\\n"
-                "🔎 Visual verification + Telegram extraction..."
-            )
-        except Exception:
-            pass
-
-    try:
-        await _extract_remote_clip(
-            telethon_client, source, candidate_start, candidate_end, output
-        )
-        return {
-            "path": output,
-            "index": index,
-            "anime": anime,
-            "season": season,
-            "episode": episode,
-            "start": candidate_start,
-            "end": candidate_end,
-            "quality": quality,
-            "offset": candidate_start - source_start,
-        }
-    except Exception:
-        output.unlink(missing_ok=True)
-        logger.info("Scene %s extraction failed", index, exc_info=True)
-        return None
-
+    if not source: return None
+    edit_start=float(region["start_time"]); edit_end=float(region["end_time"]); edit_length=max(.5,edit_end-edit_start)
+    match=await _verify_region(input_video,telethon_client,source,region,output_dir)
+    if not match: return None
+    start=match["start"]; source_duration=match["source_duration"]; speed=match["speed"]
+    end=start+source_duration
+    output=unique_path(output_dir,safe_filename(f"find_{index:02d}_{anime}_S{season}E{episode}_{int(start)}")+".mp4")
+    await _extract_remote_clip(telethon_client,source,start,end,output,speed=speed)
+    return {"path":output,"index":index,"anime":anime,"season":season,"episode":episode,"start":start,"end":end,"edit_start":edit_start,"edit_end":edit_end,"edit_duration":edit_length,"speed":speed,"quality":quality,"confidence":match["confidence"]}
 
 async def find_and_build(input_video, user_id, telethon_client, progress_message=None):
-    """Fast FIND: return best-effort clips instead of waiting for perfect matching."""
-    if telethon_client is None:
-        raise RuntimeError("Telegram source client connected nahi hai.")
-
-    input_video = Path(input_video)
-    if not input_video.exists():
-        raise RuntimeError("Input video nahi mila.")
-
-    regions = await analyze_video(input_video)
-    if not regions:
-        raise RuntimeError("Gemini ko koi usable anime scene nahi mila.")
-
-    logger.info("Fast FIND: Gemini returned %s regions", len(regions))
-    output_dir = Path(TEMP_DIR) / str(user_id) / "find_clips"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    import asyncio
-    semaphore = asyncio.Semaphore(3)
-
-    async def worker(index, region):
+    if telethon_client is None: raise RuntimeError("Telegram source client connected nahi hai.")
+    input_video=Path(input_video)
+    if not input_video.exists(): raise RuntimeError("Input video nahi mila.")
+    if progress_message:
+        try: await progress_message.edit_text("🎯 FIND — 15%\n\n🧠 Gemini shot-by-shot analysis...")
+        except Exception: pass
+    regions=await analyze_video(input_video)
+    if not regions: raise RuntimeError("Gemini ko koi usable anime scene nahi mila.")
+    output_dir=Path(TEMP_DIR)/str(user_id)/"find_clips"; output_dir.mkdir(parents=True,exist_ok=True)
+    semaphore=asyncio.Semaphore(3)
+    async def worker(i,r):
         async with semaphore:
             try:
-                return await _process_fast_scene(
-                    input_video,
-                    telethon_client,
-                    region,
-                    index,
-                    len(regions),
-                    output_dir,
-                    progress_message,
-                )
-            except Exception:
-                logger.exception("Scene %s failed", index)
-                return None
-
-    results = await asyncio.gather(
-        *(worker(index, region) for index, region in enumerate(regions, start=1))
-    )
-    clips = [item for item in results if item]
-    clips.sort(key=lambda item: item["index"])
-
-    if not clips:
-        raise RuntimeError(
-            "Gemini ne scenes diye, lekin Telegram source se koi clip extract nahi ho paya."
-        )
-
-    return {
-        "clips": clips,
-        "matched": len(clips),
-        "total": len(regions),
-        "regions": regions,
-        "output": clips[0]["path"],
-    }
+                if progress_message:
+                    try: await progress_message.edit_text(f"🎯 FIND — matching {i}/{len(regions)} scenes\n\n📺 {r.get('anime','?')} S{r.get('season','?')} E{r.get('episode','?')}\n🔎 Progressive exact search...")
+                    except Exception: pass
+                return await _process_fast_scene(input_video,telethon_client,r,i,len(regions),output_dir,progress_message)
+            except Exception: logger.exception("Scene %s failed",i); return None
+    results=await asyncio.gather(*(worker(i,r) for i,r in enumerate(regions,1)))
+    clips=sorted([x for x in results if x],key=lambda x:x["index"])
+    if not clips: raise RuntimeError("Koi scene reliably match nahi hua.")
+    merged=unique_path(output_dir,"find_final.mp4")
+    list_path=output_dir/"concat.txt"
+    list_path.write_text("\n".join("file '"+str(Path(x["path"])).replace("'","'\\\\''")+"'" for x in clips),encoding="utf-8")
+    try:
+        await run_command(FFMPEG_BIN,"-y","-f","concat","-safe","0","-i",str(list_path),"-c","copy","-movflags","+faststart",str(merged))
+    finally: list_path.unlink(missing_ok=True)
+    report=["📋 SCENE DETAILS",""]
+    for x in clips:
+        report += [f"{x['index']:02d} │ {x['anime']} S{x['season']} E{x['episode']}",f"   EDIT {x['edit_start']:.2f}s → {x['edit_end']:.2f}s",f"   RAW  {x['start']:.2f}s → {x['end']:.2f}s",f"   ⚡ Speed: {x['speed']:.2f}×",f"   🎯 Confidence: {x['confidence']:.0%}",""]
+    return {"clips":clips,"matched":len(clips),"total":len(regions),"regions":regions,"output":merged,"report":"\n".join(report),"sources":{(str(x.get('anime','')).strip().lower(),_number(x.get('season')),_number(x.get('episode'))) for x in regions}}
