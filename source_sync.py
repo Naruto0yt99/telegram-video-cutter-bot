@@ -10,7 +10,7 @@ from telegram_media import is_video_message, get_message_video_name
 from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
-PARSER_VERSION = 2
+PARSER_VERSION = 3
 
 
 _QUALITY_PATTERNS = [
@@ -71,7 +71,8 @@ def _episode_from_text(text: str):
     for pattern in _EP_ONLY_PATTERNS:
         match = pattern.search(text)
         if match:
-            return None, match.group("episode"), match, "season"
+            season = match.groupdict().get("season")
+            return season, match.group("episode"), match, "season"
     return None, None, None, None
 
 
