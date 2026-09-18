@@ -2,7 +2,7 @@
 
 import re
 
-from database import get_animes, get_best_source, get_connection
+from database import get_animes, get_best_source, get_connection, get_all_sources_for_episode_any_season
 from ffmpeg_utils import parse_time, format_time
 from library_nav import canonical_anime
 from telegram_remote import open_telegram_range_server
@@ -59,6 +59,18 @@ def _resolve_source(anime: str, season: str, episode: str):
         if str(row["season"]).isdigit() and str(row["episode"]).isdigit():
             if int(row["season"]) == int(season) and int(row["episode"]) == int(episode):
                 return row["source_url"], str(row["season"]), str(row["episode"])
+
+    # Episode numbering is continuous across seasons in this library.
+    # If the requested season has no source but this episode exists in exactly
+    # one other season, safely resolve to that indexed season instead of failing.
+    grouped = get_all_sources_for_episode_any_season(anime, episode)
+    if len(grouped) == 1:
+        resolved_season = next(iter(grouped))
+        sources = grouped[resolved_season]
+        for quality in ("720p", "1080p", "480p", "360p", "1440p", "2160p", "auto"):
+            if quality in sources:
+                return sources[quality], str(resolved_season), episode
+
     return None, season, episode
 
 
