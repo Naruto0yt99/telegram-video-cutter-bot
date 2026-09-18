@@ -11,7 +11,7 @@ from telethon import TelegramClient
 from telethon.sessions import MemorySession
 from telegram import Update
 from telegram.constants import ParseMode
-from telegram.error import NetworkError
+from telegram.error import NetworkError, BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -104,6 +104,16 @@ def cleanup_user_temp(user_id: int):
 
 def is_owner(user_id: int) -> bool:
     return OWNER_ID is not None and int(user_id) == int(OWNER_ID)
+
+
+async def safe_edit_text(message, text, **kwargs):
+    """Edit a Telegram status message without failing on duplicate text."""
+    try:
+        return await message.edit_text(text, **kwargs)
+    except BadRequest as exc:
+        if "Message is not modified" in str(exc):
+            return message
+        raise
 
 
 async def send_file(update: Update, path: Path, caption: str):
@@ -401,7 +411,7 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with job_lock:
             video_path = await download_video_from_url(url, user_id)
-            await status.edit_text("🎯 FIND\n\n1️⃣ Video downloaded ✅\n2️⃣ Gemini scene analysis...")
+            await safe_edit_text(status, "🎯 FIND\n\n1️⃣ Video downloaded ✅\n2️⃣ Gemini scene analysis...")
             result = await find_and_build(
                 input_video=video_path,
                 user_id=user_id,
