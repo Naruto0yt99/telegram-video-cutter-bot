@@ -10,7 +10,7 @@ from telegram_media import is_video_message, get_message_video_name
 from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
-PARSER_VERSION = 3
+PARSER_VERSION = 4
 
 
 _QUALITY_PATTERNS = [
@@ -31,6 +31,14 @@ _EPISODE_PATTERNS = [
 _EP_ONLY_PATTERNS = [
     re.compile(r"\b(?:Episode|Ep|E)\s*[-._ ]?(?P<episode>\d{1,4})\b", re.I),
 ]
+
+_NUMBERED_EPISODE_PATTERN = re.compile(
+    r"\b(?P<episode>\d{1,4})\b\s*(?="
+    r"$|(?:\[|\]|\(|\)|-|_|\.)|"
+    r"(?:\d{3,4}\s*p|4k|uhd|web[- .]?dl|web[- .]?rip|bluray|bdrip|hdr|x264|x265|hevc|avc|aac|10bit|8bit|dual\s*audio|multi\s*audio|hindi|english|japanese|sub(?:bed|s)?|dub(?:bed|s)?)"
+    r")",
+    re.I,
+)
 
 _SPECIAL_PATTERNS = [
     ("movie", re.compile(r"\b(?:Movie|Film)\s*(?P<episode>\d{1,3})\b", re.I)),
@@ -73,6 +81,18 @@ def _episode_from_text(text: str):
         if match:
             season = match.groupdict().get("season")
             return season, match.group("episode"), match, "season"
+
+    # Common channel naming style: "Naruto 027 720p" or
+    # "Naruto Shippuden 027 [1080p]". If no explicit Episode/S/E marker
+    # exists, treat the final standalone number as the episode and default
+    # to Season 1. This makes the source index useful with plain numbered
+    # episode filenames while avoiding most resolution/codec numbers.
+    match = None
+    for candidate in _NUMBERED_EPISODE_PATTERN.finditer(text):
+        match = candidate
+    if match:
+        return "1", match.group("episode"), match, "season"
+
     return None, None, None, None
 
 
@@ -90,6 +110,9 @@ def _anime_from_text(text: str, marker):
         if len(inner) >= 2:
             prefix = inner
     prefix = re.sub(r"\s{2,}", " ", prefix).strip(" -_.")
+    # Remove common leading/trailing release punctuation left after stripping
+    # the episode marker.
+    prefix = prefix.strip(" -_.[](){}")
     return prefix if len(prefix) >= 2 else None
 
 
