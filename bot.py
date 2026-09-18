@@ -254,51 +254,69 @@ async def edit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Owner only.")
         return
 
-    args = context.args
-    if not args:
+    raw = " ".join(context.args).strip()
+    if not raw:
         await edit_command(update, context)
         return
 
-    action = args[0].lower()
     try:
-        if action == "add":
-            if len(args) < 6:
-                raise ValueError("Format: /edit add Anime S1 E1 1080p URL")
-            anime = args[1]
-            season = args[2].lstrip("Ss")
-            episode = args[3].lstrip("Ee")
-            quality = args[4].lower()
-            url = args[5]
+        # Keep anime names with spaces intact.
+        add_match = re.match(
+            r"^add\\s+(.+?)\\s+[Ss](\\d+)\\s+[Ee](\\d+)\\s+(\\S+)\\s+(https?://\\S+)$",
+            raw,
+            re.IGNORECASE,
+        )
+        delete_match = re.match(
+            r"^delete\\s+(.+?)\\s+[Ss](\\d+)\\s+[Ee](\\d+)\\s+(\\S+)$",
+            raw,
+            re.IGNORECASE,
+        )
+        episode_match = re.match(
+            r"^delete_episode\\s+(.+?)\\s+[Ss](\\d+)\\s+[Ee](\\d+)$",
+            raw,
+            re.IGNORECASE,
+        )
+        season_match = re.match(
+            r"^delete_season\\s+(.+?)\\s+[Ss](\\d+)$",
+            raw,
+            re.IGNORECASE,
+        )
+        anime_delete_match = re.match(r"^delete_anime\\s+(.+)$", raw, re.IGNORECASE)
+
+        if add_match:
+            anime, season, episode, quality, url = add_match.groups()
             parse_telegram_message_link(url)
-            add_source(anime, season, episode, quality, url)
+            add_source(anime.strip(), season, episode, quality.lower(), url)
             await update.message.reply_text("✅ Source saved.")
-        elif action == "delete":
-            if len(args) < 5:
-                raise ValueError("Format: /edit delete Anime S1 E1 1080p")
-            delete_source(args[1], args[2].lstrip("Ss"), args[3].lstrip("Ee"), args[4].lower())
+        elif delete_match:
+            anime, season, episode, quality = delete_match.groups()
+            delete_source(anime.strip(), season, episode, quality.lower())
             await update.message.reply_text("✅ Source deleted.")
-        elif action == "delete_episode":
-            if len(args) < 4:
-                raise ValueError("Format: /edit delete_episode Anime S1 E1")
-            delete_episode(args[1], args[2].lstrip("Ss"), args[3].lstrip("Ee"))
+        elif episode_match:
+            anime, season, episode = episode_match.groups()
+            delete_episode(anime.strip(), season, episode)
             await update.message.reply_text("✅ Episode deleted.")
-        elif action == "delete_season":
-            if len(args) < 3:
-                raise ValueError("Format: /edit delete_season Anime S1")
-            delete_season(args[1], args[2].lstrip("Ss"))
+        elif season_match:
+            anime, season = season_match.groups()
+            delete_season(anime.strip(), season)
             await update.message.reply_text("✅ Season deleted.")
-        elif action == "delete_anime":
-            if len(args) < 2:
-                raise ValueError("Format: /edit delete_anime Anime")
+        elif anime_delete_match:
+            anime = anime_delete_match.group(1).strip()
             with get_connection() as conn:
-                conn.execute("DELETE FROM library WHERE LOWER(anime) = LOWER(?)", (args[1],))
+                conn.execute("DELETE FROM library WHERE LOWER(anime) = LOWER(?)", (anime,))
                 conn.commit()
             await update.message.reply_text("✅ Anime deleted from library.")
         else:
-            raise ValueError("Unknown edit action.")
+            raise ValueError(
+                "Format:\\n"
+                "/edit add Anime Name S1 E1 1080p https://t.me/channel/123\\n"
+                "/edit delete Anime Name S1 E1 1080p\\n"
+                "/edit delete_episode Anime Name S1 E1\\n"
+                "/edit delete_season Anime Name S1\\n"
+                "/edit delete_anime Anime Name"
+            )
     except Exception as exc:
         await update.message.reply_text(f"❌ {exc}")
-
 
 async def process_save_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get("save_step")
