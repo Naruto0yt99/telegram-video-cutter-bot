@@ -10,7 +10,7 @@ from telegram_media import is_video_message, get_message_video_name
 from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
-PARSER_VERSION = 6
+PARSER_VERSION = 8
 
 
 _QUALITY_PATTERNS = [
@@ -324,6 +324,19 @@ async def sync_source_library(client):
         topic_text = await _topic_text_for_message(client, entity, message, topic_cache)
         metadata = parse_episode_metadata(message, topic_text)
         link = _message_link(message)
+
+        # Temporary diagnostic for the Naruto target range. This lets us
+        # inspect the real Telegram caption/filename/topic format instead of
+        # guessing parser regexes.
+        if 11750 <= message_id <= 11790:
+            logger.info(
+                "SOURCE DEBUG id=%s video_name=%r caption=%r topic=%r metadata=%r",
+                message_id,
+                _clean_caption(get_message_video_name(message)),
+                _clean_caption(getattr(message, "message", "") or ""),
+                topic_text,
+                metadata,
+            )
 
         if not metadata or not link:
             skipped += 1
