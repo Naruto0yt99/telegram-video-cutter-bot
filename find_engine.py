@@ -16,6 +16,9 @@ from utils import safe_filename, unique_path
 
 logger = logging.getLogger("simple-find")
 
+_progress_state = {}
+_progress_lock = asyncio.Lock()
+
 # Limit total remote FFmpeg/range-server work across all scenes. FIND already
 # searches multiple scenes in parallel; an additional per-scene limit could
 # otherwise create 9+ simultaneous Telegram range streams on a phone.
@@ -34,10 +37,24 @@ async def _show_find_progress(message, percent, title, detail=""):
     text = f"🎯 FIND — {percent}% [{_progress_bar(percent)}]\\n\\n{title}"
     if detail:
         text += f"\\n{detail}"
-    try:
-        await message.edit_text(text)
-    except Exception:
-        pass
+
+    # Several scenes/candidates report progress concurrently. Throttle status
+    # edits so Telegram rate limits cannot become the thing that breaks FIND.
+    key = id(message)
+    async with _progress_lock:
+        now = asyncio.get_running_loop().time()
+        previous = _progress_state.get(key)
+        if previous:
+            previous_time, previous_text = previous
+            if text == previous_text:
+                return
+            if now - previous_time < 0.75 and int(percent) < 90:
+                return
+        try:
+            await message.edit_text(text)
+            _progress_state[key] = (now, text)
+        except Exception:
+            pass
 
 
 QUALITY_ORDER = ("2160p", "1440p", "1080p", "720p", "480p", "360p", "auto")
@@ -391,20 +408,55 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
     target_width = int(round(target_height * 16 / 9))
     normalized = []
 
-    for x in clips:
+    async def normalize_one(x):
         src = Path(x["path"])
         dst = unique_path(output_dir, f"normalized_{x['index']:02d}.mp4")
-        await run_command(
+
+        # The concat demuxer requires every file to have the same stream
+        # layout. FIND normally gets audio, but a video-only source must not
+        # make the final merge fail. Probe once and synthesize silent stereo
+        # AAC only for clips that have no audio.
+        probe_out, _ = await run_command(
+            "ffprobe", "-v", "error",
+            "-select_streams", "a:0",
+            "-show_entries", "stream=index",
+            "-of", "csv=p=0",
+            str(src),
+        )
+        has_audio = bool(probe_out.strip())
+
+        args = [
             FFMPEG_BIN, "-hide_banner", "-loglevel", "warning", "-y",
             "-i", str(src),
+        ]
+        if not has_audio:
+            args += [
+                "-f", "lavfi",
+                "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+            ]
+
+        args += [
             "-vf", f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
                    f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2,setsar=1",
             "-r", "30",
+            "-map", "0:v:0",
+            "-map", "0:a:0" if has_audio else "1:a:0",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-            "-c:a", "aac", "-b:a", "192k",
+            "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+            "-shortest",
             "-movflags", "+faststart", str(dst),
-        )
-        normalized.append(dst)
+        ]
+        await run_command(*args)
+        if not dst.exists() or dst.stat().st_size == 0:
+            raise RuntimeError(f"Normalization failed for scene {x['index']}.")
+        return dst
+
+    normalize_sem = asyncio.Semaphore(2)
+    async def guarded_normalize(x):
+        async with normalize_sem:
+            return await normalize_one(x)
+
+    normalized = await asyncio.gather(*(guarded_normalize(x) for x in clips))
 
     list_path = output_dir / "concat.txt"
     list_path.write_text(
