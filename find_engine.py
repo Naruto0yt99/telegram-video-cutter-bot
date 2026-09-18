@@ -82,8 +82,95 @@ async def _extract_remote_clip(client, source_url, start, end, output):
     return output
 
 
+async def _process_fast_scene(
+    telethon_client,
+    region,
+    index,
+    total,
+    output_dir,
+    progress_message=None,
+):
+    """Fast/best-effort scene extraction.
+
+    Gemini supplies an approximate source timestamp. We try that point first
+    and then nearby offsets up to +/- 5 minutes. The current priority is to
+    return a usable clip quickly rather than spend minutes on full verification.
+    """
+    source, anime, season, episode, quality = _source_for_region(region)
+    if not source:
+        logger.warning(
+            "Scene %s source missing anime=%r season=%r episode=%r",
+            index, anime, season, episode,
+        )
+        return None
+
+    try:
+        source_start = float(region.get("source_start_hint"))
+    except (TypeError, ValueError):
+        return None
+
+    edit_start = float(region["start_time"])
+    edit_end = float(region["end_time"])
+    clip_length = max(0.5, edit_end - edit_start)
+
+    # Best-effort fallback positions. Accuracy can be improved later.
+    offsets = (0, -30, 30, -60, 60, -120, 120, -180, 180, -300, 300)
+
+    for offset in offsets:
+        candidate_start = max(0.0, source_start + offset)
+        candidate_end = candidate_start + clip_length
+        output = unique_path(
+            output_dir,
+            safe_filename(
+                f"find_{index:02d}_{anime}_S{season}E{episode}_{int(candidate_start)}"
+            ) + ".mp4",
+        )
+
+        if progress_message and offset == 0:
+            try:
+                await progress_message.edit_text(
+                    "🎯 FIND\n\n"
+                    f"Scene {index}/{total}\n"
+                    f"{anime} S{season} E{episode}\n"
+                    f"Gemini approx: {source_start:.1f}s\n\n"
+                    "⚡ Fast Telegram clip extraction..."
+                )
+            except Exception:
+                pass
+
+        try:
+            await _extract_remote_clip(
+                telethon_client,
+                source,
+                candidate_start,
+                candidate_end,
+                output,
+            )
+            return {
+                "path": output,
+                "index": index,
+                "anime": anime,
+                "season": season,
+                "episode": episode,
+                "start": candidate_start,
+                "end": candidate_end,
+                "quality": quality,
+                "offset": offset,
+            }
+        except Exception:
+            output.unlink(missing_ok=True)
+            logger.info(
+                "Scene %s extraction failed at offset %+ss",
+                index,
+                offset,
+                exc_info=True,
+            )
+
+    return None
+
+
 async def find_and_build(input_video, user_id, telethon_client, progress_message=None):
-    """Simple FIND: Gemini identifies approximate episode/timestamps; trust them."""
+    """Fast FIND: return best-effort clips instead of waiting for perfect matching."""
     if telethon_client is None:
         raise RuntimeError("Telegram source client connected nahi hai.")
 
@@ -95,77 +182,37 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
     if not regions:
         raise RuntimeError("Gemini ko koi usable anime scene nahi mila.")
 
-    logger.info("Simple FIND: Gemini returned %s regions", len(regions))
+    logger.info("Fast FIND: Gemini returned %s regions", len(regions))
     output_dir = Path(TEMP_DIR) / str(user_id) / "find_clips"
     output_dir.mkdir(parents=True, exist_ok=True)
-    clips = []
 
-    for index, region in enumerate(regions, start=1):
-        source, anime, season, episode, quality = _source_for_region(region)
-        if not source:
-            logger.warning(
-                "Scene %s source missing anime=%r season=%r episode=%r",
-                index, anime, season, episode,
-            )
-            continue
+    import asyncio
+    semaphore = asyncio.Semaphore(3)
 
-        source_start = region.get("source_start_hint")
-        try:
-            source_start = float(source_start)
-        except (TypeError, ValueError):
-            source_start = None
-        if source_start is None:
-            logger.warning("Scene %s has no source_start_hint", index)
-            continue
-
-        edit_start = float(region["start_time"])
-        edit_end = float(region["end_time"])
-        clip_length = max(0.5, edit_end - edit_start)
-        source_end = source_start + clip_length
-
-        output = unique_path(
-            output_dir,
-            safe_filename(f"find_{index:02d}_{anime}_S{season}E{episode}") + ".mp4",
-        )
-
-        if progress_message:
+    async def worker(index, region):
+        async with semaphore:
             try:
-                await progress_message.edit_text(
-                    "🎯 FIND\n\n"
-                    f"Scene {index}/{len(regions)}\n"
-                    f"{anime} S{season} E{episode}\n"
-                    f"Approx source: {source_start:.1f}s → {source_end:.1f}s\n\n"
-                    "⚡ Direct clip export..."
+                return await _process_fast_scene(
+                    telethon_client,
+                    region,
+                    index,
+                    len(regions),
+                    output_dir,
+                    progress_message,
                 )
             except Exception:
-                pass
+                logger.exception("Scene %s failed", index)
+                return None
 
-        try:
-            await _extract_remote_clip(
-                telethon_client,
-                source,
-                source_start,
-                source_end,
-                output,
-            )
-        except Exception:
-            logger.exception("Scene %s direct extraction failed", index)
-            continue
-
-        clips.append({
-            "path": output,
-            "index": index,
-            "anime": anime,
-            "season": season,
-            "episode": episode,
-            "start": source_start,
-            "end": source_end,
-            "quality": quality,
-        })
+    results = await asyncio.gather(
+        *(worker(index, region) for index, region in enumerate(regions, start=1))
+    )
+    clips = [item for item in results if item]
+    clips.sort(key=lambda item: item["index"])
 
     if not clips:
         raise RuntimeError(
-            "Gemini ne scenes diye, lekin matching episode sources library me nahi mile."
+            "Gemini ne scenes diye, lekin Telegram source se koi clip extract nahi ho paya."
         )
 
     return {
