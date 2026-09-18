@@ -146,10 +146,10 @@ window from the original episode. The edit may contain crop, zoom, subtitles,
 speed changes, color changes, overlays, or transitions.
 
 The candidate window starts at {float(source_window_start):.3f} seconds in the episode.
-Find where the actual anime footage from VIDEO 1 occurs inside VIDEO 2.
+Find the exact original interval represented by VIDEO 1 inside VIDEO 2. Return source_duration as the original interval length and speed as original_duration / edited_duration.
 
 Return ONLY JSON:
-{{"match":true,"confidence":0.0,"offset_in_source_window":0.0}}
+{{"match":true,"confidence":0.0,"offset_in_source_window":0.0,"source_duration":0.0,"speed":1.0}}
 
 Use visual action, characters, camera movement, and scene continuity. Ignore music,
 subtitles, logos, and editing effects. Do not mark a match merely because the
@@ -203,15 +203,14 @@ def _catalog_text():
 
 def _analysis_prompt(catalog: str):
     return f"""
-Watch the uploaded YouTube anime edit and list every contiguous anime clip.
-Do ONLY timestamp identification. Do not search, compare, fingerprint, verify, or explain.
+Watch the uploaded YouTube anime edit and split it into EVERY contiguous shot/segment. Split at every visible cut, transition, source change, different anime, or different continuous source segment. Do not merge separated shots just because they come from the same episode. Preserve exact edited start/end. Estimate speed as original_duration / edited_duration. Do ONLY timestamp identification. Do not search, compare, fingerprint, verify, or explain.
 For each clip return the closest catalog anime, season, episode, approximate START time in the original episode, and the clip start/end inside the uploaded edit.
 Use seconds as numbers. Best-effort timestamps are required. The source timestamp may be off by up to about 5 minutes; still return your best estimate rather than refusing or returning no result.
 Return ONLY JSON.
 
 Catalog: {catalog}
 
-{{"regions":[{{"start_time":0,"end_time":5,"anime":"NARUTO","season":1,"episode":27,"source_start_hint":755,"confidence":0.9}}]}}
+{{"regions":[{{"start_time":0,"end_time":5,"anime":"NARUTO","season":1,"episode":27,"source_start_hint":755,"confidence":0.9,"speed":1.0}}]}}
 """
 
 
@@ -240,12 +239,13 @@ This is a BEST-EFFORT extraction task. Do not refuse because the exact anime,
 season, episode, or timestamp is uncertain.
 
 Return JSON only with this exact shape:
-{{"regions":[{{"start_time":0,"end_time":5,"anime":"NARUTO","season":1,"episode":27,"source_start_hint":755,"confidence":0.5}}]}}
+{{"regions":[{{"start_time":0,"end_time":5,"anime":"NARUTO","season":1,"episode":27,"source_start_hint":755,"confidence":0.5,"speed":1.0}}]}}
 
 Rules:
-- Return every obvious contiguous anime segment.
+- Return every contiguous shot/segment and split at visible cuts/transitions or source changes.
 - start_time/end_time are seconds inside the uploaded edit.
 - source_start_hint is the best approximate timestamp in the original episode, in seconds.
+- speed is original_duration / edited_duration; use 1.0 when unchanged.
 - If season/episode is uncertain, still make your best estimate; do not return empty regions.
 - Approximate timestamps are acceptable and may be off by several minutes.
 - Do not explain anything outside the JSON.
