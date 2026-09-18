@@ -58,15 +58,27 @@ def _source_for_region(region):
     sources = get_all_sources_for_episode(anime, season, episode)
     resolved_season = season
 
-    # Never silently change the season Gemini identified. A fallback to
-    # another season can spend minutes searching the wrong episode and can
-    # produce a false-positive clip.
+    # If the exact season is not indexed, a single indexed season is still
+    # safe to try because the visual verification step below must confirm the
+    # actual scene. This is especially important for libraries whose uploader
+    # labels seasons differently from Gemini's canonical numbering.
     if not sources:
         by_season = get_all_sources_for_episode_any_season(anime, episode)
-        if by_season:
+        if len(by_season) == 1:
+            resolved_season = next(iter(by_season))
+            sources = by_season[resolved_season]
             logger.warning(
-                "Scene source unavailable for exact season: anime=%r S%s E%s; "
-                "indexed episode exists in seasons=%s; refusing season fallback",
+                "Exact season unavailable: anime=%r Gemini=S%s E%s; "
+                "using only indexed season S%s for visual verification",
+                anime,
+                season,
+                episode,
+                resolved_season,
+            )
+        elif by_season:
+            logger.warning(
+                "Exact season unavailable: anime=%r S%s E%s; "
+                "multiple indexed seasons=%s, refusing ambiguous fallback",
                 anime,
                 season,
                 episode,
