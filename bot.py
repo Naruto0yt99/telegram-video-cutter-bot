@@ -606,7 +606,7 @@ async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = await update.message.reply_text("✂️ SPLIT STARTED\\n\\n🔎 Finding source...")
     try:
         raw = " ".join(context.args).strip()
-        source_match = re.match(r"^(\\d+)\\s+(.+?)\\s+[Ss](\\d+)\\s+[Ee](\\d+)$", raw)
+        source_match = re.match(r"^(\d+)\s+(.+?)\s+[Ss](\d+)\s+[Ee](\d+)$", raw)
         if source_match:
             part_duration = int(source_match.group(1))
             anime = source_match.group(2).strip()
