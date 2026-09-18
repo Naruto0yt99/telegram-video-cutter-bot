@@ -179,6 +179,87 @@ characters/anime are similar.
     return parsed
 
 
+
+def verify_source_candidates(edit_path: Path, candidate_paths, candidate_starts):
+    """Compare one edit sample against several candidate source windows in one Gemini call."""
+    if not edit_path.exists() or not candidate_paths:
+        return None
+    if len(candidate_paths) != len(candidate_starts):
+        raise ValueError("candidate_paths and candidate_starts length mismatch")
+
+    edit_file = _upload_file(edit_path)
+    edit_name = edit_file.get("name")
+    if not edit_name:
+        return None
+
+    candidate_files = []
+    for path in candidate_paths:
+        if not Path(path).exists():
+            continue
+        uploaded = _upload_file(Path(path))
+        name = uploaded.get("name")
+        if name:
+            candidate_files.append(name)
+
+    if not candidate_files:
+        return None
+
+    _wait_file_active(edit_name)
+    for name in candidate_files:
+        _wait_file_active(name)
+
+    candidate_lines = []
+    for idx, start_time in enumerate(candidate_starts[:len(candidate_files)], 1):
+        candidate_lines.append(f"Candidate {idx}: starts at {float(start_time):.3f}s in the episode.")
+
+    prompt = f"""
+VIDEO 1 is the edited anime scene.
+VIDEOS 2 onward are candidate windows from the same original episode.
+{chr(10).join(candidate_lines)}
+
+Find which candidate contains the exact visual scene from VIDEO 1. The edit may
+have crop, zoom, subtitles, color changes, overlays, transitions, or speed
+changes. Ignore music and text overlays.
+
+Return ONLY JSON:
+{{"match":true,"candidate_index":1,"confidence":0.0,"offset_in_candidate":0.0,"source_duration":0.0,"speed":1.0}}
+
+candidate_index is the numbered candidate that contains the match.
+offset_in_candidate is seconds from that candidate's start.
+source_duration is the original duration represented by VIDEO 1.
+speed is original_duration / edited_duration.
+
+Do not mark a match merely because the characters or anime are similar. Use
+specific visual action, camera movement, character poses, and scene continuity.
+"""
+
+    parts = [{"file_data": {"mime_type": "video/mp4", "file_uri": f"{API_ROOT}/v1beta/{edit_name}"}}]
+    parts.extend(
+        {"file_data": {"mime_type": "video/mp4", "file_uri": f"{API_ROOT}/v1beta/{name}"}}
+        for name in candidate_files
+    )
+    parts.append({"text": prompt})
+
+    payload = {
+        "contents": [{"role": "user", "parts": parts}],
+        "generationConfig": {"responseMimeType": "application/json"},
+    }
+    data = _generate_with_fallback(payload)
+    parsed = _parse_json(_text_from_response(data))
+    if not isinstance(parsed, dict):
+        return None
+
+    try:
+        parsed["candidate_index"] = int(parsed.get("candidate_index", 0) or 0)
+        parsed["confidence"] = float(parsed.get("confidence", 0.0) or 0.0)
+        parsed["offset_in_candidate"] = float(parsed.get("offset_in_candidate", 0.0) or 0.0)
+        parsed["source_duration"] = float(parsed.get("source_duration", 0.0) or 0.0)
+        parsed["speed"] = float(parsed.get("speed", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        return None
+    parsed["match"] = bool(parsed.get("match"))
+    return parsed
+
 def _parse_json(text: str):
     text = (text or "").strip()
     if not text:

@@ -9,7 +9,7 @@ from database import (
     get_all_sources_for_episode_any_season,
 )
 from ffmpeg_utils import run_command
-from gemini_analyzer import analyze_video, verify_source_match
+from gemini_analyzer import analyze_video, verify_source_candidates
 from telegram_remote import open_telegram_range_server
 from utils import safe_filename, unique_path
 
@@ -58,32 +58,19 @@ def _source_for_region(region):
     sources = get_all_sources_for_episode(anime, season, episode)
     resolved_season = season
 
-    # Some anime/source libraries continue episode numbering across seasons,
-    # while Gemini may assign the same episode to a different season. If the
-    # exact season has no source, safely fall back only when this episode exists
-    # in exactly one indexed season. This avoids guessing when episode numbers
-    # repeat across multiple seasons.
+    # Never silently change the season Gemini identified. A fallback to
+    # another season can spend minutes searching the wrong episode and can
+    # produce a false-positive clip.
     if not sources:
         by_season = get_all_sources_for_episode_any_season(anime, episode)
-        if len(by_season) == 1:
-            resolved_season_text, sources = next(iter(by_season.items()))
-            resolved_season = _number(resolved_season_text)
+        if by_season:
             logger.warning(
-                "Scene season mismatch: Gemini=%s S%s E%s; using indexed S%s E%s",
+                "Scene source unavailable for exact season: anime=%r S%s E%s; "
+                "indexed episode exists in seasons=%s; refusing season fallback",
                 anime,
                 season,
-                episode,
-                resolved_season,
-                episode,
-            )
-        elif by_season:
-            logger.warning(
-                "Scene source ambiguous: anime=%r episode=%r exists in seasons=%s; "
-                "Gemini requested S%s",
-                anime,
                 episode,
                 sorted(by_season.keys()),
-                season,
             )
 
     if not sources:
@@ -176,47 +163,76 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
     edit_sample = output_dir / f"verify_edit_{int(edit_start * 1000)}.mp4"
     await _make_edit_sample(input_video, edit_start, sample_len, edit_sample)
 
-    # Keep every remote verification probe short. The previous implementation
-    # could request a ~20-minute source window, which caused huge Telegram
-    # downloads when Gemini's first timestamp hint was wrong.
-    centers = [0, -60, 60, -180, 180, -360, 360, -600, 600]
-    probe_duration = 45.0
-    best = None
+    # Do not call Gemini once per probe. The old 9-probe loop uploaded and
+    # processed a new source video on every attempt, so one scene could spend
+    # many minutes waiting on repeated Gemini file processing. Build a small
+    # set of candidate windows locally, then let one Gemini request compare all
+    # candidates against the edit sample.
+    centers = [0, -120, 120, -300, 300, -600, 600]
+    probe_duration = max(12.0, min(16.0, edit_length * 2.0))
+    candidates = []
+
+    async def extract_candidate(probe_index, offset):
+        center = max(0.0, hint + offset)
+        ws = max(0.0, center - probe_duration / 2)
+        src = output_dir / f"verify_source_{int(ws)}_{probe_index}.mp4"
+        await _show_find_progress(
+            progress_message,
+            15,
+            f"🔎 {scene_label} — exact source search",
+            f"Candidate {probe_index}/{len(centers)} • around {ws:.0f}s",
+        )
+        try:
+            await _extract_remote_clip(client, source_url, ws, ws + probe_duration, src)
+            return {"index": probe_index, "start": ws, "path": src}
+        except Exception:
+            logger.exception("Candidate extraction failed probe=%s around=%s", probe_index, ws)
+            return None
+
     try:
-        for probe_index, offset in enumerate(centers, start=1):
-            center = max(0.0, hint + offset)
-            ws = max(0.0, center - probe_duration / 2)
-            wd = probe_duration
-            src = output_dir / f"verify_source_{int(ws)}_{probe_index}.mp4"
-            await _show_find_progress(
-                progress_message,
-                15,
-                f"🔎 {scene_label} — exact source search",
-                f"Probe {probe_index}/{len(centers)} • around {ws:.0f}s",
-            )
-            try:
-                await _extract_remote_clip(client, source_url, ws, ws + wd, src)
-                result = await asyncio.to_thread(verify_source_match, edit_sample, src, ws)
-                if result and result.get("match"):
-                    conf = float(result.get("confidence", 0) or 0)
-                    off = float(result.get("offset_in_source_window", 0) or 0)
-                    sd = float(result.get("source_duration", 0) or 0) or edit_length * float(result.get("speed", 1) or 1)
-                    sp = float(result.get("speed", 1) or 1)
-                    cand = {
-                        "start": max(0, ws + off),
-                        "source_duration": max(.5, sd),
-                        "speed": max(.25, min(sp, 4)),
-                        "confidence": conf,
-                    }
-                    if best is None or conf > best["confidence"]:
-                        best = cand
-                    if conf >= .92:
-                        break
-            finally:
-                src.unlink(missing_ok=True)
+        # Limit remote Telegram work so the phone does not open seven large
+        # range/FFmpeg operations at once.
+        sem = asyncio.Semaphore(3)
+
+        async def guarded(i, offset):
+            async with sem:
+                return await extract_candidate(i, offset)
+
+        extracted = await asyncio.gather(
+            *(guarded(i, offset) for i, offset in enumerate(centers, 1))
+        )
+        candidates = [x for x in extracted if x]
+        if not candidates:
+            return None
+
+        result = await asyncio.to_thread(
+            verify_source_candidates,
+            edit_sample,
+            [x["path"] for x in candidates],
+            [x["start"] for x in candidates],
+        )
+        if not result or not result.get("match"):
+            return None
+
+        candidate_index = int(result.get("candidate_index", 0) or 0)
+        selected = next((x for x in candidates if x["index"] == candidate_index), None)
+        if selected is None:
+            return None
+
+        conf = float(result.get("confidence", 0) or 0)
+        off = float(result.get("offset_in_candidate", 0) or 0)
+        sd = float(result.get("source_duration", 0) or 0)
+        sp = float(result.get("speed", 1) or 1)
+        return {
+            "start": max(0.0, selected["start"] + off),
+            "source_duration": max(0.5, sd or edit_length * sp),
+            "speed": max(0.25, min(sp, 4.0)),
+            "confidence": conf,
+        }
     finally:
         edit_sample.unlink(missing_ok=True)
-    return best
+        for candidate in candidates:
+            candidate["path"].unlink(missing_ok=True)
 
 
 async def _process_fast_scene(input_video, telethon_client, region, index, total, output_dir, progress_message=None):
