@@ -303,7 +303,7 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
 
     for x in clips:
         src = Path(x["path"])
-        dst = unique_path(output_dir, f"normalized_{x['index']:02d}")
+        dst = unique_path(output_dir, f"normalized_{x['index']:02d}.mp4")
         await run_command(
             FFMPEG_BIN, "-hide_banner", "-loglevel", "warning", "-y",
             "-i", str(src),
