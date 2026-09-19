@@ -169,7 +169,7 @@ def _content_label(season):
 def _series_page(tree, anime):
     rows = []
     for series in sorted(tree.get(anime, {}), key=str.casefold):
-        rows.append([InlineKeyboardButton(f"📚 {series}", callback_data=f"lr:{_token(f"{anime}|{series}")}")])
+        rows.append([InlineKeyboardButton(f"📚 {series}", callback_data=f"lr:{_token(anime + "|" + series)}")])
     rows.append([InlineKeyboardButton("⬅️ Anime", callback_data="lb")])
     return f"🎬 <b>{escape(anime)}</b>\\n\\nChoose series:", _keyboard(rows)
 
@@ -177,7 +177,7 @@ def _series_page(tree, anime):
 def _season_page(tree, anime, series):
     rows = []
     for season in sorted(tree.get(anime, {}).get(series, {}), key=_season_sort_key):
-        rows.append([InlineKeyboardButton(f"📺 {_content_label(season)}", callback_data=f"ls:{_token(f"{anime}|{series}|{season}")}")])
+        rows.append([InlineKeyboardButton(f"📺 {_content_label(season)}", callback_data=f"ls:{_token(anime + "|" + series + "|" + season)}")])
     rows.append([InlineKeyboardButton("⬅️ Series", callback_data=f"lr:{_token(f"{anime}|{series}")}")])
     title = series if anime == "Naruto" else anime
     return f"🎬 <b>{escape(title)}</b>\\n\\nChoose Season / OVA / Movie:", _keyboard(rows)
@@ -185,7 +185,7 @@ def _season_page(tree, anime, series):
 
 def _episode_page(tree, anime, series, season):
     episodes = tree.get(anime, {}).get(series, {}).get(season, {})
-    lines = [f"🎬 <b>{escape(series if anime == "Naruto" else anime)}</b>", f"📺 <b>{escape(_content_label(season))}</b>", ""]
+    lines = [f"🎬 <b>{escape(series if anime == 'Naruto' else anime)}</b>", f"📺 <b>{escape(_content_label(season))}</b>", ""]
     rows = []
 
     for episode in sorted(episodes, key=lambda x: int(x) if str(x).isdigit() else str(x)):
