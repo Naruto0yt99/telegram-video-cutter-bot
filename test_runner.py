@@ -40,6 +40,23 @@ class StatusMessage:
     async def edit_text(self, text, **kwargs):
         log.info("PROGRESS %s", text.replace("\n", " | "))
 
+def qa_is_strong(qa):
+    if not isinstance(qa, dict) or not qa.get("match"):
+        return False
+    try:
+        confidence = float(qa.get("confidence", 0) or 0)
+        sequence = float(qa.get("sequence_score", 0) or 0)
+        timing = float(qa.get("timing_score", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    return (
+        confidence >= 0.80
+        and sequence >= 0.85
+        and timing >= 0.75
+        and not (qa.get("missing_scenes") or qa.get("extra_scenes") or qa.get("mismatches"))
+    )
+
+
 async def run_one(index, url, client, user_id):
     started = time.monotonic()
     case = {
@@ -66,26 +83,74 @@ async def run_one(index, url, client, user_id):
         case["input_video"] = str(video)
         log.info("Downloaded: %s (%.2fs)", video, case["download_seconds"])
 
+        profiles = ("fast", "precision", "deep")
+        attempts = []
+        final_result = None
         find_started = time.monotonic()
-        result = await find_and_build(
-            input_video=video,
-            user_id=case_user_id,
-            telethon_client=client,
-            progress_message=StatusMessage(),
-        )
+
+        for profile in profiles:
+            os.environ["FIND_SEARCH_PROFILE"] = profile
+            attempt_started = time.monotonic()
+            log.info("CASE %s FIND profile=%s", index, profile)
+            try:
+                result = await find_and_build(
+                    input_video=video,
+                    user_id=case_user_id,
+                    telethon_client=client,
+                    progress_message=StatusMessage(),
+                )
+                attempt_seconds = round(time.monotonic() - attempt_started, 2)
+                qa = result.get("qa")
+                matched = int(result.get("matched", len(result.get("clips", []))) or 0)
+                total = int(result.get("total", 0) or 0)
+                strong = matched == total and total > 0 and qa_is_strong(qa)
+                attempts.append({
+                    "profile": profile,
+                    "seconds": attempt_seconds,
+                    "matched": matched,
+                    "total": total,
+                    "qa": qa,
+                    "strong": strong,
+                })
+                final_result = result
+                if strong:
+                    log.info("CASE %s accepted profile=%s in %.2fs", index, profile, attempt_seconds)
+                    break
+                log.warning("CASE %s profile=%s not strong enough; trying next profile", index, profile)
+                shutil.rmtree(Path(TEMP_DIR) / str(case_user_id), ignore_errors=True)
+            except Exception as exc:
+                attempt_seconds = round(time.monotonic() - attempt_started, 2)
+                attempts.append({
+                    "profile": profile,
+                    "seconds": attempt_seconds,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+                log.exception("CASE %s profile=%s failed", index, profile)
+                shutil.rmtree(Path(TEMP_DIR) / str(case_user_id), ignore_errors=True)
+
+        os.environ.pop("FIND_SEARCH_PROFILE", None)
         case["find_seconds"] = round(time.monotonic() - find_started, 2)
-        case["total_scenes"] = int(result.get("total", 0) or 0)
-        case["matched_scenes"] = int(result.get("matched", len(result.get("clips", []))) or 0)
-        case["clips"] = result.get("clips", [])
-        case["qa"] = result.get("qa")
-        case["report"] = result.get("report", "")
-        case["output"] = str(result.get("output", ""))
-        case["status"] = "PASS" if case["matched_scenes"] == case["total_scenes"] and case["total_scenes"] > 0 else "FAIL"
+        case["attempts"] = attempts
+
+        if final_result is None:
+            raise RuntimeError("All FIND profiles failed.")
+
+        case["total_scenes"] = int(final_result.get("total", 0) or 0)
+        case["matched_scenes"] = int(final_result.get("matched", len(final_result.get("clips", []))) or 0)
+        case["clips"] = final_result.get("clips", [])
+        case["qa"] = final_result.get("qa")
+        case["report"] = final_result.get("report", "")
+        case["output"] = str(final_result.get("output", ""))
+        case["status"] = "PASS" if (
+            case["matched_scenes"] == case["total_scenes"]
+            and case["total_scenes"] > 0
+            and qa_is_strong(case["qa"])
+        ) else "FAIL"
 
         if case["status"] == "PASS":
             log.info("CASE %s PASS: matched=%s/%s qa=%s", index, case["matched_scenes"], case["total_scenes"], case["qa"])
         else:
-            log.error("CASE %s FAIL: matched=%s/%s qa=%s", index, case["matched_scenes"], case["total_scenes"], case["qa"])
+            log.error("CASE %s FAIL: matched=%s/%s qa=%s attempts=%s", index, case["matched_scenes"], case["total_scenes"], case["qa"], attempts)
 
     except Exception as exc:
         case["error"] = f"{type(exc).__name__}: {exc}"
