@@ -10,7 +10,7 @@ from telegram_media import is_video_message, get_message_video_name
 from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
-PARSER_VERSION = 19
+PARSER_VERSION = 20
 
 
 _QUALITY_PATTERNS = [
@@ -157,12 +157,19 @@ def _topic_anime_fallback(topic_text: str):
 
 
 def _canonical_from_candidates(*values):
+    # Known aliases are canonicalized; otherwise preserve the detected title.
+    # This keeps source indexing generic for every anime added to the forum.
     for value in values:
         if not value:
             continue
         canonical = canonical_anime(value)
         if canonical:
             return canonical
+    for value in values:
+        if value:
+            cleaned = _clean_caption(value)
+            if cleaned and cleaned.casefold() not in {"chats", "clips"}:
+                return cleaned
     return None
 
 
