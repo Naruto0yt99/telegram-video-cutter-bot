@@ -256,6 +256,7 @@ def get_qualities(anime, season, episode):
             WHERE LOWER(anime) = LOWER(?)
               AND season = ?
               AND episode = ?
+              AND (? IS NULL OR LOWER(series) = LOWER(?))
             ORDER BY
                 CASE
                     WHEN quality = '2160p' THEN 1
@@ -281,6 +282,7 @@ def get_all_sources_for_episode(
     anime,
     season,
     episode,
+    series=None,
 ):
     with get_connection() as conn:
         rows = conn.execute(
@@ -290,11 +292,14 @@ def get_all_sources_for_episode(
             WHERE LOWER(anime) = LOWER(?)
               AND season = ?
               AND episode = ?
+              AND (? IS NULL OR LOWER(series) = LOWER(?))
             """,
             (
                 anime,
                 str(season),
                 str(episode),
+                series,
+                series,
             ),
         ).fetchall()
 
@@ -307,6 +312,7 @@ def get_all_sources_for_episode(
 def get_all_sources_for_episode_any_season(
     anime,
     episode,
+    series=None,
 ):
     """Return episode sources grouped by season for safe season-mismatch fallback."""
     with get_connection() as conn:
