@@ -398,82 +398,60 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
     await _show_find_progress(progress_message, 90, "🎬 Scene search complete", f"Matched {len(clips)}/{len(regions)} scenes\n🔧 Building the final merged video...")
     merged = unique_path(output_dir, "find_final.mp4")
 
-    # concat demuxer requires matching stream parameters. Normalize every
-    # matched scene to the highest quality represented in the result before
-    # concatenation, while preserving each scene's exact timeline.
+    # Build the final video in ONE FFmpeg encode pass. The previous implementation
+    # encoded every matched scene separately and then ran another concat pass; on
+    # a phone that could turn a short 4-scene result into hours of CPU work.
     quality_rank = {"360p": 360, "480p": 480, "720p": 720, "1080p": 1080, "1440p": 1440, "2160p": 2160, "auto": 720}
     target_height = max(quality_rank.get(str(x.get("quality", "auto")), 720) for x in clips)
     target_width = int(round(target_height * 16 / 9))
-    normalized = []
 
-    async def normalize_one(x):
-        src = Path(x["path"])
-        dst = unique_path(output_dir, f"normalized_{x['index']:02d}.mp4")
-
-        # The concat demuxer requires every file to have the same stream
-        # layout. FIND normally gets audio, but a video-only source must not
-        # make the final merge fail. Probe once and synthesize silent stereo
-        # AAC only for clips that have no audio.
-        probe_out, _ = await run_command(
-            "ffprobe", "-v", "error",
-            "-select_streams", "a:0",
-            "-show_entries", "stream=index",
-            "-of", "csv=p=0",
-            str(src),
+    # Probe audio presence once per clip so video-only sources can still be
+    # concatenated with a generated silent stereo track.
+    async def has_audio(path):
+        out, _ = await run_command(
+            "ffprobe", "-v", "error", "-select_streams", "a:0",
+            "-show_entries", "stream=index", "-of", "csv=p=0", str(path),
         )
-        has_audio = bool(probe_out.strip())
+        return bool(out.strip())
 
-        args = [
-            FFMPEG_BIN, "-hide_banner", "-loglevel", "warning", "-y",
-            "-i", str(src),
-        ]
-        if not has_audio:
-            args += [
-                "-f", "lavfi",
-                "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
-            ]
+    audio_flags = await asyncio.gather(*(has_audio(x["path"]) for x in clips))
+    ff_args = [FFMPEG_BIN, "-hide_banner", "-loglevel", "warning", "-y"]
+    for x in clips:
+        ff_args += ["-i", str(x["path"])]
 
-        args += [
-            "-vf", f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
-                   f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2,setsar=1",
-            "-r", "30",
-            "-map", "0:v:0",
-            "-map", "0:a:0" if has_audio else "1:a:0",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-            "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-            "-shortest",
-            "-movflags", "+faststart", str(dst),
-        ]
-        await run_command(*args)
-        if not dst.exists() or dst.stat().st_size == 0:
-            raise RuntimeError(f"Normalization failed for scene {x['index']}.")
-        return dst
+    filters = []
+    concat_inputs = []
+    for i, (x, has_a) in enumerate(zip(clips, audio_flags)):
+        filters.append(
+            f"[{i}:v:0]scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
+            f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30," 
+            f"setpts=PTS-STARTPTS[v{i}]"
+        )
+        if has_a:
+            filters.append(
+                f"[{i}:a:0]aresample=48000,asetpts=PTS-STARTPTS[a{i}]"
+            )
+        else:
+            duration = max(0.5, float(x.get("edit_duration", 0) or 0))
+            filters.append(
+                f"anullsrc=channel_layout=stereo:sample_rate=48000:r=48000,"
+                f"atrim=duration={duration:.6f},asetpts=PTS-STARTPTS[a{i}]"
+            )
+        concat_inputs.append(f"[v{i}][a{i}]")
 
-    normalize_sem = asyncio.Semaphore(2)
-    async def guarded_normalize(x):
-        async with normalize_sem:
-            return await normalize_one(x)
-
-    normalized = await asyncio.gather(*(guarded_normalize(x) for x in clips))
-
-    list_path = output_dir / "concat.txt"
-    list_path.write_text(
-        "\n".join(
-            "file '" + str(p).replace("'", "'\\''") + "'"
-            for p in normalized
-        ),
-        encoding="utf-8",
+    filters.append(
+        "".join(concat_inputs) + f"concat=n={len(clips)}:v=1:a=1[vout][aout]"
     )
-    try:
-        await run_command(
-            FFMPEG_BIN, "-hide_banner", "-loglevel", "warning", "-y",
-            "-f", "concat", "-safe", "0", "-i", str(list_path),
-            "-c", "copy", "-movflags", "+faststart", str(merged),
-        )
-    finally:
-        list_path.unlink(missing_ok=True)
-        for p in normalized:
-            p.unlink(missing_ok=True)
+    ff_args += [
+        "-filter_complex", ";".join(filters),
+        "-map", "[vout]", "-map", "[aout]",
+        "-c:v", "libx264", "-preset", "superfast", "-crf", "20",
+        "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+        "-movflags", "+faststart", str(merged),
+    ]
+    await run_command(*ff_args)
+    if not merged.exists() or merged.stat().st_size == 0:
+        raise RuntimeError("Final merged video empty bana hai.")
     report=["📋 SCENE DETAILS",""]
     for x in clips:
         report += [f"{x['index']:02d} │ {x['anime']} S{x['season']} E{x['episode']}",f"   EDIT {x['edit_start']:.2f}s → {x['edit_end']:.2f}s",f"   RAW  {x['start']:.2f}s → {x['end']:.2f}s",f"   ⚡ Speed: {x['speed']:.2f}×",f"   🎯 Confidence: {x['confidence']:.0%}",""]
