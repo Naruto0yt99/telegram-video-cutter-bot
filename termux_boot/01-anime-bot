@@ -1,0 +1,12 @@
+#!/data/data/com.termux/files/usr/bin/bash
+REPO_DIR="$HOME/telegram-video-cutter-bot"
+LOG_DIR="$REPO_DIR/logs"
+mkdir -p "$LOG_DIR"
+
+# Keep Android from aggressively suspending Termux while the bot is active.
+if command -v termux-wake-lock >/dev/null 2>&1; then
+  termux-wake-lock >/dev/null 2>&1 || true
+fi
+
+cd "$REPO_DIR" || exit 1
+nohup bash "$REPO_DIR/start_bot.sh" >> "$LOG_DIR/boot.log" 2>&1 &
