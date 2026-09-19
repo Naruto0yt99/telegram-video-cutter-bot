@@ -102,7 +102,7 @@ def _load_tree():
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT anime, season, episode, quality, source_url
+            SELECT anime, series, season, episode, quality, source_url
             FROM library
             ORDER BY anime COLLATE NOCASE, season, CAST(episode AS INTEGER)
             """
@@ -114,7 +114,7 @@ def _load_tree():
             continue
         season = str(row["season"])
         episode = str(row["episode"])
-        tree.setdefault(anime, {}).setdefault(season, {}).setdefault(episode, {})[
+        tree.setdefault(anime, {}).setdefault(str(row['series'] or row['anime']), {}).setdefault(season, {}).setdefault(episode, {})[
             row["quality"]
         ] = row["source_url"]
     return tree
@@ -166,21 +166,26 @@ def _content_label(season):
     return f"Season {season}"
 
 
-def _season_page(tree, anime):
-    seasons = tree.get(anime, {})
+def _series_page(tree, anime):
     rows = []
-    for season in sorted(seasons, key=_season_sort_key):
-        payload = f"{anime}|{season}"
-        data = _token(payload)
-        if len(data) <= 55:
-            rows.append([InlineKeyboardButton(f"📺 {_content_label(season)}", callback_data=f"ls:{data}")])
+    for series in sorted(tree.get(anime, {}), key=str.casefold):
+        rows.append([InlineKeyboardButton(f"📚 {series}", callback_data=f"lr:{_token(f"{anime}|{series}")}")])
     rows.append([InlineKeyboardButton("⬅️ Anime", callback_data="lb")])
-    return f"🎬 <b>{escape(anime)}</b>\n\nChoose Season / OVA / Movie:", _keyboard(rows)
+    return f"🎬 <b>{escape(anime)}</b>\\n\\nChoose series:", _keyboard(rows)
 
 
-def _episode_page(tree, anime, season):
-    episodes = tree.get(anime, {}).get(season, {})
-    lines = [f"🎬 <b>{escape(anime)}</b>", f"📺 <b>{escape(_content_label(season))}</b>", ""]
+def _season_page(tree, anime, series):
+    rows = []
+    for season in sorted(tree.get(anime, {}).get(series, {}), key=_season_sort_key):
+        rows.append([InlineKeyboardButton(f"📺 {_content_label(season)}", callback_data=f"ls:{_token(f"{anime}|{series}|{season}")}")])
+    rows.append([InlineKeyboardButton("⬅️ Series", callback_data=f"lr:{_token(f"{anime}|{series}")}")])
+    title = series if anime == "Naruto" else anime
+    return f"🎬 <b>{escape(title)}</b>\\n\\nChoose Season / OVA / Movie:", _keyboard(rows)
+
+
+def _episode_page(tree, anime, series, season):
+    episodes = tree.get(anime, {}).get(series, {}).get(season, {})
+    lines = [f"🎬 <b>{escape(series if anime == "Naruto" else anime)}</b>", f"📺 <b>{escape(_content_label(season))}</b>", ""]
     rows = []
 
     for episode in sorted(episodes, key=lambda x: int(x) if str(x).isdigit() else str(x)):
@@ -220,13 +225,17 @@ async def library_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if anime not in tree:
                 await query.answer("Anime library entry nahi mila.", show_alert=True)
                 return
-            text, markup = _season_page(tree, anime)
+            if anime == "Naruto":
+                text, markup = _series_page(tree, anime)
+            else:
+                series = next(iter(tree[anime]))
+                text, markup = _season_page(tree, anime, series)
+        elif data.startswith("lr:"):
+            anime, series = _untoken(data[3:]).split("|", 1)
+            text, markup = _season_page(tree, anime, series)
         elif data.startswith("ls:"):
-            anime, season = _untoken(data[3:]).split("|", 1)
-            if anime not in tree or season not in tree[anime]:
-                await query.answer("Season library entry nahi mila.", show_alert=True)
-                return
-            text, markup = _episode_page(tree, anime, season)
+            anime, series, season = _untoken(data[3:]).split("|", 2)
+            text, markup = _episode_page(tree, anime, series, season)
         else:
             return
 
