@@ -14,7 +14,7 @@ from database import get_animes
 logger = logging.getLogger("gemini-analyzer")
 
 MODEL = "gemini-3.8-flash"
-FALLBACK_MODELS = ("gemini-3.7-flash", "gemini-3.6-flash")
+FALLBACK_MODELS = ("gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-flash")
 API_ROOT = "https://generativelanguage.googleapis.com"
 MODEL_ATTEMPTS = 1
 REQUEST_TIMEOUT = httpx.Timeout(connect=20.0, read=120.0, write=120.0, pool=20.0)
@@ -74,18 +74,34 @@ def _wait_file_active(name: str):
 
 def _generate_sync(model: str, payload: dict):
     last_error = None
+    retry_delays = (1.5, 3.0)
     with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
-        try:
-            response = client.post(
-                f"{API_ROOT}/v1beta/models/{model}:generateContent",
-                headers=_headers(),
-                json=payload,
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPError as exc:
-            last_error = exc
-            logger.warning("Gemini request failed model=%s: %s", model, exc)
+        for attempt in range(len(retry_delays) + 1):
+            try:
+                response = client.post(
+                    f"{API_ROOT}/v1beta/models/{model}:generateContent",
+                    headers=_headers(),
+                    json=payload,
+                )
+                response.raise_for_status()
+                return response.json()
+            except httpx.HTTPStatusError as exc:
+                last_error = exc
+                status = exc.response.status_code if exc.response is not None else None
+                logger.warning(
+                    "Gemini request failed model=%s attempt=%s status=%s: %s",
+                    model, attempt + 1, status, exc,
+                )
+                # 503/429 are commonly transient service/rate-limit responses.
+                # Retry the same model briefly before falling through to the next
+                # model. Do not waste time retrying permanent 4xx errors.
+                if status not in (429, 500, 502, 503, 504) or attempt >= len(retry_delays):
+                    break
+                time.sleep(retry_delays[attempt])
+            except httpx.HTTPError as exc:
+                last_error = exc
+                logger.warning("Gemini request failed model=%s: %s", model, exc)
+                break
     raise last_error or RuntimeError("Gemini request failed")
 
 
