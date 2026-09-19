@@ -123,7 +123,7 @@ def _generate_video_prompt(file_name: str, prompt: str, temperature=0.0):
                 {"text": prompt},
             ],
         }],
-        "generationConfig": {"responseMimeType": "application/json"},
+        "generationConfig": {"responseMimeType": "application/json", "mediaResolution": "MEDIA_RESOLUTION_LOW"},
     }
     return _generate_with_fallback(payload)
 
