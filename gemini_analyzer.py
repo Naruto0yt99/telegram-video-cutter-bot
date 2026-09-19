@@ -111,7 +111,7 @@ def _generate_with_fallback(payload: dict):
     raise last_error or RuntimeError("All Gemini models failed")
 
 
-def _generate_video_prompt(file_name: str, prompt: str, temperature=0.0):
+def _generate_video_prompt(file_name: str, prompt: str, thinking_level="low"):
     payload = {
         "contents": [{
             "role": "user",
@@ -126,6 +126,7 @@ def _generate_video_prompt(file_name: str, prompt: str, temperature=0.0):
         "generationConfig": {
             "responseMimeType": "application/json",
             "mediaResolution": "MEDIA_RESOLUTION_MEDIUM",
+            "thinkingConfig": {"thinkingLevel": str(thinking_level or "low").lower()},
         },
     }
     return _generate_with_fallback(payload)
@@ -166,7 +167,10 @@ characters/anime are similar.
                 {"text": prompt},
             ],
         }],
-        "generationConfig": {"responseMimeType": "application/json"},
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "thinkingConfig": {"thinkingLevel": "low"},
+        },
     }
     data = _generate_with_fallback(payload)
     parsed = _parse_json(_text_from_response(data))
@@ -432,7 +436,7 @@ def _analyze_video_sync(path: Path):
         raise RuntimeError("Gemini file upload failed")
     _wait_file_active(name)
     logger.info("Gemini detailed scene-analysis pass=1")
-    data = _generate_video_prompt(name, _analysis_prompt(_catalog_text()), temperature=0.0)
+    data = _generate_video_prompt(name, _analysis_prompt(_catalog_text()), thinking_level="medium")
     parsed = _parse_json(_text_from_response(data))
     regions = parsed.get("regions") if isinstance(parsed, dict) else None
 
@@ -470,7 +474,7 @@ array when anime footage is visible.
 
 Catalog: {catalog}
 """
-        fallback_data = _generate_video_prompt(name, fallback_prompt, temperature=0.1)
+        fallback_data = _generate_video_prompt(name, fallback_prompt, thinking_level="low")
         fallback_parsed = _parse_json(_text_from_response(fallback_data))
         if isinstance(fallback_parsed, dict):
             regions = fallback_parsed.get("regions")
