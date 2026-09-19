@@ -496,6 +496,7 @@ async def sync_source_library(client):
                 metadata["episode"],
                 metadata["quality"],
                 link,
+                series=metadata.get("series"),
             )
             indexed += 1
 
