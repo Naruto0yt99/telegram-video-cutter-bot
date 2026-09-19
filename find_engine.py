@@ -15,6 +15,7 @@ from gemini_analyzer import analyze_video, verify_source_candidates, verify_fina
 from telegram_remote import open_telegram_range_server
 from utils import safe_filename, unique_path
 from library_nav import canonical_anime
+from visual_matcher import find_visual_match
 
 logger = logging.getLogger("simple-find")
 
@@ -422,6 +423,71 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
                 if match is not None:
                     return match
             candidates = recovery
+
+        # Last-resort local visual fingerprint search. It scans small remote
+        # windows using frame signatures instead of downloading the full episode.
+        # Gemini still performs final exact verification before accepting a match.
+        try:
+            server = await open_telegram_range_server(client, source_url)
+            try:
+                visual_segment = dict(region)
+                visual_segment["start_time"] = 0.0
+                visual_segment["end_time"] = min(sample_len, 6.0)
+                visual_result = await find_visual_match(
+                    client,
+                    {"source_url": source_url},
+                    visual_segment,
+                    edit_sample,
+                    output_dir,
+                    float(server.duration),
+                )
+            finally:
+                await server.close()
+
+            visual_candidates = (visual_result or {}).get("candidates") or []
+            if visual_candidates:
+                logger.info(
+                    "FIND local visual fallback scene=%s candidates=%s",
+                    scene_label, len(visual_candidates)
+                )
+                visual_paths = []
+                visual_starts = []
+                for vi, vc in enumerate(visual_candidates[:4], 1):
+                    ws = float(vc.get("start", 0) or 0)
+                    we = float(vc.get("end", ws + probe_duration) or (ws + probe_duration))
+                    vp = output_dir / f"visual_fallback_{scene_token}_{vi}.mp4"
+                    try:
+                        await _extract_remote_clip(client, source_url, ws, we, vp)
+                        visual_paths.append(vp)
+                        visual_starts.append(ws)
+                    except Exception:
+                        logger.exception(
+                            "Local visual fallback extraction failed scene=%s candidate=%s",
+                            scene_label, vi
+                        )
+                if visual_paths:
+                    verified = await verify_source_candidates(
+                        edit_sample, visual_paths, visual_starts
+                    )
+                    logger.info(
+                        "FIND local visual fallback verification scene=%s match=%s confidence=%s",
+                        scene_label,
+                        bool(verified and verified.get("match")),
+                        verified.get("confidence") if verified else None,
+                    )
+                    if usable_result(verified):
+                        match = build_match(
+                            verified,
+                            [
+                                {"index": i + 1, "start": visual_starts[i], "path": visual_paths[i]}
+                                for i in range(len(visual_paths))
+                            ],
+                        )
+                        if match is not None:
+                            return match
+        except Exception:
+            logger.exception("Local visual fallback failed scene=%s", scene_label)
+
         return None
     finally:
         edit_sample.unlink(missing_ok=True)
