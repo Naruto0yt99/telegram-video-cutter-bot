@@ -230,6 +230,8 @@ def parse_episode_metadata(
     context_anime: str | None = None,
     context_season: str | None = None,
 ):
+    # Always define this so normal season episodes can safely return it.
+    special_title = None
     filename = _clean_caption(get_message_video_name(message))
     caption = _clean_caption(getattr(message, "message", "") or "")
     combined = _clean_caption(f"{caption} {filename}")
