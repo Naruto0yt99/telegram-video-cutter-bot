@@ -281,7 +281,7 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
             return False
 
     def build_match(result, pool):
-        candidate_index = int(result.get("candidate_index", 0) or 0)
+        candidate_index = int(result.get("_pool_candidate_index", result.get("candidate_index", 0)) or 0)
         selected = pool[candidate_index - 1] if 1 <= candidate_index <= len(pool) else None
         if selected is None:
             return None
