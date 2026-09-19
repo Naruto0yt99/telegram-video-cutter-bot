@@ -56,8 +56,12 @@ while true; do
   if git fetch origin main >>"$LOG" 2>&1; then
     LOCAL="$(git rev-parse HEAD)"
     REMOTE="$(git rev-parse origin/main)"
-    if [ "$LOCAL" != "$REMOTE" ] && git diff --quiet && git diff --cached --quiet; then
-      git reset --hard origin/main >>"$LOG" 2>&1 || true
+    if [ "$LOCAL" != "$REMOTE" ]; then
+      if git checkout origin/main -- gemini_analyzer.py source_sync.py test_runner.py >>"$LOG" 2>&1; then
+        log "synced acceptance code from origin/main (local runtime files preserved)"
+      else
+        log "acceptance code sync failed; retrying later"
+      fi
     fi
   else
     log "git fetch failed; retrying later"
