@@ -398,58 +398,97 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
     await _show_find_progress(progress_message, 90, "🎬 Scene search complete", f"Matched {len(clips)}/{len(regions)} scenes\n🔧 Building the final merged video...")
     merged = unique_path(output_dir, "find_final.mp4")
 
-    # Build the final video in ONE FFmpeg encode pass. The previous implementation
-    # encoded every matched scene separately and then ran another concat pass; on
-    # a phone that could turn a short 4-scene result into hours of CPU work.
-    quality_rank = {"360p": 360, "480p": 480, "720p": 720, "1080p": 1080, "1440p": 1440, "2160p": 2160, "auto": 720}
-    target_height = max(quality_rank.get(str(x.get("quality", "auto")), 720) for x in clips)
-    target_width = int(round(target_height * 16 / 9))
-
-    # Probe audio presence once per clip so video-only sources can still be
-    # concatenated with a generated silent stereo track.
-    async def has_audio(path):
+    # Fast path: when all matched clips already have identical stream
+    # parameters, concatenate with stream-copy. This avoids any re-encoding.
+    async def probe_stream_signature(path):
         out, _ = await run_command(
-            "ffprobe", "-v", "error", "-select_streams", "a:0",
-            "-show_entries", "stream=index", "-of", "csv=p=0", str(path),
+            "ffprobe", "-v", "error", "-print_format", "json",
+            "-show_streams", str(path),
         )
-        return bool(out.strip())
-
-    audio_flags = await asyncio.gather(*(has_audio(x["path"]) for x in clips))
-    ff_args = [FFMPEG_BIN, "-hide_banner", "-loglevel", "warning", "-y"]
-    for x in clips:
-        ff_args += ["-i", str(x["path"])]
-
-    filters = []
-    concat_inputs = []
-    for i, (x, has_a) in enumerate(zip(clips, audio_flags)):
-        filters.append(
-            f"[{i}:v:0]scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
-            f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30," 
-            f"setpts=PTS-STARTPTS[v{i}]"
+        import json
+        data = json.loads(out or "{}")
+        streams = data.get("streams") or []
+        video = next((s for s in streams if s.get("codec_type") == "video"), None)
+        audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+        if not video or not audio:
+            return None
+        return (
+            video.get("codec_name"), video.get("profile"), video.get("pix_fmt"),
+            video.get("width"), video.get("height"), video.get("r_frame_rate"),
+            video.get("sample_aspect_ratio"), video.get("time_base"),
+            audio.get("codec_name"), audio.get("sample_rate"), audio.get("channels"),
+            audio.get("channel_layout"), audio.get("time_base"),
         )
-        if has_a:
-            filters.append(
-                f"[{i}:a:0]aresample=48000,asetpts=PTS-STARTPTS[a{i}]"
-            )
-        else:
-            duration = max(0.5, float(x.get("edit_duration", 0) or 0))
-            filters.append(
-                f"anullsrc=channel_layout=stereo:sample_rate=48000:r=48000,"
-                f"atrim=duration={duration:.6f},asetpts=PTS-STARTPTS[a{i}]"
-            )
-        concat_inputs.append(f"[v{i}][a{i}]")
 
-    filters.append(
-        "".join(concat_inputs) + f"concat=n={len(clips)}:v=1:a=1[vout][aout]"
-    )
-    ff_args += [
-        "-filter_complex", ";".join(filters),
-        "-map", "[vout]", "-map", "[aout]",
-        "-c:v", "libx264", "-preset", "superfast", "-crf", "20",
-        "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
-        "-movflags", "+faststart", str(merged),
-    ]
-    await run_command(*ff_args)
+    signatures = await asyncio.gather(*(probe_stream_signature(x["path"]) for x in clips))
+    same_streams = bool(signatures) and all(sig is not None and sig == signatures[0] for sig in signatures)
+
+    if same_streams:
+        list_path = output_dir / "concat.txt"
+        list_path.write_text(
+            "\\n".join(
+                "file '" + str(x["path"]).replace("'", "'\\''") + "'"
+                for x in clips
+            ),
+            encoding="utf-8",
+        )
+        try:
+            await run_command(
+                FFMPEG_BIN, "-hide_banner", "-loglevel", "warning", "-y",
+                "-f", "concat", "-safe", "0", "-i", str(list_path),
+                "-c", "copy", "-movflags", "+faststart", str(merged),
+            )
+        finally:
+            list_path.unlink(missing_ok=True)
+    else:
+        # Mixed source parameters need one re-encode. Do it in a SINGLE
+        # filter/encode pass rather than normalizing every clip separately and
+        # then concatenating them again; that was the main multi-hour bottleneck
+        # on low-power Android devices.
+        quality_rank = {"360p": 360, "480p": 480, "720p": 720, "1080p": 1080, "1440p": 1440, "2160p": 2160, "auto": 720}
+        target_height = max(quality_rank.get(str(x.get("quality", "auto")), 720) for x in clips)
+        target_width = int(round(target_height * 16 / 9))
+
+        async def has_audio(path):
+            out, _ = await run_command(
+                "ffprobe", "-v", "error", "-select_streams", "a:0",
+                "-show_entries", "stream=index", "-of", "csv=p=0", str(path),
+            )
+            return bool(out.strip())
+
+        audio_flags = await asyncio.gather(*(has_audio(x["path"]) for x in clips))
+        ff_args = [FFMPEG_BIN, "-hide_banner", "-loglevel", "warning", "-y"]
+        for x in clips:
+            ff_args += ["-i", str(x["path"])]
+
+        filters = []
+        concat_inputs = []
+        for i, (x, has_a) in enumerate(zip(clips, audio_flags)):
+            filters.append(
+                f"[{i}:v:0]scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
+                f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,"
+                f"setpts=PTS-STARTPTS[v{i}]"
+            )
+            if has_a:
+                filters.append(f"[{i}:a:0]aresample=48000,asetpts=PTS-STARTPTS[a{i}]")
+            else:
+                duration = max(0.5, float(x.get("edit_duration", 0) or 0))
+                filters.append(
+                    f"anullsrc=channel_layout=stereo:sample_rate=48000:r=48000,"
+                    f"atrim=duration={duration:.6f},asetpts=PTS-STARTPTS[a{i}]"
+                )
+            concat_inputs.append(f"[v{i}][a{i}]")
+
+        filters.append("".join(concat_inputs) + f"concat=n={len(clips)}:v=1:a=1[vout][aout]")
+        ff_args += [
+            "-filter_complex", ";".join(filters),
+            "-map", "[vout]", "-map", "[aout]",
+            "-c:v", "libx264", "-preset", "superfast", "-crf", "20",
+            "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+            "-movflags", "+faststart", str(merged),
+        ]
+        await run_command(*ff_args)
+
     if not merged.exists() or merged.stat().st_size == 0:
         raise RuntimeError("Final merged video empty bana hai.")
     report=["📋 SCENE DETAILS",""]
