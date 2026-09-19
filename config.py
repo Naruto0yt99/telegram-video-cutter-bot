@@ -84,7 +84,7 @@ GEMINI_API_KEY = env(
 )
 
 # Dedicated source channel containing the episode library.
-SOURCE_CHAT = "@animeclipcutter"
+SOURCE_CHAT = "@AnimeNation012"
 
 
 TELEGRAM_MAX_MB = int(
