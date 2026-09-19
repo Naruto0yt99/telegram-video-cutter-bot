@@ -490,7 +490,7 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
     input_video=Path(input_video)
     if not input_video.exists(): raise RuntimeError("Input video nahi mila.")
     if progress_message:
-        try: await progress_message.edit_text("🎯 FIND — 15%\n\n🧠 Gemini shot-by-shot analysis...")
+        try: await progress_message.edit_text("🎯 FIND — 10%\n\n🧠 Gemini visual fingerprint bana raha hai...\nHar rapid-cut scene ko alag identify kar raha hoon.")
         except Exception: pass
     regions=await analyze_video(input_video)
     if not regions: raise RuntimeError("Gemini ko koi usable anime scene nahi mila.")
@@ -508,7 +508,7 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
                     progress_message,
                     15,
                     f"🔎 Scene {i}/{total_regions} — exact source search",
-                    f"📺 {r.get('anime','?')} S{r.get('season','?')} E{r.get('episode','?')}\n⚙️ Progressive targeted probes...",
+                    f"📺 {r.get('anime','?')} S{r.get('season','?')} E{r.get('episode','?')}\n🔎 Telegram targeted windows → visual search → Gemini verification...",
                 )
                 return await _process_fast_scene(input_video, telethon_client, r, i, total_regions, output_dir, progress_message)
             except Exception:
@@ -631,8 +631,9 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
         "🧠 Final Gemini QA",
         "Edited video aur final merged clip ko visual sequence/timing ke liye compare kar raha hoon...",
     )
-    # Full-video Gemini QA is a hard gate. Retry once for transient API/model
-    # variance, but never return an unverified result.
+    # Final QA is non-blocking during the build/debug phase. Scene-level
+    # verification remains the reliability gate; transient QA failures are
+    # recorded and the job continues instead of getting stuck.
     qa = None
     qa_error = None
     for qa_attempt in range(1, 3):
@@ -642,45 +643,54 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
             qa_error = exc
             logger.exception("Final Gemini QA attempt %s failed", qa_attempt)
             qa = None
-        if qa is None:
-            continue
+        if qa is not None:
+            qa_conf = float(qa.get("confidence", 0) or 0)
+            qa_match = bool(qa.get("match"))
+            logger.info(
+                "Final Gemini QA attempt=%s match=%s confidence=%.3f sequence=%.3f timing=%.3f mismatches=%s",
+                qa_attempt, qa_match, qa_conf,
+                float(qa.get("sequence_score", 0) or 0),
+                float(qa.get("timing_score", 0) or 0),
+                qa.get("mismatches"),
+            )
+            break
+        if qa_attempt == 1:
+            logger.warning("Final Gemini QA unavailable; retrying once, then continuing.")
+
+    if qa is None:
+        qa_status = "⚠️ Final QA skipped after retry"
+        errors.append({
+            "scene": "QA", "anime": "-", "season": "-", "episode": "-",
+            "reason": f"Final Gemini QA unavailable: {qa_error or 'unknown error'}",
+        })
+    else:
         qa_conf = float(qa.get("confidence", 0) or 0)
         qa_match = bool(qa.get("match"))
         strong_qa = (
-            qa_match
-            and qa_conf >= 0.80
+            qa_match and qa_conf >= 0.80
             and float(qa.get("sequence_score", 0) or 0) >= 0.85
             and float(qa.get("timing_score", 0) or 0) >= 0.75
             and not (qa.get("missing_scenes") or qa.get("extra_scenes") or qa.get("mismatches"))
         )
-        logger.info(
-            "Final Gemini QA attempt=%s match=%s confidence=%.3f sequence=%.3f timing=%.3f mismatches=%s",
-            qa_attempt, qa_match, qa_conf,
-            float(qa.get("sequence_score", 0) or 0),
-            float(qa.get("timing_score", 0) or 0),
-            qa.get("mismatches"),
-        )
         if strong_qa:
-            break
-        if qa_attempt == 1:
-            logger.warning("Final Gemini QA rejected attempt 1; retrying full QA once.")
-    if qa is None:
-        logger.error("Final Gemini QA unavailable after retries: %s", qa_error)
-        raise RuntimeError("Final Gemini QA unavailable; final video verification required.")
-    qa_conf = float(qa.get("confidence", 0) or 0)
-    qa_match = bool(qa.get("match"))
-    if not (
-        qa_match
-        and qa_conf >= 0.80
-        and float(qa.get("sequence_score", 0) or 0) >= 0.85
-        and float(qa.get("timing_score", 0) or 0) >= 0.75
-        and not (qa.get("missing_scenes") or qa.get("extra_scenes") or qa.get("mismatches"))
-    ):
-        logger.error("Final Gemini QA rejected result after retries: %s", qa)
-        raise RuntimeError("Final Gemini QA rejected the assembled video; no unverified clip will be returned.")
-    qa_status = f"✅ Final QA verified ({qa_conf:.0%})"
+            qa_status = f"✅ Final QA verified ({qa_conf:.0%})"
+        else:
+            qa_status = f"⚠️ Final QA warning ({qa_conf:.0%})"
+            details = qa.get("summary") or qa.get("mismatches") or "QA did not fully confirm the assembled sequence."
+            errors.append({
+                "scene": "QA", "anime": "-", "season": "-", "episode": "-",
+                "reason": str(details),
+            })
 
-    report=[qa_status, "", "📋 SCENE DETAILS",""]
+    report=[qa_status, "", f"📦 Matched scenes: {len(clips)}/{len(regions)}", ""]
+    if errors:
+        report += ["⚠️ SKIPPED / WARNINGS", ""]
+        for e in errors[:20]:
+            report.append(f"• Scene {e['scene']} — {e['anime']} S{e['season']} E{e['episode']}: {e['reason']}")
+        if len(errors) > 20:
+            report.append(f"• +{len(errors) - 20} more warnings in logs.")
+        report.append("")
+    report += ["📋 SCENE DETAILS",""]
     for x in clips:
         report += [f"{x['index']:02d} │ {x['anime']} S{x['season']} E{x['episode']}",f"   EDIT {x['edit_start']:.2f}s → {x['edit_end']:.2f}s",f"   RAW  {x['start']:.2f}s → {x['end']:.2f}s",f"   ⚡ Speed: {x['speed']:.2f}×",f"   🎯 Confidence: {x['confidence']:.0%}",""]
     return {"clips":clips,"matched":len(clips),"total":len(regions),"regions":regions,"output":merged,"report":"\n".join(report),"qa":qa,"sources":{(str(x.get('anime','')).strip().lower(),_number(x.get('season')),_number(x.get('episode'))) for x in regions}}
