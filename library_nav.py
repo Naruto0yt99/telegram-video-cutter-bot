@@ -277,12 +277,24 @@ async def library_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             return
 
-        await query.edit_message_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=markup,
-            disable_web_page_preview=True,
-        )
+        try:
+            await query.edit_message_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=markup,
+                disable_web_page_preview=True,
+            )
+        except Exception as edit_exc:
+            logger.warning("Library edit failed; sending fresh page: %s", edit_exc)
+            await query.message.reply_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=markup,
+                disable_web_page_preview=True,
+            )
     except Exception:
         logger.exception("Library navigation failed")
-        await query.answer("Library load failed.", show_alert=True)
+        try:
+            await query.answer("Library load failed.", show_alert=True)
+        except Exception:
+            pass
