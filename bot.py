@@ -451,7 +451,7 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with job_lock:
             video_path = await download_video_from_url(url, user_id)
-            await safe_edit_text(status, "🎯 FIND — 10%\n\n✅ Edited video ready\n🧠 Gemini shot-by-shot analysis...")
+            await safe_edit_text(status, "🎯 FIND — 10%\n\n✅ Edited video ready\n🧠 Gemini visual fingerprint + scene detection...")
             result = await find_and_build(input_video=video_path, user_id=user_id, telethon_client=telethon_client, progress_message=status)
             clips = result.get("clips", [])
             total = int(result.get("total", len(clips)))
@@ -464,7 +464,7 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "🎥 Quality: highest available\n\n"
                 "🤖 AnimeClipCutter"
             )
-            await safe_edit_text(status, "🎯 FIND — 97%\n\n📤 Final video upload ho raha hai...")
+            await safe_edit_text(status, "🎯 FIND — 97%\n\n📤 Verified scene assembly ready\n📦 Final video upload ho raha hai...")
             await send_file(update, merged, caption)
             report = result.get("report", "📋 SCENE DETAILS\n\nNo report available.")
             for i in range(0, len(report), 3500):
