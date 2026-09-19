@@ -195,9 +195,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "→ alag scene-details report bhejega\n\n"
         "✂️ CLIP (active/original video)\n"
         "/clip 01:20 - 01:50\n\n"
-        "📺 SOURCE EPISODE CLIP\n"
+        "📺 SOURCE EPISODE / FLEXIBLE LIBRARY QUERY\n"
         "/clips Naruto S3 E4 12:00 - 13:35\n"
-        "→ Telegram source episode se direct clip\n\n"
+        "/clips NARUTO SEASON 1 EPISODE 2\n"
+        "/clips NaRuTo s1 ep5\n"
+        "/clips NarutO S 1 e4\n"
+        "/clips Naruto S01E04\n"
+        "/clips Naruto 1x4\n"
+        "→ Case, spacing, S/E words aur common separators matter nahi karte.\n\n"
         "✂️ SPLIT\n"
         "/split 30\n"
         "/split 60\n\n"
@@ -899,6 +904,8 @@ def main():
     application.add_handler(CommandHandler("find", find_command))
     application.add_handler(CommandHandler("clip", source_clip_command))
     application.add_handler(CommandHandler("clips", source_clip_command))
+    application.add_handler(CommandHandler("episode", source_clip_command))
+    application.add_handler(CommandHandler("ep", source_clip_command))
     application.add_handler(CommandHandler("split", split_command))
     application.add_handler(CommandHandler("next", next_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
