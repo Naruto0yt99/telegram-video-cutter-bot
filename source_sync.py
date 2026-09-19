@@ -10,7 +10,7 @@ from telegram_media import is_video_message, get_message_video_name
 from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
-PARSER_VERSION = 25
+PARSER_VERSION = 26
 
 
 _QUALITY_PATTERNS = [
@@ -41,10 +41,10 @@ _NUMBERED_EPISODE_PATTERN = re.compile(
 )
 
 _SPECIAL_PATTERNS = [
-    ("movie", re.compile(r"\b(?:Movie|Film)\s*(?P<episode>\d{1,3})\b", re.I)),
-    ("ova", re.compile(r"\bOVA\s*(?P<episode>\d{1,3})\b", re.I)),
-    ("oad", re.compile(r"\bOAD\s*(?P<episode>\d{1,3})\b", re.I)),
-    ("special", re.compile(r"\bSpecial\s*(?P<episode>\d{1,3})\b", re.I)),
+    ("movie", re.compile(r"\b(?:Movie|Film)(?:\s*[-:#.]?\s*(?P<episode>\d{1,3}))?\b", re.I)),
+    ("ova", re.compile(r"\bOVA(?:\s*[-:#.]?\s*(?P<episode>\d{1,3}))?\b", re.I)),
+    ("oad", re.compile(r"\bOAD(?:\s*[-:#.]?\s*(?P<episode>\d{1,3}))?\b", re.I)),
+    ("special", re.compile(r"\bSpecial(?:\s*[-:#.]?\s*(?P<episode>\d{1,3}))?\b", re.I)),
 ]
 
 _CONTENT_MARKERS = re.compile(
@@ -94,7 +94,8 @@ def _episode_from_text(text: str):
     for content_type, pattern in _SPECIAL_PATTERNS:
         match = pattern.search(text)
         if match:
-            return content_type, match.group("episode"), match, content_type, True
+            episode = match.groupdict().get("episode")
+            return content_type, episode, match, content_type, bool(episode)
 
     global_match = re.search(
         r"\b(?:Episode|Ep)\s*[-._ :]*\d{1,4}\s*[\[(]\s*(?P<episode>\d{1,4})\s*[\])]",
@@ -249,7 +250,7 @@ def parse_episode_metadata(
     if topic_match:
         topic_season = str(int(topic_match.group(1)))
 
-    if episode is None or not marker:
+    if (episode is None and content_type == "season") or not marker:
         return None
 
     if content_type == "season" and season is None and topic_season:
@@ -301,6 +302,18 @@ def parse_episode_metadata(
                 episode = normalized
     else:
         season_value = content_type
+        # Movies/OVAs/OADs/specials are often uploaded with a title but
+        # without an explicit ordinal (e.g. "Movie - The Lost Tower").
+        # Keep the title so sync_source_library can assign a stable ordinal
+        # shared by all quality variants of the same source.
+        if episode is None:
+            special_title = _clean_caption(
+                f"{caption} {filename}"
+            )
+            special_title = _CONTENT_MARKERS.sub(" ", special_title)
+            special_title = re.sub(r"\s+", " ", special_title).strip(" -_.|:•·[](){}")
+        else:
+            special_title = None
 
     library_anime = "Naruto" if anime in {"Naruto", "Naruto Shippuden", "Naruto Movies"} else anime
     library_series = anime
@@ -308,8 +321,9 @@ def parse_episode_metadata(
         "anime": library_anime,
         "series": library_series,
         "season": season_value,
-        "episode": str(int(episode)),
+        "episode": str(int(episode)) if episode is not None else None,
         "quality": quality,
+        "special_title": special_title,
     }
 
 
@@ -452,6 +466,7 @@ async def sync_source_library(client):
     topic_cache = {}
     context_anime = None
     context_season = None
+    special_ordinals = {}
 
     entity = await client.get_entity(SOURCE_CHAT)
     logger.info(
@@ -540,15 +555,29 @@ async def sync_source_library(client):
         if not metadata or not link:
             skipped += 1
         else:
-            add_source(
-                metadata["anime"],
-                metadata["season"],
-                metadata["episode"],
-                metadata["quality"],
-                link,
-                series=metadata.get("series"),
-            )
-            indexed += 1
+            episode_value = metadata.get("episode")
+            special_title = metadata.get("special_title")
+            if episode_value is None and special_title:
+                anime_key = metadata["anime"]
+                season_key = metadata["season"]
+                title_key = re.sub(r"\s+", " ", special_title).casefold()
+                bucket = special_ordinals.setdefault((anime_key, season_key), {})
+                if title_key not in bucket:
+                    bucket[title_key] = len(bucket) + 1
+                episode_value = str(bucket[title_key])
+
+            if episode_value is None:
+                skipped += 1
+            else:
+                add_source(
+                    metadata["anime"],
+                    metadata["season"],
+                    episode_value,
+                    metadata["quality"],
+                    link,
+                    series=metadata.get("series"),
+                )
+                indexed += 1
 
         processed = indexed + skipped
         if processed % 100 == 0:
