@@ -84,7 +84,9 @@ def canonical_anime(value: str):
     if norm.startswith("ndiaattack on titan") or norm.endswith("attack on titan"):
         return "Attack on Titan"
 
-    return None
+    # Unknown anime titles are valid. The source topic/name is already the
+    # catalog; hard-coding every future anime would make /library stale.
+    return re.sub(r"\s+", " ", value or "").strip() or None
 
 
 def _token(value: str) -> str:
@@ -171,7 +173,7 @@ def _series_page(tree, anime):
     for series in sorted(tree.get(anime, {}), key=str.casefold):
         rows.append([InlineKeyboardButton(f"📚 {series}", callback_data=f"lr:{_token(anime + "|" + series)}")])
     rows.append([InlineKeyboardButton("⬅️ Anime", callback_data="lb")])
-    return f"🎬 <b>{escape(anime)}</b>\\n\\nChoose series:", _keyboard(rows)
+    return f"🎬 <b>{escape(anime)}</b>\n\nChoose series:", _keyboard(rows)
 
 
 def _season_page(tree, anime, series):
@@ -180,7 +182,7 @@ def _season_page(tree, anime, series):
         rows.append([InlineKeyboardButton(f"📺 {_content_label(season)}", callback_data=f"ls:{_token(anime + "|" + series + "|" + season)}")])
     rows.append([InlineKeyboardButton("⬅️ Series", callback_data=f"lr:{_token(anime + "|" + series)}")])
     title = series if len(tree.get(anime, {})) > 1 else anime
-    return f"🎬 <b>{escape(title)}</b>\\n\\nChoose Season / OVA / Movie:", _keyboard(rows)
+    return f"🎬 <b>{escape(title)}</b>\n\nChoose Season / OVA / Movie:", _keyboard(rows)
 
 
 def _episode_page(tree, anime, series, season):
@@ -194,7 +196,13 @@ def _episode_page(tree, anime, series, season):
         links = _quality_links(sources)
         lines.append(f"🎞️ <b>Episode {escape(episode)}</b> — {links}")
 
-    rows.append([InlineKeyboardButton("⬅️ Seasons", callback_data=f"la:{_token(anime)}")])
+    if len(tree.get(anime, {})) > 1:
+        back_data = f"lr:{_token(anime + '|' + series)}"
+        back_label = "⬅️ Series"
+    else:
+        back_data = "lb"
+        back_label = "⬅️ Anime"
+    rows.append([InlineKeyboardButton(back_label, callback_data=back_data)])
     return "\n".join(lines), _keyboard(rows)
 
 
@@ -233,6 +241,9 @@ async def library_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text, markup = _season_page(tree, anime, series)
         elif data.startswith("lr:"):
             anime, series = _untoken(data[3:]).split("|", 1)
+            if anime not in tree or series not in tree.get(anime, {}):
+                await query.answer("Series library entry nahi mila.", show_alert=True)
+                return
             text, markup = _season_page(tree, anime, series)
         elif data.startswith("ls:"):
             anime, series, season = _untoken(data[3:]).split("|", 2)
