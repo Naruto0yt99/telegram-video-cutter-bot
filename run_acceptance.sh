@@ -1,5 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 set -u
+export GIT_TERMINAL_PROMPT=0
 
 cd "$(dirname "$0")"
 REPO_DIR="$(pwd)"
@@ -37,13 +38,9 @@ while true; do
     code=$?
     echo "$(date -Is) acceptance finished exit=$code" | tee -a "$LOG"
 
-    # Publish only the result artifacts. Do not commit source/temp files.
-    if git add acceptance_test.json acceptance_test.log >>"$LOG" 2>&1; then
-      if ! git diff --cached --quiet; then
-        git commit -m "Auto acceptance test result" >>"$LOG" 2>&1 || true
-        git push origin main >>"$LOG" 2>&1 || true
-      fi
-    fi
+    # Keep results local. This runner must never block on GitHub credentials.
+    # Source-code changes are still pulled automatically at the next cycle.
+    echo "$(date -Is) results saved to acceptance_test.json / acceptance_test.log" | tee -a "$LOG"
 
     if [ "$code" -eq 0 ]; then
       echo "$(date -Is) acceptance PASS" | tee -a "$LOG"
