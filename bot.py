@@ -189,7 +189,7 @@ async def library_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.warning("/library empty: library row count=%s", total)
             await update.message.reply_text(
                 "📚 Library abhi empty hai.\n"
-                "AnimeNation012 ka automatic source scan background me chal raha ho sakta hai."
+                "@animeclipcutter ka automatic source scan background me chal raha ho sakta hai."
             )
             return
 
