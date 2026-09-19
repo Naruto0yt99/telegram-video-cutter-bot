@@ -318,6 +318,7 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
             "confidence": conf,
             "candidate_path": preserved,
             "candidate_start": selected["start"],
+            "candidate_duration": probe_duration,
         }
 
     try:
@@ -411,12 +412,15 @@ async def _process_fast_scene(input_video, telethon_client, region, index, total
     output=unique_path(output_dir,safe_filename(f"find_{index:02d}_{anime}_S{season}E{episode}_{int(start)}")+".mp4")
     candidate_path = match.get("candidate_path")
     candidate_start = float(match.get("candidate_start", 0) or 0)
+    candidate_duration = float(match.get("candidate_duration", 0) or 0)
     used_local_candidate = False
     if candidate_path and Path(candidate_path).exists():
         relative = max(0.0, start - candidate_start)
         # Only reuse the candidate when the entire required source interval is
-        # inside it. Otherwise fetch the authoritative interval remotely.
-        if relative + source_duration <= 14.0 - 0.05:
+        # inside the actual verified probe. Do not hard-code the fast profile's
+        # 14s duration because precision/deep profiles intentionally use longer
+        # candidate windows.
+        if candidate_duration > 0 and relative + source_duration <= candidate_duration - 0.05:
             try:
                 common = [
                     FFMPEG_BIN, "-hide_banner", "-loglevel", "warning", "-y",
