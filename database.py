@@ -155,7 +155,7 @@ def add_source(
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 
             ON CONFLICT(
                 anime,
