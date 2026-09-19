@@ -2,6 +2,7 @@ import base64
 import logging
 import re
 import unicodedata
+import hashlib
 from difflib import get_close_matches
 from html import escape
 
@@ -94,6 +95,25 @@ def _token(value: str) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 
 
+def _callback_key(value: str) -> str:
+    # Telegram callback_data is limited to 64 bytes. Long anime/series names
+    # must still be clickable, so use a deterministic short key.
+    return hashlib.sha1(value.encode("utf-8")).hexdigest()[:12]
+
+
+def _resolve_key(tree, key: str):
+    for anime in tree:
+        if _callback_key(anime) == key:
+            return anime
+        for series in tree.get(anime, {}):
+            if _callback_key(anime + "|" + series) == key:
+                return anime, series
+            for season in tree.get(anime, {}).get(series, {}):
+                if _callback_key(anime + "|" + series + "|" + season) == key:
+                    return anime, series, season
+    return None
+
+
 def _untoken(value: str) -> str:
     padding = "=" * (-len(value) % 4)
     return base64.urlsafe_b64decode((value + padding).encode("ascii")).decode("utf-8")
@@ -149,9 +169,7 @@ def _anime_page(tree):
     rows = []
     names = sorted(tree, key=str.casefold)
     for anime in names:
-        data = _token(anime)
-        if len(data) <= 55:
-            rows.append([InlineKeyboardButton(f"🎬 {anime}", callback_data=f"la:{data}")])
+        rows.append([InlineKeyboardButton(f"🎬 {anime}", callback_data=f"la:{_callback_key(anime)}")])
     return "📚 <b>ANIME LIBRARY</b>\n\nTap an anime:", _keyboard(rows)
 
 
@@ -171,7 +189,7 @@ def _content_label(season):
 def _series_page(tree, anime):
     rows = []
     for series in sorted(tree.get(anime, {}), key=str.casefold):
-        rows.append([InlineKeyboardButton(f"📚 {series}", callback_data=f"lr:{_token(anime + "|" + series)}")])
+        rows.append([InlineKeyboardButton(f"📚 {series}", callback_data=f"lr:{_callback_key(anime + "|" + series)}")])
     rows.append([InlineKeyboardButton("⬅️ Anime", callback_data="lb")])
     return f"🎬 <b>{escape(anime)}</b>\n\nChoose series:", _keyboard(rows)
 
@@ -179,7 +197,7 @@ def _series_page(tree, anime):
 def _season_page(tree, anime, series):
     rows = []
     for season in sorted(tree.get(anime, {}).get(series, {}), key=_season_sort_key):
-        rows.append([InlineKeyboardButton(f"📺 {_content_label(season)}", callback_data=f"ls:{_token(anime + "|" + series + "|" + season)}")])
+        rows.append([InlineKeyboardButton(f"📺 {_content_label(season)}", callback_data=f"ls:{_callback_key(anime + "|" + series + "|" + season)}")])
     rows.append([InlineKeyboardButton("⬅️ Series", callback_data=f"lr:{_token(anime + "|" + series)}")])
     title = series if len(tree.get(anime, {})) > 1 else anime
     return f"🎬 <b>{escape(title)}</b>\n\nChoose Season / OVA / Movie:", _keyboard(rows)
@@ -197,7 +215,7 @@ def _episode_page(tree, anime, series, season):
         lines.append(f"🎞️ <b>Episode {escape(episode)}</b> — {links}")
 
     if len(tree.get(anime, {})) > 1:
-        back_data = f"lr:{_token(anime + '|' + series)}"
+        back_data = f"lr:{_callback_key(anime + '|' + series)}"
         back_label = "⬅️ Series"
     else:
         back_data = "lb"
@@ -230,8 +248,8 @@ async def library_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if data == "lb":
             text, markup = _anime_page(tree)
         elif data.startswith("la:"):
-            anime = _untoken(data[3:])
-            if anime not in tree:
+            anime = _resolve_key(tree, data[3:])
+            if not isinstance(anime, str) or anime not in tree:
                 await query.answer("Anime library entry nahi mila.", show_alert=True)
                 return
             if len(tree[anime]) > 1:
@@ -240,13 +258,21 @@ async def library_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 series = next(iter(tree[anime]))
                 text, markup = _season_page(tree, anime, series)
         elif data.startswith("lr:"):
-            anime, series = _untoken(data[3:]).split("|", 1)
+            resolved = _resolve_key(tree, data[3:])
+            if not isinstance(resolved, tuple) or len(resolved) != 2:
+                await query.answer("Series library entry nahi mila.", show_alert=True)
+                return
+            anime, series = resolved
             if anime not in tree or series not in tree.get(anime, {}):
                 await query.answer("Series library entry nahi mila.", show_alert=True)
                 return
             text, markup = _season_page(tree, anime, series)
         elif data.startswith("ls:"):
-            anime, series, season = _untoken(data[3:]).split("|", 2)
+            resolved = _resolve_key(tree, data[3:])
+            if not isinstance(resolved, tuple) or len(resolved) != 3:
+                await query.answer("Season library entry nahi mila.", show_alert=True)
+                return
+            anime, series, season = resolved
             text, markup = _episode_page(tree, anime, series, season)
         else:
             return
