@@ -10,7 +10,7 @@ from database import (
     get_all_sources_for_episode_any_season,
 )
 from ffmpeg_utils import run_command
-from gemini_analyzer import analyze_video, verify_source_candidates
+from gemini_analyzer import analyze_video, verify_source_candidates, verify_final_output
 from telegram_remote import open_telegram_range_server
 from utils import safe_filename, unique_path
 
@@ -220,6 +220,7 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
     probe_batches = (
         (0, -90, 90),
         (-240, 240, -480, 480),
+        (-900, 900, -1800, 1800),
     )
     candidates = []
     result = None
@@ -270,6 +271,8 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
         conf = float(result.get("confidence", 0) or 0)
         off = float(result.get("offset_in_candidate", 0) or 0)
         sp = max(0.25, min(float(result.get("speed", 1) or 1), 4.0))
+        reported_duration = float(result.get("source_duration", 0) or 0)
+        source_duration = reported_duration if 0.25 <= reported_duration <= 120.0 else max(0.5, edit_length * sp)
         start = max(0.0, selected["start"] + max(0.0, min(off, probe_duration - 0.5)))
         # Keep the matched probe locally. If the exact interval fits inside it,
         # the final clip can be cut from this already-downloaded candidate and
@@ -280,7 +283,7 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
         except OSError:
             return {
                 "start": start,
-                "source_duration": max(0.5, edit_length * sp),
+                "source_duration": source_duration,
                 "speed": sp,
                 "confidence": conf,
                 "candidate_path": None,
@@ -346,6 +349,28 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
                 match = build_match(result, candidates)
                 if match is not None:
                     return match
+
+        for candidate in candidates:
+            candidate["path"].unlink(missing_ok=True)
+        recovery = await run_batch(probe_batches[2], 0)
+        if recovery:
+            result = await verify_source_candidates(
+                edit_sample,
+                [x["path"] for x in recovery],
+                [x["start"] for x in recovery],
+            )
+            logger.info(
+                "FIND source verification recovery pass scene=%s match=%s confidence=%s candidate=%s",
+                scene_label,
+                bool(result and result.get("match")),
+                result.get("confidence") if result else None,
+                result.get("candidate_index") if result else None,
+            )
+            if result and result.get("match"):
+                match = build_match(result, recovery)
+                if match is not None:
+                    return match
+            candidates = recovery
         return None
     finally:
         edit_sample.unlink(missing_ok=True)
@@ -545,7 +570,34 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
 
     if not merged.exists() or merged.stat().st_size == 0:
         raise RuntimeError("Final merged video empty bana hai.")
-    report=["📋 SCENE DETAILS",""]
+
+    await _show_find_progress(
+        progress_message,
+        96,
+        "🧠 Final Gemini QA",
+        "Edited video aur final merged clip ko visual sequence/timing ke liye compare kar raha hoon...",
+    )
+    qa = await asyncio.to_thread(verify_final_output, input_video, merged, len(clips))
+    if qa is None:
+        logger.warning("Final Gemini QA unavailable; keeping matched result with scene-level verification.")
+        qa_status = "⚠️ Final QA unavailable"
+    else:
+        qa_conf = float(qa.get("confidence", 0) or 0)
+        qa_match = bool(qa.get("match"))
+        qa_status = (
+            f"✅ Final QA verified ({qa_conf:.0%})"
+            if qa_match and qa_conf >= 0.80
+            else f"⚠️ Final QA flagged for review ({qa_conf:.0%})"
+        )
+        logger.info(
+            "Final Gemini QA match=%s confidence=%.3f sequence=%.3f timing=%.3f mismatches=%s",
+            qa_match, qa_conf,
+            float(qa.get("sequence_score", 0) or 0),
+            float(qa.get("timing_score", 0) or 0),
+            qa.get("mismatches"),
+        )
+
+    report=[qa_status, "", "📋 SCENE DETAILS",""]
     for x in clips:
         report += [f"{x['index']:02d} │ {x['anime']} S{x['season']} E{x['episode']}",f"   EDIT {x['edit_start']:.2f}s → {x['edit_end']:.2f}s",f"   RAW  {x['start']:.2f}s → {x['end']:.2f}s",f"   ⚡ Speed: {x['speed']:.2f}×",f"   🎯 Confidence: {x['confidence']:.0%}",""]
-    return {"clips":clips,"matched":len(clips),"total":len(regions),"regions":regions,"output":merged,"report":"\n".join(report),"sources":{(str(x.get('anime','')).strip().lower(),_number(x.get('season')),_number(x.get('episode'))) for x in regions}}
+    return {"clips":clips,"matched":len(clips),"total":len(regions),"regions":regions,"output":merged,"report":"\n".join(report),"qa":qa,"sources":{(str(x.get('anime','')).strip().lower(),_number(x.get('season')),_number(x.get('episode'))) for x in regions}}
