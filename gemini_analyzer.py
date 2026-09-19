@@ -291,6 +291,14 @@ specific visual action, camera movement, character poses, and scene continuity.
     except (TypeError, ValueError):
         return None
     parsed["match"] = bool(parsed.get("match"))
+    display_index = parsed.get("candidate_index", 0)
+    try:
+        display_index = int(display_index)
+    except (TypeError, ValueError):
+        display_index = 0
+    mapping = {display: original for display, original, _ in candidate_meta}
+    if display_index in mapping:
+        parsed["_pool_candidate_index"] = mapping[display_index]
     return parsed
 
 
