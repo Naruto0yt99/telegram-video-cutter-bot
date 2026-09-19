@@ -479,13 +479,6 @@ async def sync_source_library(client):
         PARSER_VERSION,
     )
 
-    # Never resume an incomplete initial rebuild from a stale high message id.
-    # If the previous sync was interrupted, last_id may point at the end of the
-    # source while initial_complete is still false, which would make Telethon
-    # return zero messages with reverse=True + min_id=last_id.
-    if not initial_complete:
-        last_id = 0
-
     iter_kwargs = {"entity": entity, "reverse": True}
     if last_id > 0:
         iter_kwargs["min_id"] = last_id
