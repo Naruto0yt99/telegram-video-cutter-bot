@@ -44,7 +44,7 @@ _PATTERNS = (
 def _normalize_query(value: str) -> str:
     value = unicodedata.normalize("NFKC", value or "")
     value = value.replace("–", "-").replace("—", "-").replace("×", "x")
-    value = re.sub(r"[|/\\,;:_]+", " ", value)
+    value = re.sub(r"[|/\\,;_]+", " ", value)
     value = re.sub(r"\s+", " ", value).strip()
     return value
 
