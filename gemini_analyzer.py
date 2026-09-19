@@ -14,7 +14,7 @@ from database import get_animes
 logger = logging.getLogger("gemini-analyzer")
 
 MODEL = "gemini-3.8-flash"
-FALLBACK_MODELS = ("gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-flash")
+FALLBACK_MODELS = ("gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-2.5-flash")
 API_ROOT = "https://generativelanguage.googleapis.com"
 MODEL_ATTEMPTS = 1
 REQUEST_TIMEOUT = httpx.Timeout(connect=20.0, read=120.0, write=120.0, pool=20.0)
