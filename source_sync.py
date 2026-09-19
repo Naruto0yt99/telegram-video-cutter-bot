@@ -10,7 +10,7 @@ from telegram_media import is_video_message, get_message_video_name
 from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
-PARSER_VERSION = 12
+PARSER_VERSION = 13
 
 
 _QUALITY_PATTERNS = [
@@ -188,7 +188,7 @@ def parse_episode_metadata(
 
     if not anime_from_caption:
         anime_from_caption = canonical_anime(caption)
-    anime = _canonical_from_candidates(anime_from_caption, anime_from_filename, caption, filename, context_anime)
+    anime = _canonical_from_candidates(\n        anime_from_caption,\n        anime_from_filename,\n        topic_text,\n        caption,\n        filename,\n        context_anime,\n    )
     if not anime:
         return None
 
