@@ -784,9 +784,9 @@ async def error_handler(update, context):
 async def _run_source_sync():
     try:
         result = await sync_source_library(telethon_client)
-        logger.info("AnimeNation012 sync result: %s", result)
+        logger.info("Source sync result (%s): %s", SOURCE_CHAT, result)
     except Exception:
-        logger.exception("AnimeNation012 source sync failed")
+        logger.exception("Source sync failed (%s)", SOURCE_CHAT)
 
 
 async def post_init(application: Application):
