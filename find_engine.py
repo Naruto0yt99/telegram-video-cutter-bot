@@ -204,9 +204,12 @@ async def _make_edit_sample(input_video, start, duration, output):
 
 async def _verify_region(input_video, client, source_url, region, output_dir, progress_message=None, scene_label=""):
     try:
-        hint = float(region.get("source_start_hint"))
+        hint_value = region.get("source_start_hint")
+        hint = float(hint_value) if hint_value is not None else 0.0
     except (TypeError, ValueError):
-        return None
+        hint = 0.0
+    if hint < 0:
+        hint = 0.0
 
     edit_start = float(region["start_time"])
     edit_length = max(0.8, float(region["end_time"]) - edit_start)
