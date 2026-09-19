@@ -31,14 +31,13 @@ def now_iso():
 
 
 def _ensure_library_schema(conn):
-    """Create or safely rebuild legacy library.db schema in-place."""
+    """Create or migrate the library schema, including the Naruto series hierarchy."""
     table = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='library'"
     ).fetchone()
 
     if not table:
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE library (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 anime TEXT NOT NULL,
@@ -52,37 +51,30 @@ def _ensure_library_schema(conn):
                 updated_at TEXT NOT NULL,
                 UNIQUE(anime, series, season, episode, quality)
             )
-            """
-        )
+        """)
         return
 
     columns = [row[1] for row in conn.execute("PRAGMA table_info(library)").fetchall()]
+    has_series = "series" in columns
 
-    has_quality_unique = False
+    unique_ok = False
     for row in conn.execute("PRAGMA index_list(library)").fetchall():
-        index_name = row[1]
         if not bool(row[2]):
             continue
-        index_columns = [
-            r[2]
-            for r in conn.execute(f"PRAGMA index_info({index_name!r})").fetchall()
-        ]
-        if index_columns == ["anime", "season", "episode", "quality"]:
-            has_quality_unique = True
+        cols = [r[2] for r in conn.execute(f"PRAGMA index_info({row[1]!r})").fetchall()]
+        if cols == ["anime", "series", "season", "episode", "quality"]:
+            unique_ok = True
             break
 
-    if "quality" in columns and has_quality_unique:
+    if has_series and unique_ok:
         return
 
-    # Legacy schema: rebuild so the ON CONFLICT(anime,season,episode,quality)
-    # used by add_source() is valid. Existing rows are preserved as quality=auto
-    # when their old schema had no quality column.
     conn.execute("DROP TABLE IF EXISTS library_schema_new")
-    conn.execute(
-        """
+    conn.execute("""
         CREATE TABLE library_schema_new (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             anime TEXT NOT NULL,
+            series TEXT NOT NULL DEFAULT '',
             season TEXT NOT NULL,
             episode TEXT NOT NULL,
             quality TEXT NOT NULL DEFAULT 'auto',
@@ -90,31 +82,27 @@ def _ensure_library_schema(conn):
             language TEXT DEFAULT 'Unknown',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            UNIQUE(anime, season, episode, quality)
+            UNIQUE(anime, series, season, episode, quality)
         )
-        """
-    )
+    """)
 
-    if "quality" in columns:
-        conn.execute(
-            """
+    if has_series:
+        conn.execute("""
             INSERT OR IGNORE INTO library_schema_new
-            (id, anime, season, episode, quality, source_url, language, created_at, updated_at)
-            SELECT id, anime, season, episode, COALESCE(quality, 'auto'), source_url,
-                   COALESCE(language, 'Unknown'), created_at, updated_at
+            (id, anime, series, season, episode, quality, source_url, language, created_at, updated_at)
+            SELECT id, anime, COALESCE(NULLIF(series, ''), anime), season, episode,
+                   COALESCE(quality, 'auto'), source_url, COALESCE(language, 'Unknown'),
+                   created_at, updated_at
             FROM library
-            """
-        )
+        """)
     else:
-        conn.execute(
-            """
+        conn.execute("""
             INSERT OR IGNORE INTO library_schema_new
-            (id, anime, season, episode, quality, source_url, language, created_at, updated_at)
-            SELECT id, anime, season, episode, 'auto', source_url,
+            (id, anime, series, season, episode, quality, source_url, language, created_at, updated_at)
+            SELECT id, anime, anime, season, episode, 'auto', source_url,
                    COALESCE(language, 'Unknown'), created_at, updated_at
             FROM library
-            """
-        )
+        """)
 
     conn.execute("DROP TABLE library")
     conn.execute("ALTER TABLE library_schema_new RENAME TO library")
