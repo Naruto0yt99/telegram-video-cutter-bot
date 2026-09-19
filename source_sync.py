@@ -10,7 +10,7 @@ from telegram_media import is_video_message, get_message_video_name
 from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
-PARSER_VERSION = 18
+PARSER_VERSION = 19
 
 
 _QUALITY_PATTERNS = [
@@ -173,7 +173,7 @@ def _naruto_global_episode(anime, season, episode):
     max_local = {"16": 13, "17": 11}[season]
     if not 1 <= local <= max_local:
         return None
-    base = {"16": 348, "17": 360}[season]
+    base = {"16": 348, "17": 361}[season]
     return str(base + local)
 
 
@@ -252,8 +252,11 @@ def parse_episode_metadata(
     else:
         season_value = content_type
 
+    library_anime = "Naruto" if anime in {"Naruto", "Naruto Shippuden", "Naruto Movies"} else anime
+    library_series = anime
     return {
-        "anime": anime,
+        "anime": library_anime,
+        "series": library_series,
         "season": season_value,
         "episode": str(int(episode)),
         "quality": quality,
