@@ -411,9 +411,9 @@ For EACH shot return:
 - edit start/end
 - anime
 - season/episode when identifiable
-- best approximate original timestamp
+- best approximate original timestamp, only when supported by evidence
 - speed
-- a concise but highly distinctive scene description
+- a concise but highly distinctive visual fingerprint
 - characters visible
 - location/background
 - important action/event sequence
@@ -421,9 +421,11 @@ For EACH shot return:
 - what happens immediately before and after the main action
 
 Describe actions in chronological order. Use concrete visual facts rather than
-generic labels such as "Naruto scene" or "fight scene". If the exact episode is
-uncertain, still provide your best anime/arc/episode estimate and detailed visual
-description. Never return an empty list merely because the timestamp is uncertain.
+generic labels such as "Naruto scene" or "fight scene". If the exact episode is uncertain, keep the episode field null rather than inventing
+one, but still return the scene with a detailed visual fingerprint. Never return an
+empty list merely because a timestamp or episode is uncertain. The catalog is a hint,
+not a restriction: identify any anime visible in the edit, including titles added to
+the Telegram source after deployment.
 
 Return ONLY JSON:
 {{
