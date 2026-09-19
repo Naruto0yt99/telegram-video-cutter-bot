@@ -10,7 +10,7 @@ from telegram_media import is_video_message, get_message_video_name
 from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
-PARSER_VERSION = 14
+PARSER_VERSION = 15
 
 
 _QUALITY_PATTERNS = [
@@ -396,7 +396,7 @@ async def sync_source_library(client):
             topic_anime = canonical_anime(topic_title)
             if topic_anime:
                 context_anime = topic_anime
-                season_match = re.search(r"\\b(?:Season|S)\\s*[-._ ]?(\\d{1,3})\\b", topic_title, re.I)
+                season_match = re.search(r"\b(?:Season|S)\s*[-._ ]?(\d{1,3})\b", topic_title, re.I)
                 if season_match:
                     context_season = str(int(season_match.group(1)))
 
