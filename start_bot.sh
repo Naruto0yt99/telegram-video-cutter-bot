@@ -51,11 +51,35 @@ if command -v python >/dev/null 2>&1 && [ -f requirements.txt ]; then
 
   if [ "$NEW_HASH" != "$OLD_HASH" ]; then
     log "Installing updated Python requirements."
-    if python -m pip install -r requirements.txt >> "$MAIN_LOG" 2>&1; then
+
+    PIP_OK=0
+
+    # Termux ARM builds of NumPy/Pillow are provided by Termux itself.
+    # Installing them through pip can force a very slow source build on
+    # Android, especially after a fresh Termux reset.
+    if command -v pkg >/dev/null 2>&1; then
+      log "Termux detected; installing native python-numpy/python-pillow packages."
+      if pkg install -y python-numpy python-pillow >> "$MAIN_LOG" 2>&1; then
+        log "Termux native NumPy/Pillow ready."
+        if python -m pip install -r <(grep -Ev '^(Pillow|numpy)([<>=!~]|$)' requirements.txt) >> "$MAIN_LOG" 2>&1; then
+          PIP_OK=1
+        fi
+      else
+        log "WARNING: Termux native NumPy/Pillow install failed; falling back to pip."
+      fi
+    fi
+
+    if [ "$PIP_OK" -eq 0 ]; then
+      if python -m pip install -r requirements.txt >> "$MAIN_LOG" 2>&1; then
+        PIP_OK=1
+      fi
+    fi
+
+    if [ "$PIP_OK" -eq 1 ]; then
       printf '%s' "$NEW_HASH" > "$REQ_HASH_FILE"
       log "Python requirements installed."
     else
-      log "WARNING: pip install failed; continuing with current environment."
+      log "WARNING: Python dependency installation failed; continuing with current environment."
     fi
   fi
 fi
