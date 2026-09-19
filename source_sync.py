@@ -10,7 +10,7 @@ from telegram_media import is_video_message, get_message_video_name
 from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
-PARSER_VERSION = 15
+PARSER_VERSION = 16
 
 
 _QUALITY_PATTERNS = [
@@ -188,13 +188,14 @@ def parse_episode_metadata(
 
     if not anime_from_caption:
         anime_from_caption = canonical_anime(caption)
+    # Forum topic/context is authoritative; provider bot names must not become anime titles.
     anime = _canonical_from_candidates(
+        context_anime,
         anime_from_caption,
         anime_from_filename,
         topic_text,
         caption,
         filename,
-        context_anime,
     )
     if not anime:
         return None
@@ -416,14 +417,23 @@ async def sync_source_library(client):
         if metadata:
             context_anime = metadata["anime"]
             context_season = metadata["season"]
+        elif topic_text:
+            topic_anime = canonical_anime(topic_text)
+            if topic_anime:
+                context_anime = topic_anime
+            season_match = re.search(r"\b(?:Season|S)\s*[-._ ]?(\d{1,3})\b", topic_text, re.I)
+            if season_match:
+                context_season = str(int(season_match.group(1)))
 
-        if 11750 <= message_id <= 11790:
+        if message_id <= 100:
             logger.info(
-                "SOURCE DEBUG id=%s video_name=%r caption=%r topic=%r metadata=%r",
+                "SOURCE DEBUG id=%s video_name=%r caption=%r topic=%r context=%r/%r metadata=%r",
                 message_id,
                 _clean_caption(get_message_video_name(message)),
                 _clean_caption(getattr(message, "message", "") or ""),
                 topic_text,
+                context_anime,
+                context_season,
                 metadata,
             )
 
