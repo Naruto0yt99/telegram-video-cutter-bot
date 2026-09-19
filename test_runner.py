@@ -79,6 +79,11 @@ async def run_one(index, url, client, user_id):
 
         download_started = time.monotonic()
         video = await download_video_from_url(url, case_user_id)
+        # Keep a recovery copy outside the per-attempt temp directory. A failed
+        # FIND profile may clean that directory, but later profiles must retry
+        # against the same downloaded edit rather than a missing input.
+        recovery_video = work / "source.mp4"
+        shutil.copy2(video, recovery_video)
         case["download_seconds"] = round(time.monotonic() - download_started, 2)
         case["input_video"] = str(video)
         log.info("Downloaded: %s (%.2fs)", video, case["download_seconds"])
@@ -93,6 +98,11 @@ async def run_one(index, url, client, user_id):
             attempt_started = time.monotonic()
             log.info("CASE %s FIND profile=%s", index, profile)
             try:
+                video = Path(video)
+                if not video.exists():
+                    if not recovery_video.exists():
+                        raise RuntimeError("Recovery copy of input video nahi mila.")
+                    shutil.copy2(recovery_video, video)
                 result = await find_and_build(
                     input_video=video,
                     user_id=case_user_id,
@@ -127,6 +137,10 @@ async def run_one(index, url, client, user_id):
                 })
                 log.exception("CASE %s profile=%s failed", index, profile)
                 shutil.rmtree(Path(TEMP_DIR) / str(case_user_id), ignore_errors=True)
+                # Restore the downloaded edit for the next FIND profile.
+                video = Path(video)
+                video.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(recovery_video, video)
 
         os.environ.pop("FIND_SEARCH_PROFILE", None)
         case["find_seconds"] = round(time.monotonic() - find_started, 2)
