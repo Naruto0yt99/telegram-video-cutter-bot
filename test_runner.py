@@ -128,6 +128,10 @@ async def run_one(index, url, client, user_id):
                     break
                 log.warning("CASE %s profile=%s not strong enough; trying next profile", index, profile)
                 shutil.rmtree(Path(TEMP_DIR) / str(case_user_id), ignore_errors=True)
+                # The next profile needs the original edit back in the same path.
+                video = Path(video)
+                video.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(recovery_video, video)
             except Exception as exc:
                 attempt_seconds = round(time.monotonic() - attempt_started, 2)
                 attempts.append({
