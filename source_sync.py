@@ -10,7 +10,7 @@ from telegram_media import is_video_message, get_message_video_name
 from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
-PARSER_VERSION = 16
+PARSER_VERSION = 17
 
 
 _QUALITY_PATTERNS = [
@@ -145,7 +145,7 @@ def _naruto_global_episode(anime, season, episode):
     if anime != "Naruto Shippuden" or season not in {"16", "17"}:
         return None
     local = int(episode)
-    max_local = {"16": 12, "17": 12}[season]
+    max_local = {"16": 13, "17": 11}[season]
     if not 1 <= local <= max_local:
         return None
     base = {"16": 348, "17": 360}[season]
