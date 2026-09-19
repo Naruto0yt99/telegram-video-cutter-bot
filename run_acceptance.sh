@@ -33,12 +33,23 @@ while true; do
   fi
 
   if python -m py_compile test_runner.py >>"$LOG" 2>&1; then
-    if python test_runner.py; then
+    python test_runner.py
+    code=$?
+    echo "$(date -Is) acceptance finished exit=$code" | tee -a "$LOG"
+
+    # Publish only the result artifacts. Do not commit source/temp files.
+    if git add acceptance_test.json acceptance_test.log >>"$LOG" 2>&1; then
+      if ! git diff --cached --quiet; then
+        git commit -m "Auto acceptance test result" >>"$LOG" 2>&1 || true
+        git push origin main >>"$LOG" 2>&1 || true
+      fi
+    fi
+
+    if [ "$code" -eq 0 ]; then
       echo "$(date -Is) acceptance PASS" | tee -a "$LOG"
       exit 0
     else
-      code=$?
-      echo "$(date -Is) acceptance FAIL exit=$code; one run completed" | tee -a "$LOG"
+      echo "$(date -Is) acceptance FAIL; waiting for next code update/retry" | tee -a "$LOG"
     fi
   else
     echo "$(date -Is) test_runner syntax check failed" | tee -a "$LOG"
