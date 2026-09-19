@@ -577,7 +577,11 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
         "🧠 Final Gemini QA",
         "Edited video aur final merged clip ko visual sequence/timing ke liye compare kar raha hoon...",
     )
-    qa = await asyncio.to_thread(verify_final_output, input_video, merged, len(clips))
+    try:
+        qa = await asyncio.to_thread(verify_final_output, input_video, merged, len(clips))
+    except Exception:
+        logger.exception("Final Gemini QA failed; keeping matched result with scene-level verification.")
+        qa = None
     if qa is None:
         logger.warning("Final Gemini QA unavailable; keeping matched result with scene-level verification.")
         qa_status = "⚠️ Final QA unavailable"
