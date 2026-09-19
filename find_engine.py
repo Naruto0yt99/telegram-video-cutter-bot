@@ -74,7 +74,13 @@ def _number(value):
 
 def _source_for_region(region):
     raw_anime = str(region.get("anime") or "").strip()
-    anime = canonical_anime(raw_anime) or raw_anime
+    canonical = canonical_anime(raw_anime) or raw_anime
+    if canonical in {"Naruto", "Naruto Shippuden", "Naruto Movies"}:
+        anime = "Naruto"
+        series = canonical
+    else:
+        anime = canonical
+        series = canonical
     season = _number(region.get("season"))
     episode = _number(region.get("episode"))
     if not anime or season is None or episode is None:
@@ -91,7 +97,7 @@ def _source_for_region(region):
             lookup_episode = base + episode
 
     # First use the exact season/episode Gemini returned.
-    sources = get_all_sources_for_episode(anime, season, lookup_episode)
+    sources = get_all_sources_for_episode(anime, season, lookup_episode, series=series)
     resolved_season = season
 
     # If the exact season is not indexed, a single indexed season is still
@@ -99,7 +105,7 @@ def _source_for_region(region):
     # actual scene. This is especially important for libraries whose uploader
     # labels seasons differently from Gemini's canonical numbering.
     if not sources:
-        by_season = get_all_sources_for_episode_any_season(anime, lookup_episode)
+        by_season = get_all_sources_for_episode_any_season(anime, lookup_episode, series=series)
         if len(by_season) == 1:
             resolved_season = next(iter(by_season))
             sources = by_season[resolved_season]
