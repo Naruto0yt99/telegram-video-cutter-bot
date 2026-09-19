@@ -13,8 +13,6 @@ from database import get_animes
 
 logger = logging.getLogger("gemini-analyzer")
 
-# Fast multimodal model first. The 3.5 Flash-Lite model is designed for
-# low-latency/high-throughput work; heavier models are only fallbacks.
 MODEL = "gemini-3.5-flash-lite"
 FALLBACK_MODELS = ("gemini-3.5-flash",)
 API_ROOT = "https://generativelanguage.googleapis.com"
@@ -59,7 +57,6 @@ def _upload_file(path: Path):
 
 
 def _wait_file_active(name: str):
-    # Mobile/Termux uploads and Gemini video processing can take longer than 45s.
     deadline = time.monotonic() + 120.0
     with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
         while time.monotonic() < deadline:
@@ -123,13 +120,18 @@ def _generate_video_prompt(file_name: str, prompt: str, temperature=0.0):
                 {"text": prompt},
             ],
         }],
-        "generationConfig": {"responseMimeType": "application/json", "mediaResolution": "MEDIA_RESOLUTION_LOW"},
+        # LOW was too aggressive for anime scene recognition. Keep candidate
+        # verification lean, but give the initial edit-analysis pass enough
+        # visual detail to distinguish characters, locations and actions.
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "mediaResolution": "MEDIA_RESOLUTION_MEDIUM",
+        },
     }
     return _generate_with_fallback(payload)
 
 
 def verify_source_match(edit_path: Path, source_path: Path, source_window_start: float):
-    """Compare an edit sample with a candidate source window and locate the match."""
     if not edit_path.exists() or not source_path.exists():
         return None
     edit_file = _upload_file(edit_path)
@@ -179,9 +181,7 @@ characters/anime are similar.
     return parsed
 
 
-
 async def verify_source_candidates(edit_path: Path, candidate_paths, candidate_starts):
-    """Compare one edit sample against several candidate source windows in one Gemini call."""
     if not edit_path.exists() or not candidate_paths:
         return None
     if len(candidate_paths) != len(candidate_starts):
@@ -192,8 +192,6 @@ async def verify_source_candidates(edit_path: Path, candidate_paths, candidate_s
     if not edit_name:
         return None
 
-    # Upload all candidate windows concurrently. Sequential uploads were a
-    # major latency source when FIND had several scenes.
     existing = [
         (idx, Path(path), float(candidate_starts[idx]))
         for idx, path in enumerate(candidate_paths)
@@ -217,14 +215,11 @@ async def verify_source_candidates(edit_path: Path, candidate_paths, candidate_s
     if not candidate_files:
         return None
 
-    # Wait for all Gemini files concurrently as well.
     await asyncio.gather(
         asyncio.to_thread(_wait_file_active, edit_name),
         *(asyncio.to_thread(_wait_file_active, name) for name in candidate_files),
     )
 
-    # Keep the uploaded-file numbering paired with its real source start.
-    # This prevents a skipped upload from shifting candidate timestamps.
     candidate_lines = [
         f"Candidate {display_index}: starts at {float(start_time):.3f}s in the episode."
         for display_index, _, start_time in candidate_meta
@@ -278,6 +273,7 @@ specific visual action, camera movement, character poses, and scene continuity.
     parsed["match"] = bool(parsed.get("match"))
     return parsed
 
+
 def _parse_json(text: str):
     text = (text or "").strip()
     if not text:
@@ -302,14 +298,50 @@ def _catalog_text():
 
 def _analysis_prompt(catalog: str):
     return f"""
-Watch the uploaded YouTube anime edit and split it into EVERY contiguous shot/segment. Split at every visible cut, transition, source change, different anime, or different continuous source segment. Do not merge separated shots just because they come from the same episode. Preserve exact edited start/end. Estimate speed as original_duration / edited_duration. Do ONLY timestamp identification. Do not search, compare, fingerprint, verify, or explain.
-For each clip return the closest catalog anime, season, episode, approximate START time in the original episode, and the clip start/end inside the uploaded edit.
-Use seconds as numbers. Best-effort timestamps are required. The source timestamp may be off by up to about 5 minutes; still return your best estimate rather than refusing or returning no result.
-Return ONLY JSON.
+Watch the uploaded YouTube anime edit carefully and identify every contiguous
+source shot. The goal is to make a searchable scene fingerprint, not merely to
+guess a timestamp.
+
+For EACH shot return:
+- edit start/end
+- anime
+- season/episode when identifiable
+- best approximate original timestamp
+- speed
+- a concise but highly distinctive scene description
+- characters visible
+- location/background
+- important action/event sequence
+- distinctive objects or visual landmarks
+- what happens immediately before and after the main action
+
+Describe actions in chronological order. Use concrete visual facts rather than
+generic labels such as "Naruto scene" or "fight scene". If the exact episode is
+uncertain, still provide your best anime/arc/episode estimate and detailed visual
+description. Never return an empty list merely because the timestamp is uncertain.
+
+Return ONLY JSON:
+{{
+  "regions": [
+    {{
+      "start_time": 0,
+      "end_time": 5,
+      "anime": "NARUTO",
+      "season": 1,
+      "episode": 27,
+      "source_start_hint": 755,
+      "confidence": 0.9,
+      "speed": 1.0,
+      "description": "Distinctive chronological description of the shot.",
+      "characters": ["Naruto"],
+      "location": "forest",
+      "actions": ["..."],
+      "landmarks": ["..."]
+    }}
+  ]
+}}
 
 Catalog: {catalog}
-
-{{"regions":[{{"start_time":0,"end_time":5,"anime":"NARUTO","season":1,"episode":27,"source_start_hint":755,"confidence":0.9,"speed":1.0}}]}}
 """
 
 
@@ -322,32 +354,42 @@ def _analyze_video_sync(path: Path):
     if not name:
         raise RuntimeError("Gemini file upload failed")
     _wait_file_active(name)
-    logger.info("Gemini simple scene-analysis pass=1")
+    logger.info("Gemini detailed scene-analysis pass=1")
     data = _generate_video_prompt(name, _analysis_prompt(_catalog_text()), temperature=0.0)
     parsed = _parse_json(_text_from_response(data))
     regions = parsed.get("regions") if isinstance(parsed, dict) else None
 
-    # Retry once with a permissive prompt if the first JSON response has no regions.
-    # This keeps FIND best-effort instead of failing before Telegram extraction.
     if not isinstance(regions, list) or not regions:
         logger.warning("Gemini pass=1 returned no regions; running permissive fallback")
         catalog = _catalog_text()
         fallback_prompt = f"""
 Watch the uploaded video and identify the anime footage in it.
-This is a BEST-EFFORT extraction task. Do not refuse because the exact anime,
-season, episode, or timestamp is uncertain.
+This is a BEST-EFFORT extraction task. Return every visible source shot even if
+the exact episode or timestamp is uncertain.
 
-Return JSON only with this exact shape:
-{{"regions":[{{"start_time":0,"end_time":5,"anime":"NARUTO","season":1,"episode":27,"source_start_hint":755,"confidence":0.5,"speed":1.0}}]}}
+For every shot include start_time, end_time, anime, season, episode,
+source_start_hint, confidence, speed, and a concise description of the visible
+action, characters, location and distinctive landmarks.
 
-Rules:
-- Return every contiguous shot/segment and split at visible cuts/transitions or source changes.
-- start_time/end_time are seconds inside the uploaded edit.
-- source_start_hint is the best approximate timestamp in the original episode, in seconds.
-- speed is original_duration / edited_duration; use 1.0 when unchanged.
-- If season/episode is uncertain, still make your best estimate; do not return empty regions.
-- Approximate timestamps are acceptable and may be off by several minutes.
-- Do not explain anything outside the JSON.
+Return JSON only:
+{{
+  "regions": [
+    {{
+      "start_time": 0,
+      "end_time": 5,
+      "anime": "NARUTO",
+      "season": 1,
+      "episode": 27,
+      "source_start_hint": 755,
+      "confidence": 0.5,
+      "speed": 1.0,
+      "description": "Visible action and scene landmarks."
+    }}
+  ]
+}}
+
+Do not refuse because anything is uncertain and do not return an empty regions
+array when anime footage is visible.
 
 Catalog: {catalog}
 """
