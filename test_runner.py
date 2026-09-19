@@ -105,9 +105,11 @@ async def main():
     log.info("ACCEPTANCE TEST START")
     log.info("Tests=%s source=%s", len(TESTS), SOURCE_CHAT)
 
-    # The normal bot already uses the same SQLite-backed USER_SESSION.
-    # Connecting a second Telethon client to that exact file causes
-    # "database is locked". Use a private copy for the acceptance process.
+    # IMPORTANT: do not copy this session file. A copied Telethon session
+    # contains the same Telegram authorization key, so using it from a second
+    # client/IP can trigger AuthKeyDuplicatedError. The acceptance runner is
+    # therefore intentionally single-owner: run_acceptance.sh stops bot.py
+    # before invoking this process.
     session_base = Path(str(TELEGRAM_SESSION))
     session_candidates = [
         session_base,
@@ -117,15 +119,11 @@ async def main():
     if session_src is None:
         raise RuntimeError(f"Telegram USER_SESSION file not found: {session_base}")
 
-    session_copy_dir = Path(TEMP_DIR) / "acceptance_test" / "session"
-    session_copy_dir.mkdir(parents=True, exist_ok=True)
-    session_copy = session_copy_dir / "acceptance_user_session"
-    # Copy the actual SQLite session to the exact filename Telethon will open.
-    for suffix in ("", "-journal", "-wal", "-shm"):
-        src = Path(str(session_src) + suffix)
-        dst = Path(str(session_copy) + ".session" + suffix)
-        if src.exists():
-            shutil.copy2(src, dst)
+    # Telethon expects the session basename without the .session suffix.
+    session_path = str(session_src)
+    if session_path.endswith(".session"):
+        session_path = session_path[:-8]
+
 
     client = TelegramClient(str(session_copy), TG_API_ID, TG_API_HASH)
     await client.start()
