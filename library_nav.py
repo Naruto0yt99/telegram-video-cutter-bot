@@ -178,7 +178,7 @@ def _season_page(tree, anime, series):
     rows = []
     for season in sorted(tree.get(anime, {}).get(series, {}), key=_season_sort_key):
         rows.append([InlineKeyboardButton(f"📺 {_content_label(season)}", callback_data=f"ls:{_token(anime + "|" + series + "|" + season)}")])
-    rows.append([InlineKeyboardButton("⬅️ Series", callback_data=f"lr:{_token(f"{anime}|{series}")}")])
+    rows.append([InlineKeyboardButton("⬅️ Series", callback_data=f"lr:{_token(anime + "|" + series)}")])
     title = series if anime == "Naruto" else anime
     return f"🎬 <b>{escape(title)}</b>\\n\\nChoose Season / OVA / Movie:", _keyboard(rows)
 
