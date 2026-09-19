@@ -49,3 +49,20 @@ data/
 # OS
 .DS_Store
 Thumbs.db
+
+# Runtime / local test artifacts
+acceptance_test.json
+acceptance_test.log
+acceptance_loop.log
+acceptance_loop.lock
+.acceptance_runner.lock
+.bot_supervisor.lock
+.bot_supervisor.pid
+.requirements.sha256
+boot.log
+logs/
+bore
+remote_server.py
+start_tunnel.py
+*.session
+*.session-journal
