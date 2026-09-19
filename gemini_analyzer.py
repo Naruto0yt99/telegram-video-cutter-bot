@@ -274,6 +274,83 @@ specific visual action, camera movement, character poses, and scene continuity.
     return parsed
 
 
+
+def verify_final_output(edit_path: Path, final_path: Path, scene_count: int = 0):
+    """Use Gemini as a final visual QA gate: compare the complete edit with the assembled result."""
+    if not edit_path.exists() or not final_path.exists():
+        return None
+
+    edit_file = _upload_file(edit_path)
+    final_file = _upload_file(final_path)
+    edit_name = edit_file.get("name")
+    final_name = final_file.get("name")
+    if not edit_name or not final_name:
+        return None
+
+    _wait_file_active(edit_name)
+    _wait_file_active(final_name)
+
+    prompt = f"""
+VIDEO 1 is the user's original edited YouTube video.
+VIDEO 2 is the bot's final assembled video made by extracting source scenes.
+
+Perform a strict visual QA comparison of the COMPLETE videos.
+Expected extracted scene count: {int(scene_count)}.
+
+The final video should reproduce the same anime visual content in the same order,
+with the same scene boundaries and effective timing. It may differ in harmless
+ways such as source quality, subtitles, logos, compression, or small frame-level
+encoding differences. Do NOT require identical audio or identical overlays.
+
+Check:
+1. every visible anime scene in VIDEO 1 exists in VIDEO 2;
+2. no scene is missing, duplicated, or inserted;
+3. scene order is identical;
+4. each scene starts/ends at the correct visual action;
+5. speed changes are preserved closely enough that action timing aligns;
+6. crops/zooms/color/subtitles do not cause a false mismatch;
+7. the final duration is consistent with the edited source.
+
+Return ONLY JSON:
+{{
+  "match": true,
+  "confidence": 0.0,
+  "sequence_score": 0.0,
+  "timing_score": 0.0,
+  "missing_scenes": [],
+  "extra_scenes": [],
+  "mismatches": [],
+  "summary": "short factual QA summary"
+}}
+
+Be conservative: if a scene is merely visually similar but is not the same action,
+mark the relevant mismatch. If the videos are the same sequence but encoded at
+different quality, that is NOT a mismatch.
+"""
+    payload = {
+        "contents": [{
+            "role": "user",
+            "parts": [
+                {"file_data": {"mime_type": "video/mp4", "file_uri": f"{API_ROOT}/v1beta/{edit_name}"}},
+                {"file_data": {"mime_type": "video/mp4", "file_uri": f"{API_ROOT}/v1beta/{final_name}"}},
+                {"text": prompt},
+            ],
+        }],
+        "generationConfig": {"responseMimeType": "application/json"},
+    }
+    data = _generate_with_fallback(payload)
+    parsed = _parse_json(_text_from_response(data))
+    if not isinstance(parsed, dict):
+        return None
+    try:
+        parsed["confidence"] = float(parsed.get("confidence", 0.0) or 0.0)
+        parsed["sequence_score"] = float(parsed.get("sequence_score", 0.0) or 0.0)
+        parsed["timing_score"] = float(parsed.get("timing_score", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return None
+    parsed["match"] = bool(parsed.get("match"))
+    return parsed
+
 def _parse_json(text: str):
     text = (text or "").strip()
     if not text:
