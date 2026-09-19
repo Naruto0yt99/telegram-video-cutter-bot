@@ -42,6 +42,7 @@ def _ensure_library_schema(conn):
             CREATE TABLE library (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 anime TEXT NOT NULL,
+                series TEXT NOT NULL DEFAULT '',
                 season TEXT NOT NULL,
                 episode TEXT NOT NULL,
                 quality TEXT NOT NULL DEFAULT 'auto',
@@ -49,7 +50,7 @@ def _ensure_library_schema(conn):
                 language TEXT DEFAULT 'Unknown',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                UNIQUE(anime, season, episode, quality)
+                UNIQUE(anime, series, season, episode, quality)
             )
             """
         )
@@ -133,7 +134,7 @@ def init_db():
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_library_episode
-            ON library(anime, season, episode)
+            ON library(anime, series, season, episode)
             """
         )
 
@@ -147,6 +148,7 @@ def add_source(
     quality,
     source_url,
     language="Unknown",
+    series=None,
 ):
     timestamp = now_iso()
 
@@ -156,6 +158,7 @@ def add_source(
             """
             INSERT INTO library (
                 anime,
+                series,
                 season,
                 episode,
                 quality,
@@ -168,6 +171,7 @@ def add_source(
 
             ON CONFLICT(
                 anime,
+                series,
                 season,
                 episode,
                 quality
@@ -179,6 +183,7 @@ def add_source(
             """,
             (
                 anime,
+                series or anime,
                 str(season),
                 str(episode),
                 quality,
