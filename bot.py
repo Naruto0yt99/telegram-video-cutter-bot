@@ -458,10 +458,11 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             merged = Path(result["output"])
             caption = (
                 "🎬 FIND RESULT\n\n"
-                f"🎞️ Scenes: {total}\n"
-                f"📺 Sources: {len(result.get('sources') or [])} episodes\n"
+                f"🎞️ Verified scenes: {len(clips)}/{total}\n"
+                f"📺 Episodes used: {len(result.get('sources') or [])}\n"
                 f"⏱️ Duration: {format_time(sum(float(x.get('edit_duration', 0)) for x in clips))}\n"
-                "🎥 Quality: highest available\n\n"
+                "🧠 Visual fingerprint → targeted Telegram windows → Gemini verification\n"
+                "⚠️ Failed/uncertain scenes were skipped and listed in the report.\n\n"
                 "🤖 AnimeClipCutter"
             )
             await safe_edit_text(status, "🎯 FIND — 97%\n\n📤 Verified scene assembly ready\n📦 Final video upload ho raha hai...")
@@ -470,7 +471,7 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for i in range(0, len(report), 3500):
                 part = report[i:i+3500]
                 await update.message.reply_text(part)
-            await safe_edit_text(status, f"🎯 FIND COMPLETE {'✅' if len(clips) == total else '⚠️'}\n\nMatched: {len(clips)}/{total}\nFinal merged video + scene details bhej diye.")
+            await safe_edit_text(status, f"🎯 FIND COMPLETE {'✅' if len(clips) == total else '⚠️'}\n\nVerified: {len(clips)}/{total}\nFinal merged video + process report bhej diye.")
     except Exception as exc:
         logger.exception("Find failed")
         await safe_edit_text(status, f"❌ FIND FAILED\n\n{exc}")
