@@ -9,6 +9,7 @@ from pathlib import Path
 
 from telethon import TelegramClient
 from telethon.sessions import MemorySession
+from telethon.errors import FloodWaitError
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.error import NetworkError, BadRequest
@@ -80,6 +81,7 @@ logger = logging.getLogger("anime-bot")
 
 telethon_client = None
 bot_mtproto_client = None
+bot_mtproto_lock = asyncio.Lock()
 source_sync_task = None
 job_lock = asyncio.Lock()
 active_videos = {}
@@ -117,12 +119,42 @@ async def safe_edit_text(message, text, **kwargs):
         raise
 
 
+async def _ensure_bot_mtproto_client():
+    """Lazily connect the Telethon bot client only when a >50 MB upload needs it.
+
+    Telegram bot authentication can trigger FloodWait. It must never block normal
+    bot startup or FIND/source-sync operation.
+    """
+    global bot_mtproto_client
+
+    if bot_mtproto_client is not None:
+        return bot_mtproto_client
+
+    async with bot_mtproto_lock:
+        if bot_mtproto_client is not None:
+            return bot_mtproto_client
+
+        if not (TG_API_ID and TG_API_HASH):
+            raise RuntimeError("TG_API_ID/TG_API_HASH missing; large-file sender unavailable.")
+
+        client = TelegramClient(MemorySession(), TG_API_ID, TG_API_HASH)
+        try:
+            await client.start(bot_token=BOT_TOKEN)
+        except FloodWaitError as exc:
+            await client.disconnect()
+            raise RuntimeError(
+                f"Telegram large-file sender temporarily rate-limited; retry after {exc.seconds}s."
+            ) from exc
+        bot_mtproto_client = client
+        logger.info("Telethon bot media client connected lazily for large-file upload.")
+        return bot_mtproto_client
+
+
 async def send_file(update: Update, path: Path, caption: str):
     size = path.stat().st_size
     if size > TELEGRAM_MAX_BYTES:
-        if bot_mtproto_client is None:
-            raise RuntimeError("Large Telegram file ke liye MTProto sender connected nahi hai.")
-        await bot_mtproto_client.send_file(
+        client = await _ensure_bot_mtproto_client()
+        await client.send_file(
             update.effective_chat.id,
             str(path),
             caption=caption,
@@ -797,9 +829,9 @@ async def post_init(application: Application):
         telethon_client = TelegramClient(TELEGRAM_SESSION, TG_API_ID, TG_API_HASH)
         await telethon_client.start()
         logger.info("Telethon source client connected.")
-        bot_mtproto_client = TelegramClient(MemorySession(), TG_API_ID, TG_API_HASH)
-        await bot_mtproto_client.start(bot_token=BOT_TOKEN)
-        logger.info("Telethon bot media client connected.")
+        # The USER_SESSION above is the only client required for source access.
+        # The bot-token MTProto client is intentionally lazy: authenticating it on
+        # every startup can trigger Telegram FloodWait and take the whole bot down.
         source_sync_task = asyncio.create_task(_run_source_sync())
     else:
         logger.warning("TG_API_ID/TG_API_HASH missing. Telegram source features disabled.")
