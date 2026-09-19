@@ -188,7 +188,14 @@ def parse_episode_metadata(
 
     if not anime_from_caption:
         anime_from_caption = canonical_anime(caption)
-    anime = _canonical_from_candidates(\n        anime_from_caption,\n        anime_from_filename,\n        topic_text,\n        caption,\n        filename,\n        context_anime,\n    )
+    anime = _canonical_from_candidates(
+        anime_from_caption,
+        anime_from_filename,
+        topic_text,
+        caption,
+        filename,
+        context_anime,
+    )
     if not anime:
         return None
 
@@ -314,7 +321,8 @@ async def _topic_text_for_message(client, entity, message, cache):
 def _reset_index_for_parser_upgrade(last_version: int):
     if last_version == PARSER_VERSION:
         return
-    prefix = f"https://t.me/{SOURCE_CHAT}/%"
+    chat_name = str(SOURCE_CHAT).lstrip("@")
+    prefix = f"https://t.me/{chat_name}/%"
     with get_connection() as conn:
         conn.execute("DELETE FROM library WHERE source_url LIKE ?", (prefix,))
         conn.commit()
