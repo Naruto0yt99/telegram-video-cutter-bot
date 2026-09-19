@@ -10,7 +10,7 @@ from telegram_media import is_video_message, get_message_video_name
 from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
-PARSER_VERSION = 21
+PARSER_VERSION = 22
 
 
 _QUALITY_PATTERNS = [
@@ -143,6 +143,20 @@ def _is_batch_or_link_message(text: str) -> bool:
     return bool(_BATCH_MARKER_PATTERN.search(text or "")) and len(links) >= 1
 
 
+def _is_non_anime_topic(topic_text: str) -> bool:
+    text = _clean_caption(topic_text).casefold()
+    if not text:
+        return False
+    text = re.sub(r"[^a-z0-9]+", " ", text).strip()
+    blocked = {
+        "clip", "clips", "twixter", "normal video", "normal videos",
+        "video", "videos", "ai", "ai video", "ai videos", "ai generated",
+        "edit", "edits", "amv", "short", "shorts", "meme", "memes",
+        "random", "other", "others", "misc", "miscellaneous",
+    }
+    return text in blocked
+
+
 def _topic_anime_fallback(topic_text: str):
     text = _clean_caption(topic_text)
     if not text:
@@ -201,6 +215,10 @@ def parse_episode_metadata(
         marker_source = combined
 
     topic_text = _clean_caption(topic_text)
+    # The source forum contains non-anime topics too. They must never enter
+    # the anime library, even if their filenames happen to contain numbers.
+    if _is_non_anime_topic(topic_text):
+        return None
     topic_season = None
     topic_match = re.search(r"\b(?:Season|S)\s*[-._ ]?(\d{1,3})\b", topic_text, re.I)
     if topic_match:
