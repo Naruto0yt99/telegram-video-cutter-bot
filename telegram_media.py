@@ -27,6 +27,10 @@ def is_video_message(message):
         if mime.startswith("video/"):
             return True
 
+        filename = getattr(document, "file_name", "") or ""
+        if filename.lower().endswith(VIDEO_EXTENSIONS):
+            return True
+
     # Telethon Message objects expose uploaded videos as
     # message.media.document, while Bot API Update messages expose them as
     # message.video/message.document. Support both representations because
@@ -36,6 +40,10 @@ def is_video_message(message):
     if media_document:
         mime = getattr(media_document, "mime_type", "") or ""
         if mime.startswith("video/"):
+            return True
+
+        filename = getattr(media_document, "file_name", "") or ""
+        if filename.lower().endswith(VIDEO_EXTENSIONS):
             return True
 
         for attribute in getattr(media_document, "attributes", []) or []:
