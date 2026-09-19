@@ -2,10 +2,10 @@
 set -u
 export GIT_TERMINAL_PROMPT=0
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 REPO_DIR="$(pwd)"
 POLL_SECONDS="${ACCEPTANCE_POLL_SECONDS:-60}"
-LOG="acceptance_loop.log"
+LOG="$REPO_DIR/acceptance_loop.log"
 LOCK="$REPO_DIR/.acceptance_runner.lock"
 
 if [ -f "$LOCK" ]; then
@@ -15,42 +15,74 @@ fi
 trap 'rm -f "$LOCK"' EXIT
 printf '%s\n' "$$" > "$LOCK"
 
-echo "$(date -Is) acceptance loop started" | tee -a "$LOG"
+log() {
+  echo "$(date -Is) $*" | tee -a "$LOG"
+}
+
+stop_runtime() {
+  if [ -f "$REPO_DIR/.bot_supervisor.pid" ]; then
+    SUP_PID="$(cat "$REPO_DIR/.bot_supervisor.pid" 2>/dev/null || true)"
+    if [ -n "$SUP_PID" ] && kill -0 "$SUP_PID" 2>/dev/null; then
+      kill "$SUP_PID" 2>/dev/null || true
+    fi
+  fi
+
+  for pid in $(pgrep -f "[/]start_bot.sh" 2>/dev/null || true); do
+    kill "$pid" 2>/dev/null || true
+  done
+
+  for _ in 1 2 3 4 5; do
+    sleep 1
+    pgrep -f "[/]start_bot.sh" >/dev/null 2>&1 || break
+  done
+
+  for pid in $(pgrep -f "^[p]ython .*$REPO_DIR/bot.py$" 2>/dev/null || true); do
+    kill "$pid" 2>/dev/null || true
+  done
+
+  sleep 1
+}
+
+start_runtime() {
+  rm -rf "$REPO_DIR/.bot_supervisor.lock"
+  nohup "$REPO_DIR/start_bot.sh" >> "$REPO_DIR/acceptance_loop.log" 2>&1 &
+  log "bot supervisor restarted (pid=$!)"
+}
+
+log "acceptance runner started"
 
 while true; do
-  echo "$(date -Is) syncing repository..." | tee -a "$LOG"
+  log "syncing repository..."
   if git fetch origin main >>"$LOG" 2>&1; then
     LOCAL="$(git rev-parse HEAD)"
     REMOTE="$(git rev-parse origin/main)"
-    if [ "$LOCAL" != "$REMOTE" ]; then
-      if git diff --quiet && git diff --cached --quiet; then
-        git reset --hard origin/main >>"$LOG" 2>&1 || true
-      else
-        echo "$(date -Is) local changes detected; leaving them untouched" | tee -a "$LOG"
-      fi
+    if [ "$LOCAL" != "$REMOTE" ] && git diff --quiet && git diff --cached --quiet; then
+      git reset --hard origin/main >>"$LOG" 2>&1 || true
     fi
   else
-    echo "$(date -Is) git fetch failed; retrying later" | tee -a "$LOG"
+    log "git fetch failed; retrying later"
   fi
 
-  if python -m py_compile test_runner.py >>"$LOG" 2>&1; then
-    python test_runner.py
-    code=$?
-    echo "$(date -Is) acceptance finished exit=$code" | tee -a "$LOG"
-
-    # Keep results local. This runner must never block on GitHub credentials.
-    # Source-code changes are still pulled automatically at the next cycle.
-    echo "$(date -Is) results saved to acceptance_test.json / acceptance_test.log" | tee -a "$LOG"
-
-    if [ "$code" -eq 0 ]; then
-      echo "$(date -Is) acceptance PASS" | tee -a "$LOG"
-      exit 0
-    else
-      echo "$(date -Is) acceptance FAIL; waiting for next code update/retry" | tee -a "$LOG"
-    fi
-  else
-    echo "$(date -Is) test_runner syntax check failed" | tee -a "$LOG"
+  if ! python -m py_compile test_runner.py >>"$LOG" 2>&1; then
+    log "test_runner syntax check failed"
+    sleep "$POLL_SECONDS"
+    continue
   fi
 
+  stop_runtime
+  log "bot stopped; acceptance test owns Telegram USER_SESSION exclusively"
+
+  python test_runner.py >>"$LOG" 2>&1
+  code=$?
+  log "acceptance finished exit=$code"
+
+  start_runtime
+
+  if [ "$code" -eq 0 ]; then
+    log "acceptance PASS; bot is running again"
+    exit 0
+  fi
+
+  log "acceptance FAIL; bot restored, retrying after ${POLL_SECONDS}s"
   sleep "$POLL_SECONDS"
 done
