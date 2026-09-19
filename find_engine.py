@@ -85,8 +85,8 @@ def _source_for_region(region):
     # human-facing local number, so normalize it here before the DB lookup too.
     lookup_episode = episode
     if anime == "Naruto Shippuden" and season in (16, 17):
-        max_local = 12
-        base = 348 if season == 16 else 360
+        max_local = 13 if season == 16 else 11
+        base = 348 if season == 16 else 361
         if 1 <= episode <= max_local:
             lookup_episode = base + episode
 
