@@ -23,7 +23,7 @@ class CoreContractTests(unittest.TestCase):
         def check():
             self.assertEqual(parse_time("01:20"), 80.0)
             self.assertEqual(parse_time("1:02:03"), 3723.0)
-            self.assertEqual(format_time(80), "01:20")
+            self.assertEqual(format_time(80), "01:20.000")
             self.assertEqual(format_progress(0, 100), "0%")
             self.assertEqual(format_progress(100, 100), "100%")
             self.assertEqual(format_progress(50, 100), "50%")
@@ -47,7 +47,7 @@ class CoreContractTests(unittest.TestCase):
         def check():
             message = SimpleNamespace(
                 id=30,
-                message="@Otaku_Provider_Bot S01 E026 480p",
+                message="Naruto S01 E026 480p",
                 document=SimpleNamespace(
                     mime_type="video/x-matroska",
                     file_name="@Otaku_Provider_Bot S01 E026 480p.mkv",
