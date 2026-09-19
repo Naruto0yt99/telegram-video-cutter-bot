@@ -10,7 +10,7 @@ from telegram_media import is_video_message, get_message_video_name
 from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
-PARSER_VERSION = 26
+PARSER_VERSION = 27
 
 
 _QUALITY_PATTERNS = [
@@ -109,6 +109,19 @@ def _episode_from_text(text: str):
         match = pattern.search(text)
         if match:
             return None, match.group("episode"), match, "season", False
+
+    # Provider uploads sometimes use only a bare episode number in the
+    # filename, e.g. "Death Note 34 1080p.mkv".
+    match = re.search(
+        r"(?<!\d)(?P<episode>\d{1,4})(?=\s*(?:\d{3,4}\s*p|4k|uhd|"
+        r"web[- .]?(?:dl|rip)|bluray|bdrip|hdr|x26[45]|hevc|avc|aac|"
+        r"10bit|8bit|dual\s*audio|multi\s*audio|hindi|english|japanese|"
+        r"sub(?:bed|s)?|dub(?:bed|s)?|\.mkv\b|\.mp4\b|\.avi\b|$))",
+        text,
+        re.I,
+    )
+    if match:
+        return None, match.group("episode"), match, "season", False
 
     match = None
     for candidate in _NUMBERED_EPISODE_PATTERN.finditer(text):
@@ -289,6 +302,8 @@ def parse_episode_metadata(
                 season = "17"
         if season is None and re.search(r"\b(?:season|s)\s*1\b", combined, re.I):
             season = "1"
+        if season is None and anime == "Death Note":
+            season = "1"
         if season is None:
             return None
 
@@ -304,6 +319,10 @@ def parse_episode_metadata(
                 episode = normalized
     else:
         season_value = content_type
+        # Attack on Titan has exactly eight OAD archive episodes.
+        if anime == "Attack on Titan" and content_type == "oad" and episode is not None:
+            if not 1 <= int(episode) <= 8:
+                return None
         # Movies/OVAs/OADs/specials are often uploaded with a title but
         # without an explicit ordinal (e.g. "Movie - The Lost Tower").
         # Keep the title so sync_source_library can assign a stable ordinal
