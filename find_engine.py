@@ -276,7 +276,7 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
         if not result or not result.get("match"):
             return False
         try:
-            return float(result.get("confidence", 0) or 0) >= 0.60
+            return float(result.get("confidence", 0) or 0) >= 0.80
         except (TypeError, ValueError):
             return False
 
@@ -600,16 +600,25 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
         logger.exception("Final Gemini QA failed; keeping matched result with scene-level verification.")
         qa = None
     if qa is None:
-        logger.warning("Final Gemini QA unavailable; keeping matched result with scene-level verification.")
-        qa_status = "⚠️ Final QA unavailable"
+        logger.error("Final Gemini QA unavailable; refusing to return an unverified final result.")
+        raise RuntimeError("Final Gemini QA unavailable; final video verification required.")
     else:
         qa_conf = float(qa.get("confidence", 0) or 0)
         qa_match = bool(qa.get("match"))
         qa_status = (
             f"✅ Final QA verified ({qa_conf:.0%})"
             if qa_match and qa_conf >= 0.80
-            else f"⚠️ Final QA flagged for review ({qa_conf:.0%})"
+            else f"⚠️ Final QA rejected ({qa_conf:.0%})"
         )
+        if not (
+            qa_match
+            and qa_conf >= 0.80
+            and float(qa.get("sequence_score", 0) or 0) >= 0.85
+            and float(qa.get("timing_score", 0) or 0) >= 0.75
+            and not (qa.get("missing_scenes") or qa.get("extra_scenes") or qa.get("mismatches"))
+        ):
+            logger.error("Final Gemini QA rejected result: %s", qa)
+            raise RuntimeError("Final Gemini QA rejected the assembled video; no unverified clip will be returned.")
         logger.info(
             "Final Gemini QA match=%s confidence=%.3f sequence=%.3f timing=%.3f mismatches=%s",
             qa_match, qa_conf,
