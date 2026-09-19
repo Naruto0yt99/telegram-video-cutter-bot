@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import re
 import uuid
 from pathlib import Path
@@ -216,12 +217,28 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
 
     # Start with the most likely windows. Only expand to the wider +/-5/10 min
     # probes when the fast pass does not produce a sufficiently confident match.
-    probe_duration = max(10.0, min(14.0, edit_length * 1.5))
-    probe_batches = (
-        (0, -90, 90),
-        (-240, 240, -480, 480),
-        (-900, 900, -1800, 1800),
-    )
+    search_profile = str(os.getenv("FIND_SEARCH_PROFILE", "fast")).strip().lower()
+    if search_profile == "precision":
+        probe_duration = max(14.0, min(20.0, edit_length * 2.0))
+        probe_batches = (
+            (0, -60, 60),
+            (-180, 180, -360, 360),
+            (-720, 720, -1440, 1440),
+        )
+    elif search_profile == "deep":
+        probe_duration = max(18.0, min(26.0, edit_length * 2.5))
+        probe_batches = (
+            (0, -60, 60),
+            (-180, 180, -360, 360),
+            (-720, 720, -1440, 1440, -2880, 2880),
+        )
+    else:
+        probe_duration = max(10.0, min(14.0, edit_length * 1.5))
+        probe_batches = (
+            (0, -90, 90),
+            (-240, 240, -480, 480),
+            (-900, 900, -1800, 1800),
+        )
     candidates = []
     result = None
 
