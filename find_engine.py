@@ -289,7 +289,12 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
         off = float(result.get("offset_in_candidate", 0) or 0)
         sp = max(0.25, min(float(result.get("speed", 1) or 1), 4.0))
         reported_duration = float(result.get("source_duration", 0) or 0)
-        source_duration = reported_duration if 0.25 <= reported_duration <= 120.0 else max(0.5, edit_length * sp)
+        # Prefer Gemini's measured original duration when it is sane.
+        source_duration = (
+            reported_duration
+            if 0.25 <= reported_duration <= 120.0
+            else max(0.5, edit_length * sp)
+        )
         start = max(0.0, selected["start"] + max(0.0, min(off, probe_duration - 0.5)))
         # Keep the matched probe locally. If the exact interval fits inside it,
         # the final clip can be cut from this already-downloaded candidate and
@@ -308,7 +313,7 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
             }
         return {
             "start": start,
-            "source_duration": max(0.5, edit_length * sp),
+            "source_duration": source_duration,
             "speed": sp,
             "confidence": conf,
             "candidate_path": preserved,
@@ -594,38 +599,54 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
         "🧠 Final Gemini QA",
         "Edited video aur final merged clip ko visual sequence/timing ke liye compare kar raha hoon...",
     )
-    try:
-        qa = await asyncio.to_thread(verify_final_output, input_video, merged, len(clips))
-    except Exception:
-        logger.exception("Final Gemini QA failed; keeping matched result with scene-level verification.")
-        qa = None
-    if qa is None:
-        logger.error("Final Gemini QA unavailable; refusing to return an unverified final result.")
-        raise RuntimeError("Final Gemini QA unavailable; final video verification required.")
-    else:
+    # Full-video Gemini QA is a hard gate. Retry once for transient API/model
+    # variance, but never return an unverified result.
+    qa = None
+    qa_error = None
+    for qa_attempt in range(1, 3):
+        try:
+            qa = await asyncio.to_thread(verify_final_output, input_video, merged, len(clips))
+        except Exception as exc:
+            qa_error = exc
+            logger.exception("Final Gemini QA attempt %s failed", qa_attempt)
+            qa = None
+        if qa is None:
+            continue
         qa_conf = float(qa.get("confidence", 0) or 0)
         qa_match = bool(qa.get("match"))
-        qa_status = (
-            f"✅ Final QA verified ({qa_conf:.0%})"
-            if qa_match and qa_conf >= 0.80
-            else f"⚠️ Final QA rejected ({qa_conf:.0%})"
-        )
-        if not (
+        strong_qa = (
             qa_match
             and qa_conf >= 0.80
             and float(qa.get("sequence_score", 0) or 0) >= 0.85
             and float(qa.get("timing_score", 0) or 0) >= 0.75
             and not (qa.get("missing_scenes") or qa.get("extra_scenes") or qa.get("mismatches"))
-        ):
-            logger.error("Final Gemini QA rejected result: %s", qa)
-            raise RuntimeError("Final Gemini QA rejected the assembled video; no unverified clip will be returned.")
+        )
         logger.info(
-            "Final Gemini QA match=%s confidence=%.3f sequence=%.3f timing=%.3f mismatches=%s",
-            qa_match, qa_conf,
+            "Final Gemini QA attempt=%s match=%s confidence=%.3f sequence=%.3f timing=%.3f mismatches=%s",
+            qa_attempt, qa_match, qa_conf,
             float(qa.get("sequence_score", 0) or 0),
             float(qa.get("timing_score", 0) or 0),
             qa.get("mismatches"),
         )
+        if strong_qa:
+            break
+        if qa_attempt == 1:
+            logger.warning("Final Gemini QA rejected attempt 1; retrying full QA once.")
+    if qa is None:
+        logger.error("Final Gemini QA unavailable after retries: %s", qa_error)
+        raise RuntimeError("Final Gemini QA unavailable; final video verification required.")
+    qa_conf = float(qa.get("confidence", 0) or 0)
+    qa_match = bool(qa.get("match"))
+    if not (
+        qa_match
+        and qa_conf >= 0.80
+        and float(qa.get("sequence_score", 0) or 0) >= 0.85
+        and float(qa.get("timing_score", 0) or 0) >= 0.75
+        and not (qa.get("missing_scenes") or qa.get("extra_scenes") or qa.get("mismatches"))
+    ):
+        logger.error("Final Gemini QA rejected result after retries: %s", qa)
+        raise RuntimeError("Final Gemini QA rejected the assembled video; no unverified clip will be returned.")
+    qa_status = f"✅ Final QA verified ({qa_conf:.0%})"
 
     report=[qa_status, "", "📋 SCENE DETAILS",""]
     for x in clips:
