@@ -468,7 +468,22 @@ async def sync_source_library(client):
     topic_cache = {}
     context_anime = None
     context_season = None
-    special_ordinals = {}
+    # Special/movie ordinals are persisted in the database so a bot restart
+    # cannot renumber title-based specials.
+    with get_connection() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS special_ordinal_map (
+                anime TEXT NOT NULL,
+                season TEXT NOT NULL,
+                title_key TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                PRIMARY KEY (anime, season, title_key),
+                UNIQUE (anime, season, ordinal)
+            )
+            """
+        )
+        conn.commit()
 
     entity = await client.get_entity(SOURCE_CHAT)
     logger.info(
@@ -566,10 +581,36 @@ async def sync_source_library(client):
                 anime_key = metadata["anime"]
                 season_key = metadata["season"]
                 title_key = re.sub(r"\s+", " ", special_title).casefold()
-                bucket = special_ordinals.setdefault((anime_key, season_key), {})
-                if title_key not in bucket:
-                    bucket[title_key] = len(bucket) + 1
-                episode_value = str(bucket[title_key])
+                with get_connection() as conn:
+                    existing = conn.execute(
+                        """
+                        SELECT ordinal
+                        FROM special_ordinal_map
+                        WHERE anime = ? AND season = ? AND title_key = ?
+                        """,
+                        (anime_key, season_key, title_key),
+                    ).fetchone()
+                    if existing:
+                        ordinal = int(existing[0])
+                    else:
+                        row = conn.execute(
+                            """
+                            SELECT COALESCE(MAX(ordinal), 0) + 1
+                            FROM special_ordinal_map
+                            WHERE anime = ? AND season = ?
+                            """,
+                            (anime_key, season_key),
+                        ).fetchone()
+                        ordinal = int(row[0])
+                        conn.execute(
+                            """
+                            INSERT INTO special_ordinal_map(anime, season, title_key, ordinal)
+                            VALUES (?, ?, ?, ?)
+                            """,
+                            (anime_key, season_key, title_key, ordinal),
+                        )
+                        conn.commit()
+                episode_value = str(ordinal)
 
             if episode_value is None:
                 skipped += 1
