@@ -223,9 +223,9 @@ def parse_episode_metadata(
     # Forum topic/context is authoritative; provider bot names must not become anime titles.
     anime = _canonical_from_candidates(
         context_anime,
+        topic_text,
         anime_from_caption,
         anime_from_filename,
-        topic_text,
         caption,
         filename,
     )
