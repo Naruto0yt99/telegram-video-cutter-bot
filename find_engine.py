@@ -591,9 +591,44 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
                         "⏳ Remaining scenes are still being searched...",
                     )
 
-    results = await asyncio.gather(*(worker(i, r) for i, r in enumerate(regions, 1)))
+    errors = []
+
+    async def worker_with_error_ledger(i, r):
+        try:
+            result = await worker(i, r)
+            if result is None:
+                errors.append({
+                    "scene": i,
+                    "anime": str(r.get("anime") or "?"),
+                    "season": r.get("season"),
+                    "episode": r.get("episode"),
+                    "reason": "No reliable source match after progressive search.",
+                })
+            return result
+        except Exception as exc:
+            logger.exception("Scene %s failed outside worker guard", i)
+            errors.append({
+                "scene": i,
+                "anime": str(r.get("anime") or "?"),
+                "season": r.get("season"),
+                "episode": r.get("episode"),
+                "reason": str(exc),
+            })
+            return None
+
+    results = await asyncio.gather(
+        *(worker_with_error_ledger(i, r) for i, r in enumerate(regions, 1))
+    )
     clips=sorted([x for x in results if x],key=lambda x:x["index"])
-    if not clips: raise RuntimeError("Koi scene reliably match nahi hua.")
+    if not clips:
+        error_lines = "\n".join(
+            f"Scene {e['scene']}: {e['reason']}" for e in errors[:12]
+        )
+        raise RuntimeError(
+            "Kisi bhi scene ka reliable match nahi mila.\n\n"
+            + (error_lines or "Unknown matching error.")
+        )
+
     await _show_find_progress(progress_message, 90, "🎬 Scene search complete", f"Matched {len(clips)}/{len(regions)} scenes\n🔧 Building the final merged video...")
     merged = unique_path(output_dir, "find_final.mp4")
 
