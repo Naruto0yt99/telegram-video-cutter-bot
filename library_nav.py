@@ -179,13 +179,14 @@ def _season_page(tree, anime, series):
     for season in sorted(tree.get(anime, {}).get(series, {}), key=_season_sort_key):
         rows.append([InlineKeyboardButton(f"📺 {_content_label(season)}", callback_data=f"ls:{_token(anime + "|" + series + "|" + season)}")])
     rows.append([InlineKeyboardButton("⬅️ Series", callback_data=f"lr:{_token(anime + "|" + series)}")])
-    title = series if anime == "Naruto" else anime
+    title = series if len(tree.get(anime, {})) > 1 else anime
     return f"🎬 <b>{escape(title)}</b>\\n\\nChoose Season / OVA / Movie:", _keyboard(rows)
 
 
 def _episode_page(tree, anime, series, season):
     episodes = tree.get(anime, {}).get(series, {}).get(season, {})
-    lines = [f"🎬 <b>{escape(series if anime == 'Naruto' else anime)}</b>", f"📺 <b>{escape(_content_label(season))}</b>", ""]
+    title = series if len(tree.get(anime, {})) > 1 else anime
+    lines = [f"🎬 <b>{escape(title)}</b>", f"📺 <b>{escape(_content_label(season))}</b>", ""]
     rows = []
 
     for episode in sorted(episodes, key=lambda x: int(x) if str(x).isdigit() else str(x)):
@@ -225,7 +226,7 @@ async def library_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if anime not in tree:
                 await query.answer("Anime library entry nahi mila.", show_alert=True)
                 return
-            if anime == "Naruto":
+            if len(tree[anime]) > 1:
                 text, markup = _series_page(tree, anime)
             else:
                 series = next(iter(tree[anime]))
