@@ -14,6 +14,7 @@ from ffmpeg_utils import run_command
 from gemini_analyzer import analyze_video, verify_source_candidates, verify_final_output
 from telegram_remote import open_telegram_range_server
 from utils import safe_filename, unique_path
+from library_nav import canonical_anime
 
 logger = logging.getLogger("simple-find")
 
@@ -72,7 +73,8 @@ def _number(value):
 
 
 def _source_for_region(region):
-    anime = str(region.get("anime") or "").strip()
+    raw_anime = str(region.get("anime") or "").strip()
+    anime = canonical_anime(raw_anime) or raw_anime
     season = _number(region.get("season"))
     episode = _number(region.get("episode"))
     if not anime or season is None or episode is None:
