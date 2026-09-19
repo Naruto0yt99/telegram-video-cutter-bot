@@ -108,13 +108,22 @@ async def main():
     # The normal bot already uses the same SQLite-backed USER_SESSION.
     # Connecting a second Telethon client to that exact file causes
     # "database is locked". Use a private copy for the acceptance process.
-    session_src = Path(TELEGRAM_SESSION)
+    session_base = Path(str(TELEGRAM_SESSION))
+    session_candidates = [
+        session_base,
+        Path(str(session_base) + ".session"),
+    ]
+    session_src = next((p for p in session_candidates if p.exists()), None)
+    if session_src is None:
+        raise RuntimeError(f"Telegram USER_SESSION file not found: {session_base}")
+
     session_copy_dir = Path(TEMP_DIR) / "acceptance_test" / "session"
     session_copy_dir.mkdir(parents=True, exist_ok=True)
     session_copy = session_copy_dir / "acceptance_user_session"
+    # Copy the actual SQLite session to the exact filename Telethon will open.
     for suffix in ("", "-journal", "-wal", "-shm"):
         src = Path(str(session_src) + suffix)
-        dst = Path(str(session_copy) + suffix)
+        dst = Path(str(session_copy) + ".session" + suffix)
         if src.exists():
             shutil.copy2(src, dst)
 
