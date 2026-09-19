@@ -10,7 +10,7 @@ from telegram_media import is_video_message, get_message_video_name
 from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
-PARSER_VERSION = 17
+PARSER_VERSION = 18
 
 
 _QUALITY_PATTERNS = [
@@ -53,6 +53,11 @@ _CONTENT_MARKERS = re.compile(
 )
 
 _SEPARATORS = re.compile(r"[|•·]+")
+_BATCH_LINK_PATTERN = re.compile(r"https?://t\.me/[A-Za-z0-9_+/-]+", re.I)
+_BATCH_MARKER_PATTERN = re.compile(
+    r"\b(?:batch|saved|save|download|links?|episodes?|season\s*\d+\s*:\s*\d+\s*/\s*\d+)\b",
+    re.I,
+)
 
 
 def _clean_caption(text: str) -> str:
@@ -129,6 +134,26 @@ def _anime_from_text(text: str, marker):
     prefix = re.sub(r"\s{2,}", " ", prefix).strip(" -_.")
     prefix = prefix.strip(" -_.[](){}")
     return prefix if len(prefix) >= 2 else None
+
+
+def _is_batch_or_link_message(text: str) -> bool:
+    links = _BATCH_LINK_PATTERN.findall(text or "")
+    if len(links) >= 2:
+        return True
+    return bool(_BATCH_MARKER_PATTERN.search(text or "")) and len(links) >= 1
+
+
+def _topic_anime_fallback(topic_text: str):
+    text = _clean_caption(topic_text)
+    if not text:
+        return None
+    text = re.sub(r"\b(?:Season|S)\s*[-._ ]?\d{1,3}\b", " ", text, flags=re.I)
+    text = re.sub(r"\b(?:OVA|OAD|Specials?|Movies?)\b", " ", text, flags=re.I)
+    text = re.sub(r"\s+", " ", text).strip(" -_.:|")
+    if not text:
+        return None
+    known = canonical_anime(text)
+    return known or (text if len(text) >= 2 and len(text) <= 120 else None)
 
 
 def _canonical_from_candidates(*values):
@@ -394,23 +419,45 @@ async def sync_source_library(client):
 
         topic_title = _topic_title_from_message(message)
         if topic_title:
-            topic_anime = canonical_anime(topic_title)
+            topic_anime = _topic_anime_fallback(topic_title)
             if topic_anime:
                 context_anime = topic_anime
                 season_match = re.search(r"\b(?:Season|S)\s*[-._ ]?(\d{1,3})\b", topic_title, re.I)
-                if season_match:
-                    context_season = str(int(season_match.group(1)))
+                context_season = str(int(season_match.group(1))) if season_match else None
 
         if not message or not is_video_message(message):
             skipped += 1
             continue
 
         topic_text = await _topic_text_for_message(client, entity, message, topic_cache)
+
+        raw_text = _clean_caption(
+            f"{getattr(message, 'message', '') or ''} {get_message_video_name(message)}"
+        )
+        if _is_batch_or_link_message(raw_text):
+            skipped += 1
+            if message_id <= 100:
+                logger.info(
+                    "SOURCE DEBUG id=%s skipped=batch/link post caption=%r",
+                    message_id,
+                    _clean_caption(getattr(message, "message", "") or ""),
+                )
+            continue
+
+        local_context_anime = context_anime
+        local_context_season = context_season
+        topic_anime = _topic_anime_fallback(topic_text)
+        topic_match = re.search(r"\b(?:Season|S)\s*[-._ ]?(\d{1,3})\b", topic_text, re.I)
+        if topic_anime:
+            local_context_anime = topic_anime
+        if topic_match:
+            local_context_season = str(int(topic_match.group(1)))
+
         metadata = parse_episode_metadata(
             message,
             topic_text,
-            context_anime=context_anime,
-            context_season=context_season,
+            context_anime=local_context_anime,
+            context_season=local_context_season,
         )
         link = _message_link(message)
 
@@ -432,8 +479,8 @@ async def sync_source_library(client):
                 _clean_caption(get_message_video_name(message)),
                 _clean_caption(getattr(message, "message", "") or ""),
                 topic_text,
-                context_anime,
-                context_season,
+                local_context_anime,
+                local_context_season,
                 metadata,
             )
 
