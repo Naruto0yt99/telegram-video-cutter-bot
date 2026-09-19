@@ -10,7 +10,7 @@ from telegram_media import is_video_message, get_message_video_name
 from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
-PARSER_VERSION = 13
+PARSER_VERSION = 14
 
 
 _QUALITY_PATTERNS = [
@@ -303,7 +303,11 @@ def _message_link(message: Message):
 
 async def _topic_text_for_message(client, entity, message, cache):
     reply = getattr(message, "reply_to", None)
-    top_id = getattr(reply, "reply_to_top_id", None) if reply else None
+    top_id = None
+    if reply:
+        top_id = getattr(reply, "reply_to_top_id", None)
+        if not top_id:
+            top_id = getattr(reply, "reply_to_msg_id", None)
     if not top_id:
         return ""
     if top_id in cache:
@@ -311,11 +315,21 @@ async def _topic_text_for_message(client, entity, message, cache):
     try:
         root = await client.get_messages(entity, ids=top_id)
         text = _clean_caption(getattr(root, "message", "") or "") if root else ""
+        if root:
+            action = getattr(root, "action", None)
+            title = getattr(action, "title", None)
+            if title and len(_clean_caption(title)) >= 2:
+                text = _clean_caption(title) if not text else f"{_clean_caption(title)} {text}"
     except Exception:
         logger.debug("Could not read topic root id=%s", top_id, exc_info=True)
         text = ""
     cache[top_id] = text
     return text
+
+def _topic_title_from_message(message):
+    action = getattr(message, "action", None)
+    title = getattr(action, "title", None)
+    return _clean_caption(title) if title else ""
 
 
 def _reset_index_for_parser_upgrade(last_version: int):
@@ -376,6 +390,15 @@ async def sync_source_library(client):
     async for message in client.iter_messages(**iter_kwargs):
         message_id = getattr(message, "id", 0) or 0
         newest_seen = max(newest_seen, message_id)
+
+        topic_title = _topic_title_from_message(message)
+        if topic_title:
+            topic_anime = canonical_anime(topic_title)
+            if topic_anime:
+                context_anime = topic_anime
+                season_match = re.search(r"\\b(?:Season|S)\\s*[-._ ]?(\\d{1,3})\\b", topic_title, re.I)
+                if season_match:
+                    context_season = str(int(season_match.group(1)))
 
         if not message or not is_video_message(message):
             skipped += 1
