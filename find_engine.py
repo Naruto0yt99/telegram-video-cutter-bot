@@ -345,7 +345,7 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
                 result.get("confidence") if result else None,
                 result.get("candidate_index") if result else None,
             )
-            if result and result.get("match"):
+            if usable_result(result):
                 match = build_match(result, candidates)
                 if match is not None:
                     return match
@@ -366,7 +366,7 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
                 result.get("confidence") if result else None,
                 result.get("candidate_index") if result else None,
             )
-            if result and result.get("match"):
+            if usable_result(result):
                 match = build_match(result, recovery)
                 if match is not None:
                     return match
