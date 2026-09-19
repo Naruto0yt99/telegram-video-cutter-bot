@@ -22,18 +22,19 @@ if ! mkdir "$SUPERVISOR_LOCK" 2>/dev/null; then
     log "Supervisor already running (pid=$EXISTING_PID); exiting duplicate supervisor."
     exit 0
   fi
-  # Lock is stale: no live supervisor owns the recorded PID.
+
   rmdir "$SUPERVISOR_LOCK" 2>/dev/null || {
     log "Supervisor lock exists but stale-lock cleanup failed; exiting."
     exit 0
   }
+
   if ! mkdir "$SUPERVISOR_LOCK" 2>/dev/null; then
     log "Supervisor lock was claimed by another process; exiting."
     exit 0
   fi
 fi
 
-echo $ > "$PID_FILE"
+printf '%s\n' "$$" > "$PID_FILE"
 
 cleanup() {
   rm -f "$PID_FILE"
@@ -41,7 +42,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-log "Supervisor starting."
+log "Supervisor starting (pid=$$)."
 
 if git fetch origin main >> "$MAIN_LOG" 2>&1; then
   if git diff --quiet && git diff --cached --quiet; then
@@ -64,12 +65,8 @@ if command -v python >/dev/null 2>&1 && [ -f requirements.txt ]; then
 
   if [ "$NEW_HASH" != "$OLD_HASH" ]; then
     log "Installing updated Python requirements."
-
     PIP_OK=0
 
-    # Termux ARM builds of NumPy/Pillow are provided by Termux itself.
-    # Installing them through pip can force a very slow source build on
-    # Android, especially after a fresh Termux reset.
     if command -v pkg >/dev/null 2>&1; then
       log "Termux detected; installing native python-numpy/python-pillow packages."
       if pkg install -y python-numpy python-pillow >> "$MAIN_LOG" 2>&1; then
