@@ -257,7 +257,7 @@ def parse_episode_metadata(
 
     if content_type == "season" and season is None and topic_season:
         season = topic_season
-    if content_type == "season" and season is None and context_season:
+    if content_type == "season" and season is None and context_season and str(context_season).isdigit():
         season = context_season
 
     anime_from_caption = _anime_from_text(caption, marker) if marker_source == caption else _anime_from_text(marker_source, marker)
@@ -533,7 +533,10 @@ async def sync_source_library(client):
 
         if metadata:
             context_anime = metadata["anime"]
-            context_season = metadata["season"]
+            # Specials (movie/OVA/OAD) are not numeric seasons and must not
+            # leak into the numeric season context for following episodes.
+            if str(metadata["season"]).isdigit():
+                context_season = metadata["season"]
         elif topic_text:
             topic_anime = canonical_anime(topic_text)
             if topic_anime:
