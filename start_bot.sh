@@ -16,11 +16,24 @@ log() {
 }
 
 if ! mkdir "$SUPERVISOR_LOCK" 2>/dev/null; then
-  log "Supervisor already running; exiting duplicate supervisor."
-  exit 0
+  EXISTING_PID=""
+  [ -f "$PID_FILE" ] && EXISTING_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
+  if [ -n "$EXISTING_PID" ] && kill -0 "$EXISTING_PID" 2>/dev/null; then
+    log "Supervisor already running (pid=$EXISTING_PID); exiting duplicate supervisor."
+    exit 0
+  fi
+  # Lock is stale: no live supervisor owns the recorded PID.
+  rmdir "$SUPERVISOR_LOCK" 2>/dev/null || {
+    log "Supervisor lock exists but stale-lock cleanup failed; exiting."
+    exit 0
+  }
+  if ! mkdir "$SUPERVISOR_LOCK" 2>/dev/null; then
+    log "Supervisor lock was claimed by another process; exiting."
+    exit 0
+  fi
 fi
 
-echo $$ > "$PID_FILE"
+echo $ > "$PID_FILE"
 
 cleanup() {
   rm -f "$PID_FILE"
