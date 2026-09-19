@@ -10,7 +10,7 @@ from telegram_media import is_video_message, get_message_video_name
 from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
-PARSER_VERSION = 22
+PARSER_VERSION = 23
 
 
 _QUALITY_PATTERNS = [
@@ -157,6 +157,27 @@ def _is_non_anime_topic(topic_text: str) -> bool:
     return text in blocked
 
 
+def _is_obvious_non_anime_title(text: str) -> bool:
+    value = _clean_caption(text).casefold()
+    if not value:
+        return True
+    normalized = re.sub(r"[^a-z0-9]+", " ", value).strip()
+    if normalized in {
+        "clip", "clips", "twixter", "normal video", "normal videos",
+        "video", "videos", "ai", "ai video", "ai videos", "ai generated",
+        "edit", "edits", "amv", "short", "shorts", "meme", "memes",
+        "random", "other", "others", "misc", "miscellaneous",
+    }:
+        return True
+    if re.fullmatch(r"video\s*\d{4}[-_]\d{2}[-_]\d{2}.*", value):
+        return True
+    if re.fullmatch(r"🎬?\s*clip\s*\d+\s*/.*", value, re.I):
+        return True
+    if re.match(r"^🎬?\s*clip\b", value, re.I):
+        return True
+    return False
+
+
 def _topic_anime_fallback(topic_text: str):
     text = _clean_caption(topic_text)
     if not text:
@@ -247,7 +268,7 @@ def parse_episode_metadata(
         caption,
         filename,
     )
-    if not anime:
+    if not anime or _is_obvious_non_anime_title(anime):
         return None
 
     quality = _detect_quality(combined) or "auto"
