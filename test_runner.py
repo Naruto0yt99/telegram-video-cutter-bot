@@ -125,7 +125,7 @@ async def main():
         session_path = session_path[:-8]
 
 
-    client = TelegramClient(str(session_copy), TG_API_ID, TG_API_HASH)
+    client = TelegramClient(session_path, TG_API_ID, TG_API_HASH)
     await client.start()
 
     try:
