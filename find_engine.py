@@ -291,12 +291,19 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
         off = float(result.get("offset_in_candidate", 0) or 0)
         sp = max(0.25, min(float(result.get("speed", 1) or 1), 4.0))
         reported_duration = float(result.get("source_duration", 0) or 0)
-        # Prefer Gemini's measured original duration when it is sane.
-        source_duration = (
-            reported_duration
-            if 0.25 <= reported_duration <= 120.0
-            else max(0.5, edit_length * sp)
-        )
+        # VIDEO 1 sent to candidate verification is intentionally capped at 6s,
+        # so Gemini cannot reliably know the duration of the WHOLE edit region
+        # from that comparison alone. The edit region boundary + verified speed
+        # are the authoritative duration for the final cut.
+        source_duration = max(0.5, edit_length * sp)
+        if 0.25 <= reported_duration <= 120.0:
+            # Keep Gemini's measurement only when it is close enough to the
+            # duration implied by the actual edit region; otherwise it would
+            # silently truncate or extend a correctly located scene.
+            expected = max(0.5, edit_length * sp)
+            tolerance = max(0.75, expected * 0.20)
+            if abs(reported_duration - expected) <= tolerance:
+                source_duration = reported_duration
         start = max(0.0, selected["start"] + max(0.0, min(off, probe_duration - 0.5)))
         # Keep the matched probe locally. If the exact interval fits inside it,
         # the final clip can be cut from this already-downloaded candidate and
