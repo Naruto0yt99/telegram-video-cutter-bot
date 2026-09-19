@@ -80,8 +80,18 @@ def _source_for_region(region):
     if not anime or season is None or episode is None:
         return None, anime, season, episode, None
 
+    # The source parser normalizes Naruto Shippuden S16/S17 local episode
+    # numbers to the channel's global episode IDs. Gemini normally reports the
+    # human-facing local number, so normalize it here before the DB lookup too.
+    lookup_episode = episode
+    if anime == "Naruto Shippuden" and season in (16, 17):
+        max_local = 12
+        base = 348 if season == 16 else 360
+        if 1 <= episode <= max_local:
+            lookup_episode = base + episode
+
     # First use the exact season/episode Gemini returned.
-    sources = get_all_sources_for_episode(anime, season, episode)
+    sources = get_all_sources_for_episode(anime, season, lookup_episode)
     resolved_season = season
 
     # If the exact season is not indexed, a single indexed season is still
@@ -89,7 +99,7 @@ def _source_for_region(region):
     # actual scene. This is especially important for libraries whose uploader
     # labels seasons differently from Gemini's canonical numbering.
     if not sources:
-        by_season = get_all_sources_for_episode_any_season(anime, episode)
+        by_season = get_all_sources_for_episode_any_season(anime, lookup_episode)
         if len(by_season) == 1:
             resolved_season = next(iter(by_season))
             sources = by_season[resolved_season]
