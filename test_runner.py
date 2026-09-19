@@ -4,6 +4,7 @@ import logging
 import os
 import shutil
 import time
+import tempfile
 from pathlib import Path
 
 from telethon import TelegramClient
@@ -104,7 +105,20 @@ async def main():
     log.info("ACCEPTANCE TEST START")
     log.info("Tests=%s source=%s", len(TESTS), SOURCE_CHAT)
 
-    client = TelegramClient(TELEGRAM_SESSION, TG_API_ID, TG_API_HASH)
+    # The normal bot already uses the same SQLite-backed USER_SESSION.
+    # Connecting a second Telethon client to that exact file causes
+    # "database is locked". Use a private copy for the acceptance process.
+    session_src = Path(TELEGRAM_SESSION)
+    session_copy_dir = Path(TEMP_DIR) / "acceptance_test" / "session"
+    session_copy_dir.mkdir(parents=True, exist_ok=True)
+    session_copy = session_copy_dir / "acceptance_user_session"
+    for suffix in ("", "-journal", "-wal", "-shm"):
+        src = Path(str(session_src) + suffix)
+        dst = Path(str(session_copy) + suffix)
+        if src.exists():
+            shutil.copy2(src, dst)
+
+    client = TelegramClient(str(session_copy), TG_API_ID, TG_API_HASH)
     await client.start()
 
     try:
