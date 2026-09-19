@@ -31,6 +31,8 @@ def main():
     application.add_handler(CommandHandler("find", legacy_bot.find_command))
     application.add_handler(CommandHandler("clip", source_clip_command))
     application.add_handler(CommandHandler("clips", source_clip_command))
+    application.add_handler(CommandHandler("episode", source_clip_command))
+    application.add_handler(CommandHandler("ep", source_clip_command))
     application.add_handler(CommandHandler("split", legacy_bot.split_command))
     application.add_handler(CommandHandler("next", legacy_bot.next_command))
 
