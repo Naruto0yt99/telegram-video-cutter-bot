@@ -207,7 +207,7 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
 
     edit_start = float(region["start_time"])
     edit_length = max(0.8, float(region["end_time"]) - edit_start)
-    sample_len = min(8.0, edit_length)
+    sample_len = min(6.0, edit_length)
     # Every scene runs concurrently, so filenames must be unique even when
     # two scenes start at the same edit timestamp or probe the same source time.
     scene_token = f"{int(edit_start * 1000)}_{uuid.uuid4().hex[:8]}"
@@ -216,10 +216,10 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
 
     # Start with the most likely windows. Only expand to the wider +/-5/10 min
     # probes when the fast pass does not produce a sufficiently confident match.
-    probe_duration = max(12.0, min(16.0, edit_length * 2.0))
+    probe_duration = max(10.0, min(14.0, edit_length * 1.5))
     probe_batches = (
-        (0, -120, 120),
-        (-300, 300, -600, 600),
+        (0, -90, 90),
+        (-240, 240, -480, 480),
     )
     candidates = []
     result = None
@@ -262,6 +262,39 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
         except (TypeError, ValueError):
             return False
 
+    def build_match(result, pool):
+        candidate_index = int(result.get("candidate_index", 0) or 0)
+        selected = pool[candidate_index - 1] if 1 <= candidate_index <= len(pool) else None
+        if selected is None:
+            return None
+        conf = float(result.get("confidence", 0) or 0)
+        off = float(result.get("offset_in_candidate", 0) or 0)
+        sp = max(0.25, min(float(result.get("speed", 1) or 1), 4.0))
+        start = max(0.0, selected["start"] + max(0.0, min(off, probe_duration - 0.5)))
+        # Keep the matched probe locally. If the exact interval fits inside it,
+        # the final clip can be cut from this already-downloaded candidate and
+        # we avoid a second Telegram range fetch for the same scene.
+        preserved = unique_path(output_dir, f"verified_candidate_{scene_token}.mp4")
+        try:
+            selected["path"].replace(preserved)
+        except OSError:
+            return {
+                "start": start,
+                "source_duration": max(0.5, edit_length * sp),
+                "speed": sp,
+                "confidence": conf,
+                "candidate_path": None,
+                "candidate_start": selected["start"],
+            }
+        return {
+            "start": start,
+            "source_duration": max(0.5, edit_length * sp),
+            "speed": sp,
+            "confidence": conf,
+            "candidate_path": preserved,
+            "candidate_start": selected["start"],
+        }
+
     try:
         # Fast pass: 3 nearby candidates. This avoids uploading/processing all
         # seven windows for the common case where Gemini's timestamp hint is close.
@@ -280,33 +313,22 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
                 result.get("candidate_index") if result else None,
             )
             if usable_result(result):
-                candidate_index = int(result.get("candidate_index", 0) or 0)
-                selected = candidates[candidate_index - 1] if 1 <= candidate_index <= len(candidates) else None
-                if selected is not None:
-                    off = float(result.get("offset_in_candidate", 0) or 0)
-                    sp = max(0.25, min(float(result.get("speed", 1) or 1), 4.0))
-                    return {
-                        "start": max(0.0, selected["start"] + max(0.0, min(off, probe_duration - 0.5))),
-                        # Gemini can occasionally return a wildly wrong duration.
-                        # The edited scene length and speed are sufficient to derive
-                        # the required original interval, so keep those authoritative.
-                        "source_duration": max(0.5, edit_length * sp),
-                        "speed": sp,
-                        "confidence": float(result.get("confidence", 0) or 0),
-                    }
+                match = build_match(result, candidates)
+                if match is not None:
+                    return match
 
-        # Wide pass: if Gemini saw a possible match but was not confident,
-        # retry with all seven windows so the nearby candidate is not discarded.
-        # If there was no match at all, use only the four wider offsets.
-        had_low_confidence_match = bool(
-            result and result.get("match")
-        )
-        for candidate in candidates:
-            candidate["path"].unlink(missing_ok=True)
+        # Wide pass. If the fast pass produced a low-confidence match, KEEP
+        # those three candidates and add only the four wider windows. The old
+        # code re-downloaded the same three windows, wasting Telegram + Gemini
+        # time before the second verification call.
+        had_low_confidence_match = bool(result and result.get("match"))
         if had_low_confidence_match:
-            candidates = await run_batch(probe_batches[0] + probe_batches[1], 0)
+            wide_candidates = await run_batch(probe_batches[1], len(candidates))
+            candidates = candidates + wide_candidates
         else:
-            candidates = await run_batch(probe_batches[1], 3)
+            for candidate in candidates:
+                candidate["path"].unlink(missing_ok=True)
+            candidates = await run_batch(probe_batches[1], 0)
         if candidates:
             result = await verify_source_candidates(
                 edit_sample,
@@ -321,18 +343,9 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
                 result.get("candidate_index") if result else None,
             )
             if result and result.get("match"):
-                candidate_index = int(result.get("candidate_index", 0) or 0)
-                selected = candidates[candidate_index - 1] if 1 <= candidate_index <= len(candidates) else None
-                if selected is not None:
-                    conf = float(result.get("confidence", 0) or 0)
-                    off = float(result.get("offset_in_candidate", 0) or 0)
-                    sp = max(0.25, min(float(result.get("speed", 1) or 1), 4.0))
-                    return {
-                        "start": max(0.0, selected["start"] + max(0.0, min(off, probe_duration - 0.5))),
-                        "source_duration": max(0.5, edit_length * sp),
-                        "speed": sp,
-                        "confidence": conf,
-                    }
+                match = build_match(result, candidates)
+                if match is not None:
+                    return match
         return None
     finally:
         edit_sample.unlink(missing_ok=True)
@@ -349,7 +362,48 @@ async def _process_fast_scene(input_video, telethon_client, region, index, total
     start=match["start"]; source_duration=match["source_duration"]; speed=match["speed"]
     end=start+source_duration
     output=unique_path(output_dir,safe_filename(f"find_{index:02d}_{anime}_S{season}E{episode}_{int(start)}")+".mp4")
-    await _extract_remote_clip(telethon_client,source,start,end,output,speed=speed)
+    candidate_path = match.get("candidate_path")
+    candidate_start = float(match.get("candidate_start", 0) or 0)
+    used_local_candidate = False
+    if candidate_path and Path(candidate_path).exists():
+        relative = max(0.0, start - candidate_start)
+        # Only reuse the candidate when the entire required source interval is
+        # inside it. Otherwise fetch the authoritative interval remotely.
+        if relative + source_duration <= 14.0 - 0.05:
+            try:
+                common = [
+                    FFMPEG_BIN, "-hide_banner", "-loglevel", "warning", "-y",
+                    "-ss", str(relative), "-i", str(candidate_path),
+                    "-t", str(source_duration),
+                    "-map", "0:v:0?", "-map", "0:a:0?",
+                ]
+                if abs(speed - 1.0) < 0.03:
+                    await run_command(*common, "-c:v", "copy", "-c:a", "copy",
+                                      "-avoid_negative_ts", "make_zero",
+                                      "-movflags", "+faststart", str(output))
+                else:
+                    atempo = speed
+                    audio_filters = []
+                    while atempo > 2.0:
+                        audio_filters.append("atempo=2.0"); atempo /= 2.0
+                    while atempo < 0.5:
+                        audio_filters.append("atempo=0.5"); atempo /= 0.5
+                    audio_filters.append(f"atempo={atempo:.6f}")
+                    await run_command(
+                        *common, "-vf", f"setpts=PTS/{speed:.8f}",
+                        "-af", ",".join(audio_filters),
+                        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                        "-c:a", "aac", "-b:a", "192k",
+                        "-avoid_negative_ts", "make_zero",
+                        "-movflags", "+faststart", str(output),
+                    )
+                used_local_candidate = output.exists() and output.stat().st_size > 0
+            except Exception:
+                logger.warning("Local verified candidate failed scene=%s; falling back to remote extraction", index)
+    if not used_local_candidate:
+        await _extract_remote_clip(telethon_client,source,start,end,output,speed=speed)
+    if candidate_path:
+        Path(candidate_path).unlink(missing_ok=True)
     return {"path":output,"index":index,"anime":anime,"season":season,"episode":episode,"start":start,"end":end,"edit_start":edit_start,"edit_end":edit_end,"edit_duration":edit_length,"speed":speed,"quality":quality,"confidence":match["confidence"]}
 
 async def find_and_build(input_video, user_id, telethon_client, progress_message=None):
@@ -362,7 +416,7 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
     regions=await analyze_video(input_video)
     if not regions: raise RuntimeError("Gemini ko koi usable anime scene nahi mila.")
     output_dir=Path(TEMP_DIR)/str(user_id)/"find_clips"; output_dir.mkdir(parents=True,exist_ok=True)
-    semaphore=asyncio.Semaphore(3)
+    semaphore=asyncio.Semaphore(4)
     completed = 0
     progress_lock = asyncio.Lock()
     total_regions = len(regions)
