@@ -57,8 +57,8 @@ while true; do
     LOCAL="$(git rev-parse HEAD)"
     REMOTE="$(git rev-parse origin/main)"
     if [ "$LOCAL" != "$REMOTE" ]; then
-      if git checkout origin/main -- gemini_analyzer.py source_sync.py test_runner.py find_engine.py >>"$LOG" 2>&1; then
-        log "synced acceptance code from origin/main (local runtime files preserved)"
+      if git checkout origin/main -- bot.py config.py gemini_analyzer.py source_sync.py test_runner.py find_engine.py >>"$LOG" 2>&1; then
+        log "synced runtime + acceptance code from origin/main (local .env/data preserved)"
       else
         log "acceptance code sync failed; retrying later"
       fi
