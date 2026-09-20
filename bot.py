@@ -455,52 +455,19 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with job_lock:
             video_path = await download_video_from_url(url, user_id)
             await safe_edit_text(status, "🎯 FIND — 10%\n\n✅ Edited video ready\n🧠 Gemini visual fingerprint + scene detection...")
-            # Do not send a merely plausible clip. Retry progressively deeper searches
-            # until every detected scene is matched and Gemini's final visual QA is strong.
-            result = None
-            attempts = []
-            for profile in ("fast", "precision", "deep"):
-                os.environ["FIND_SEARCH_PROFILE"] = profile
-                await safe_edit_text(
-                    status,
-                    f"🎯 FIND — {15 if profile == 'fast' else 20 if profile == 'precision' else 25}%\\n\\n"
-                    f"🔎 {profile.upper()} visual search + Gemini verification..."
+            # One FIND build already performs progressive per-scene search.
+            # Re-running the entire 11-scene job in fast/precision/deep multiplied
+            # Telegram range reads + Gemini uploads and caused multi-hour runs.
+            os.environ["FIND_SEARCH_PROFILE"] = "fast"
+            try:
+                result = await find_and_build(
+                    input_video=video_path,
+                    user_id=user_id,
+                    telethon_client=telethon_client,
+                    progress_message=status,
                 )
-                try:
-                    candidate_result = await find_and_build(
-                        input_video=video_path,
-                        user_id=user_id,
-                        telethon_client=telethon_client,
-                        progress_message=status,
-                    )
-                    qa = candidate_result.get("qa") or {}
-                    matched = int(candidate_result.get("matched", len(candidate_result.get("clips", []))) or 0)
-                    total_candidate = int(candidate_result.get("total", 0) or 0)
-                    qa_strong = (
-                        bool(qa.get("match"))
-                        and float(qa.get("confidence", 0) or 0) >= 0.80
-                        and float(qa.get("sequence_score", 0) or 0) >= 0.85
-                        and float(qa.get("timing_score", 0) or 0) >= 0.75
-                        and not (qa.get("missing_scenes") or qa.get("extra_scenes") or qa.get("mismatches"))
-                    )
-                    attempts.append((profile, matched, total_candidate, qa_strong))
-                    result = candidate_result
-                    if matched == total_candidate and total_candidate > 0 and qa_strong:
-                        break
-                    await safe_edit_text(
-                        status,
-                        f"🎯 FIND — retry\\n\\n⚠️ {profile.upper()} exact QA pass nahi hua.\\n🔁 Next deeper search start ho raha hai..."
-                    )
-                except Exception as attempt_exc:
-                    attempts.append((profile, 0, 0, False))
-                    logger.exception("FIND profile=%s failed", profile)
-                    await safe_edit_text(
-                        status,
-                        f"🎯 FIND — retry\\n\\n⚠️ {profile.upper()} failed.\\n🔁 Next deeper search start ho raha hai..."
-                    )
-            os.environ.pop("FIND_SEARCH_PROFILE", None)
-            if result is None:
-                raise RuntimeError("Kisi FIND profile ne result nahi diya.")
+            finally:
+                os.environ.pop("FIND_SEARCH_PROFILE", None)
             clips = result.get("clips", [])
             total = int(result.get("total", len(clips)))
             qa = result.get("qa") or {}
