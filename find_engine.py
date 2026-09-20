@@ -48,14 +48,20 @@ async def _show_find_progress(message, percent, title, detail=""):
         now = asyncio.get_running_loop().time()
         previous = _progress_state.get(key)
         if previous:
-            previous_time, previous_text = previous
+            previous_time, previous_text, previous_percent = previous
+            # Never let concurrent scene workers move progress backwards.
+            # Candidate details inherit the highest completed-scene percentage.
+            percent = max(int(percent), int(previous_percent))
             if text == previous_text:
                 return
             if now - previous_time < 0.75 and int(percent) < 90:
                 return
         try:
-            await message.edit_text(text)
-            _progress_state[key] = (now, text)
+            await message.edit_text(
+                f"🎯 FIND — {percent}% [{_progress_bar(percent)}]\n\n"
+                + text.split("\n\n", 1)[1]
+            )
+            _progress_state[key] = (now, text, int(percent))
         except Exception:
             pass
 
@@ -257,9 +263,9 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
     else:
         probe_duration = max(10.0, min(14.0, edit_length * 1.5))
         probe_batches = (
-            (0, -90, 90),
-            (-240, 240, -480, 480),
-            (-900, 900, -1800, 1800),
+            (0, -60, 60),
+            (-180, 180, -360, 360),
+            (-720, 720),
         )
     candidates = []
     result = None
@@ -737,7 +743,7 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
     # recorded and the job continues instead of getting stuck.
     qa = None
     qa_error = None
-    for qa_attempt in range(1, 3):
+    for qa_attempt in range(1, 2):
         try:
             qa = await asyncio.to_thread(verify_final_output, input_video, merged, len(clips))
         except Exception as exc:
@@ -756,7 +762,7 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
             )
             break
         if qa_attempt == 1:
-            logger.warning("Final Gemini QA unavailable; retrying once, then continuing.")
+            logger.warning("Final Gemini QA unavailable; continuing without a second full-video QA pass.")
 
     if qa is None:
         qa_status = "⚠️ Final QA skipped after retry"
