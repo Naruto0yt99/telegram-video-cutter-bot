@@ -154,9 +154,13 @@ async def _ensure_bot_mtproto_client():
 
 async def send_file(update: Update, path: Path, caption: str):
     size = path.stat().st_size
+    # Use the authenticated USER_SESSION for large result delivery too. This
+    # avoids the normal Bot API getFile/download ceiling and keeps one MTProto
+    # identity for source access + delivery.
     if size > TELEGRAM_MAX_BYTES:
-        client = await _ensure_bot_mtproto_client()
-        await client.send_file(
+        if telethon_client is None:
+            raise RuntimeError("Telegram USER_SESSION connected nahi hai; large-file delivery unavailable.")
+        await telethon_client.send_file(
             update.effective_chat.id,
             str(path),
             caption=caption,
