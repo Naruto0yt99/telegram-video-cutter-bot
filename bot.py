@@ -34,6 +34,7 @@ from config import (
     FFMPEG_BIN,
     validate_bot_config,
     SOURCE_CHAT,
+    FINGERPRINT_CHAT,
 )
 
 from database import (
@@ -72,6 +73,7 @@ from source_sync import sync_source_library, render_library_html
 from utils import unique_path
 from clip_handler import clip_command as source_clip_command
 from library_nav import library_command as nav_library_command, library_callback as nav_library_callback
+from fingerprint_storage import fingerprint_storage_status
 
 
 logging.basicConfig(
@@ -438,6 +440,19 @@ async def process_save_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return True
 
     return False
+
+
+async def fingerprint_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("❌ Owner only.")
+        return
+
+    try:
+        text = await fingerprint_storage_status(context.bot, FINGERPRINT_CHAT)
+        await update.message.reply_text(text)
+    except Exception as exc:
+        logger.exception("Fingerprint storage status failed")
+        await update.message.reply_text(f"❌ Fingerprint storage check failed: {exc}")
 
 
 async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -926,6 +941,7 @@ def main():
     application.add_handler(CommandHandler("save", save_command))
     application.add_handler(CommandHandler("edit", edit_handler))
     application.add_handler(CommandHandler("find", find_command))
+    application.add_handler(CommandHandler("fingerprint_status", fingerprint_status_command))
     application.add_handler(CommandHandler("clip", source_clip_command))
     application.add_handler(CommandHandler("clips", source_clip_command))
     application.add_handler(CommandHandler("episode", source_clip_command))
