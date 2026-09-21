@@ -12,6 +12,7 @@ CHUNK_BYTES = 512 * 1024
 RETRY_CHUNK_BYTES = 128 * 1024
 ALIGN_BYTES = 4096
 MAX_RANGE_BYTES = 8 * 1024 * 1024
+RANGE_READ_TIMEOUT = 120.0
 
 
 def _video_document(message):
@@ -314,7 +315,10 @@ class TelegramRangeServer:
             if method == "HEAD":
                 return
 
-            payload = await self._read_range_with_refresh(start, end)
+            payload = await asyncio.wait_for(
+                self._read_range_with_refresh(start, end),
+                timeout=RANGE_READ_TIMEOUT,
+            )
             if len(payload) != content_length:
                 raise RuntimeError(
                     f"Telegram returned {len(payload)} bytes, expected {content_length}."
