@@ -487,7 +487,7 @@ async def _resolve_fingerprint_source(anime: str, season: int, episode: int):
     if telethon_client is None:
         return None
 
-    target = re.sub(r"\\s+", " ", anime.strip().lower()).strip()
+    target = re.sub(r"\s+", " ", anime.strip().lower()).strip()
     season = int(season)
     episode = int(episode)
 
@@ -512,9 +512,9 @@ async def _resolve_fingerprint_source(anime: str, season: int, episode: int):
             return False
 
         season_episode_patterns = (
-            rf"\\bs(?:eason\\s*)?0*{season}\\s*[-._ ]*e(?:p(?:isode)?\\s*)?0*{episode}\\b",
-            rf"\\bseason\\s+0*{season}\\s+episode\\s+0*{episode}\\b",
-            rf"\\b0*{season}\\s*[x×]\\s*0*{episode}\\b",
+            rf"\bs(?:eason\s*)?0*{season}\s*[-._ ]*e(?:p(?:isode)?\s*)?0*{episode}\b",
+            rf"\bseason\s+0*{season}\s+episode\s+0*{episode}\b",
+            rf"\b0*{season}\s*[x×]\s*0*{episode}\b",
         )
         return any(re.search(pattern, normalized, re.IGNORECASE) for pattern in season_episode_patterns)
 
