@@ -4,6 +4,7 @@ import re
 from urllib.parse import urlparse
 
 from telegram_media import parse_telegram_message_link
+from telethon.errors import FileReferenceExpiredError
 
 logger = logging.getLogger("telegram-remote")
 
@@ -224,14 +225,39 @@ async def _read_range(client, media, start, end):
 class TelegramRangeServer:
     """Local seekable HTTP facade over a Telegram media file."""
 
-    def __init__(self, client, message, duration, size):
+    def __init__(self, client, message, duration, size, chat=None, message_id=None):
         self.client = client
         self.message = message
         self.media = getattr(message, "media", None)
         self.duration = duration
         self.size = size
+        self.chat = chat
+        self.message_id = message_id
         self.server = None
         self.url = None
+        self._refresh_lock = asyncio.Lock()
+
+    async def _read_range_with_refresh(self, start, end):
+        try:
+            return await _read_range(self.client, self.media, start, end)
+        except FileReferenceExpiredError:
+            async with self._refresh_lock:
+                # Another concurrent request may already have refreshed it.
+                fresh = await self.client.get_messages(self.chat, ids=self.message_id)
+                if not fresh:
+                    raise RuntimeError(
+                        f"Telegram source message disappeared (chat={self.chat}, message={self.message_id})."
+                    )
+                fresh_media = getattr(fresh, "media", None)
+                if fresh_media is None:
+                    raise RuntimeError("Telegram source refresh returned no media.")
+                self.message = fresh
+                self.media = fresh_media
+                logger.info(
+                    "Refreshed expired Telegram file_reference chat=%s message=%s",
+                    self.chat, self.message_id,
+                )
+            return await _read_range(self.client, self.media, start, end)
 
     async def start(self):
         self.server = await asyncio.start_server(
@@ -288,7 +314,7 @@ class TelegramRangeServer:
             if method == "HEAD":
                 return
 
-            payload = await _read_range(self.client, self.media, start, end)
+            payload = await self._read_range_with_refresh(start, end)
             if len(payload) != content_length:
                 raise RuntimeError(
                     f"Telegram returned {len(payload)} bytes, expected {content_length}."
@@ -337,7 +363,7 @@ class TelegramRangeServer:
 async def open_telegram_message_range_server(client, chat, message_id):
     """Open a range server for a video sent directly to the bot chat."""
     message, duration, size = await get_telegram_video_info(client, chat, message_id)
-    server = TelegramRangeServer(client, message, duration, size)
+    server = TelegramRangeServer(client, message, duration, size, chat=chat, message_id=message_id)
     await server.start()
     return server
 
