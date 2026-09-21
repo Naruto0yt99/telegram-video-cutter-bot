@@ -1,13 +1,12 @@
 import asyncio
 import base64
-import json
+import zlib
 import math
 from pathlib import Path
 
 import numpy as np
 
 from config import FFMPEG_BIN, TEMP_DIR
-from findclip_engine import _encode_hashes, visual_hash
 from telegram_remote import open_telegram_range_server
 
 
@@ -112,7 +111,10 @@ async def build_remote_fingerprint(
         if not hashes:
             raise RuntimeError("No usable frames were extracted.")
 
-        encoded, shape = _encode_hashes(hashes)
+        arr = np.asarray(hashes, dtype=np.uint8)
+        compressed = zlib.compress(arr.tobytes(), level=9)
+        encoded = base64.b64encode(compressed).decode("ascii")
+        shape = list(arr.shape)
         return {
             "version": 3,
             "format": "compact_uint8_zlib_base64",
