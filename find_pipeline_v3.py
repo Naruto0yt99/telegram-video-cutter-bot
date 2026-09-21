@@ -78,7 +78,7 @@ async def _gemini_upload_telegram(client, source_url: str, display_name: str):
     chat, message_id = parse_telegram_message_link(source_url)
     _, duration, _ = await get_telegram_video_info(client, chat, message_id)
 
-    server = open_telegram_range_server(client, source_url)
+    server = await open_telegram_range_server(client, source_url)
     proxy = None
     try:
         fd, proxy = tempfile.mkstemp(prefix="gemini_proxy_", suffix=".mp4")
@@ -116,7 +116,7 @@ async def _gemini_upload_telegram(client, source_url: str, display_name: str):
 
         raise last_error or RuntimeError("Gemini proxy upload failed.")
     finally:
-        server.close()
+        await server.close()
         if proxy:
             try:
                 os.remove(proxy)
