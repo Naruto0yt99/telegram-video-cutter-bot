@@ -13,7 +13,8 @@ async def check_fingerprint_storage(bot: Bot, chat_id: str):
     member = await bot.get_chat_member(chat.id, me.id)
 
     status = getattr(member, "status", None)
-    can_post = bool(getattr(member, "can_post_messages", False))
+    can_post_raw = getattr(member, "can_post_messages", None)
+    can_post = bool(can_post_raw) if can_post_raw is not None else False
 
     return {
         "chat_id": chat.id,
@@ -23,6 +24,7 @@ async def check_fingerprint_storage(bot: Bot, chat_id: str):
         "bot_username": me.username,
         "status": status,
         "can_post_messages": can_post,
+        "can_post_messages_reported": can_post_raw,
         "ok": status in {"administrator", "creator"} and can_post,
     }
 
@@ -79,6 +81,39 @@ async def fingerprint_storage_status(bot: Bot, chat_id: str) -> str:
             "📝 can_post_messages: TRUE\n\n"
             "🧠 Fingerprint JSON files can now be uploaded here."
         )
+
+    if info["status"] in {"administrator", "creator"}:
+        try:
+            probe = await bot.send_message(
+                chat_id=chat_id,
+                text="🧪 Fingerprint storage permission check",
+                disable_notification=True,
+            )
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=probe.message_id)
+            except TelegramError:
+                pass
+            return (
+                "✅ FINGERPRINT STORAGE READY\n\n"
+                f"📦 Channel: {info['chat_title']}\n"
+                f"🔗 @{info['chat_username'] or 'private'}\n"
+                f"🤖 @{info['bot_username'] or info['bot_id']}\n"
+                f"👑 Status: {info['status']}\n"
+                f"📝 API can_post_messages: {info['can_post_messages']}\n"
+                "🧪 Real send test: SUCCESS\n\n"
+                "🧠 Fingerprint JSON files can now be uploaded here."
+            )
+        except TelegramError as exc:
+            return (
+                "⚠️ FINGERPRINT STORAGE NOT READY\n\n"
+                f"📦 Channel: {info['chat_title']}\n"
+                f"🤖 @{info['bot_username'] or info['bot_id']}\n"
+                f"👤 Status: {info['status']}\n"
+                f"📝 API can_post_messages: {info['can_post_messages']}\n"
+                f"🧪 Real send test: FAILED\n"
+                f"Telegram: {exc}\n\n"
+                "Bot ko channel me post karne ki permission chahiye."
+            )
 
     return (
         "⚠️ FINGERPRINT STORAGE NOT READY\n\n"
