@@ -155,30 +155,51 @@ def _json(text):
         raise
 
 
+async def _resolve_file_uri(client, name):
+    # Gemini File API returns a resource name AND a separate file.uri. The
+    # generateContent file_data.file_uri must use the latter, not the REST
+    # resource URL. Older code guessed the URL from name, which can make every
+    # model reject the video and produce the misleading "no regions" fallback.
+    r = await client.get(f"{GEMINI_ROOT}/v1beta/{name}", headers=_headers())
+    r.raise_for_status()
+    data = r.json()
+    file_obj = data.get("file", data)
+    uri = file_obj.get("uri")
+    if not uri:
+        raise RuntimeError(f"Gemini file URI missing for {name}")
+    return uri
+
 async def _generate(prompt, files):
-    payload = {
-        "contents": [{
-            "role": "user",
-            "parts": [
-                *[
-                    {
-                        "file_data": {
-                            "mime_type": "video/mp4",
-                            "file_uri": f"{GEMINI_ROOT}/v1beta/{name}",
-                        },
-                        "media_processing": "AGENTIC",
-                    }
-                    for name in files
-                ],
-                {"text": prompt},
-            ],
-        }],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-        },
-    }
     last = None
-    async with httpx.AsyncClient(timeout=httpx.Timeout(60, read=600, write=120)) as client:
+    timeout = httpx.Timeout(60, read=600, write=120)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        try:
+            uris = [await _resolve_file_uri(client, name) for name in files]
+        except Exception as exc:
+            logger.warning("Gemini file URI resolution failed: %s", exc)
+            raise
+
+        payload = {
+            "contents": [{
+                "role": "user",
+                "parts": [
+                    *[
+                        {
+                            "file_data": {
+                                "mime_type": "video/mp4",
+                                "file_uri": uri,
+                            }
+                        }
+                        for uri in uris
+                    ],
+                    {"text": prompt},
+                ],
+            }],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+            },
+        }
+
         for model in GEMINI_MODELS:
             try:
                 r = await client.post(
@@ -188,12 +209,12 @@ async def _generate(prompt, files):
                 )
                 r.raise_for_status()
                 data = r.json()
-                text = []
-                for c in data.get("candidates", []):
-                    for p in c.get("content", {}).get("parts", []):
-                        if p.get("text"):
-                            text.append(p["text"])
-                return _json("\n".join(text))
+                text_parts = []
+                for candidate in data.get("candidates", []):
+                    for part in candidate.get("content", {}).get("parts", []):
+                        if part.get("text"):
+                            text_parts.append(part["text"])
+                return _json("\n".join(text_parts))
             except Exception as exc:
                 last = exc
                 logger.warning("Gemini model failed: %s: %s", model, exc)
@@ -259,12 +280,26 @@ async def run_find_v3(input_video: Path, user_id: int, telegram_client, progress
     # First pass identifies the source anime/episode candidates and the visual
     # evidence that will be used for the direct episode comparison.
     analysis = await _generate(
-        """Watch VIDEO 1, the YouTube Short. Return every contiguous anime shot.
-For each shot give start_time, end_time, anime, season, episode, and a detailed
-visual description. If a timestamp/episode is uncertain, set it null rather
-than inventing it. Return JSON only:
+        """Watch VIDEO 1, the YouTube Short carefully. This is an evidence-first
+scene identification pass. Return EVERY contiguous anime shot, even when the
+exact season or episode is uncertain.
+
+For each shot return:
+- start_time and end_time in the Short
+- anime title (best identification; never use generic labels)
+- season and episode ONLY when supported by visible evidence
+- distinctive chronological visual description
+- characters, location/background, important actions and visual landmarks
+- source_start_hint only when you are genuinely confident
+
+Do NOT return an empty regions list just because episode/timestamp is uncertain.
+Do NOT invent an episode number. The next stage will verify the scene against the
+actual Telegram episode.
+
+Return JSON only:
 {"regions":[{"start_time":0,"end_time":5,"anime":"Naruto","season":1,"episode":27,
-"description":"specific action, characters, background and camera movement"}]}""",
+"source_start_hint":null,"description":"specific chronological action, characters,
+background and camera movement","characters":["..."],"location":"...","landmarks":["..."]}]}""",
         [edit_file["name"]],
     )
     regions = analysis.get("regions") if isinstance(analysis, dict) else None
