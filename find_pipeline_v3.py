@@ -184,7 +184,11 @@ async def _generate(prompt, files):
                             "file_data": {
                                 "mime_type": "video/mp4",
                                 "file_uri": uri,
-                            }
+                            },
+                            "video_metadata": {
+                                "fps": 5,
+                            },
+                            "media_processing": "AGENTIC",
                         }
                         for uri in uris
                     ],
