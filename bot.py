@@ -65,7 +65,8 @@ from ffmpeg_utils import (
     run_command,
 )
 
-from find_engine import find_and_build, _extract_remote_clip
+from find_engine import _extract_remote_clip
+from find_pipeline_v3 import run_find_v3
 from yt_downloader import download_video_from_url
 from source_sync import sync_source_library, render_library_html
 from utils import unique_path
@@ -448,58 +449,48 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⏳ Ek find job already chal raha hai.")
         return
 
-    status = await update.message.reply_text("🎯 FIND — 0%\n\n📥 Edited video download ho raha hai...")
+    status = await update.message.reply_text(
+        "🎯 FIND — 0%\n\n📥 YouTube Short 360p me fetch ho raha hai..."
+    )
     user_id = update.effective_user.id
 
     try:
         async with job_lock:
             video_path = await download_video_from_url(url, user_id)
-            await safe_edit_text(status, "🎯 FIND — 10%\n\n✅ Edited video ready\n🧠 Gemini visual fingerprint + scene detection...")
-            # One FIND build already performs progressive per-scene search.
-            # Re-running the entire 11-scene job in fast/precision/deep multiplied
-            # Telegram range reads + Gemini uploads and caused multi-hour runs.
-            os.environ["FIND_SEARCH_PROFILE"] = "fast"
-            try:
-                result = await find_and_build(
-                    input_video=video_path,
-                    user_id=user_id,
-                    telethon_client=telethon_client,
-                    progress_message=status,
-                )
-            finally:
-                os.environ.pop("FIND_SEARCH_PROFILE", None)
+            result = await run_find_v3(
+                input_video=video_path,
+                user_id=user_id,
+                telegram_client=telethon_client,
+                progress_message=status,
+            )
             clips = result.get("clips", [])
             total = int(result.get("total", len(clips)))
-            qa = result.get("qa") or {}
-            qa_strong = (
-                bool(qa.get("match"))
-                and float(qa.get("confidence", 0) or 0) >= 0.80
-                and float(qa.get("sequence_score", 0) or 0) >= 0.85
-                and float(qa.get("timing_score", 0) or 0) >= 0.75
-                and not (qa.get("missing_scenes") or qa.get("extra_scenes") or qa.get("mismatches"))
-            )
-            if len(clips) != total or total <= 0 or not qa_strong:
+            if not clips or len(clips) != total:
                 raise RuntimeError(
-                    "Exact visual QA confirm nahi hua. Bot ne inaccurate clip send nahi ki. "
-                    f"Attempts: {attempts}"
+                    f"Exact FIND incomplete: {len(clips)}/{total} scenes verified."
                 )
             merged = Path(result["output"])
             caption = (
                 "🎬 FIND RESULT\n\n"
                 f"🎞️ Verified scenes: {len(clips)}/{total}\n"
-                f"📺 Episodes used: {len(result.get('sources') or [])}\n"
                 f"⏱️ Duration: {format_time(sum(float(x.get('edit_duration', 0)) for x in clips))}\n"
-                "🧠 Visual fingerprint → targeted Telegram windows → Gemini verification\n"
-                "⚠️ Failed/uncertain scenes were skipped and listed in the report.\n\n"
+                "🧠 Gemini Short ↔ Telegram low-quality episode comparison\n"
+                "⚡ Highest-quality Telegram source → FFmpeg stream-copy\n\n"
                 "🤖 AnimeClipCutter"
             )
-            await safe_edit_text(status, "🎯 FIND — 97%\n\n📤 Verified scene assembly ready\n📦 Final video upload ho raha hai...")
+            await safe_edit_text(
+                status,
+                "🎯 FIND — 97%\n\n📤 Final high-quality clip upload ho raha hai..."
+            )
             await send_file(update, merged, caption)
-            report = result.get("report", "📋 SCENE DETAILS\n\nNo report available.")
+            report = result.get("report", "📋 No report available.")
             for i in range(0, len(report), 3500):
-                part = report[i:i+3500]
-                await update.message.reply_text(part)
-            await safe_edit_text(status, f"🎯 FIND COMPLETE {'✅' if len(clips) == total else '⚠️'}\n\nVerified: {len(clips)}/{total}\nFinal merged video + process report bhej diye.")
+                await update.message.reply_text(report[i:i+3500])
+            await safe_edit_text(
+                status,
+                f"🎯 FIND COMPLETE ✅\n\nVerified: {len(clips)}/{total}\n"
+                "Final high-quality video + timestamps bhej diye."
+            )
     except Exception as exc:
         logger.exception("Find failed")
         await safe_edit_text(status, f"❌ FIND FAILED\n\n{exc}")
