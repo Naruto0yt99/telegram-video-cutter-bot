@@ -1,20 +1,64 @@
 import io
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 from telegram import Bot
 from telegram.error import TelegramError
 
 
+TOPIC_BIND_FILE = Path("data/fingerprint_topic.json")
+
+
+def _read_topic_id():
+    try:
+        data = json.loads(TOPIC_BIND_FILE.read_text(encoding="utf-8"))
+        value = data.get("message_thread_id")
+        return int(value) if value is not None else None
+    except Exception:
+        return None
+
+
+def _write_topic_id(chat_id, message_thread_id):
+    TOPIC_BIND_FILE.parent.mkdir(parents=True, exist_ok=True)
+    TOPIC_BIND_FILE.write_text(
+        json.dumps(
+            {
+                "chat_id": str(chat_id),
+                "message_thread_id": int(message_thread_id),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+
+
+async def bind_fingerprint_topic(update):
+    message = update.effective_message
+    chat = update.effective_chat
+    thread_id = getattr(message, "message_thread_id", None)
+    if thread_id is None:
+        raise ValueError("Ye command FINGERPRINTS forum topic ke andar bhejo.")
+    _write_topic_id(chat.id, thread_id)
+    return thread_id
+
+
+def get_fingerprint_topic_id():
+    return _read_topic_id()
+
+
 async def check_fingerprint_storage(bot: Bot, chat_id: str):
-    """Verify that this bot can access and post to the fingerprint channel."""
+    """Verify bot access to the supergroup used for fingerprint storage."""
     chat = await bot.get_chat(chat_id)
     me = await bot.get_me()
     member = await bot.get_chat_member(chat.id, me.id)
 
     status = getattr(member, "status", None)
-    can_post_raw = getattr(member, "can_post_messages", None)
-    can_post = bool(can_post_raw) if can_post_raw is not None else False
+    can_manage_topics = getattr(member, "can_manage_topics", None)
+    can_send_messages = getattr(member, "can_send_messages", None)
+
+    topic_id = _read_topic_id()
 
     return {
         "chat_id": chat.id,
@@ -23,19 +67,34 @@ async def check_fingerprint_storage(bot: Bot, chat_id: str):
         "bot_id": me.id,
         "bot_username": me.username,
         "status": status,
-        "can_post_messages": can_post,
-        "can_post_messages_reported": can_post_raw,
-        "ok": status in {"administrator", "creator"} and can_post,
+        "can_manage_topics": can_manage_topics,
+        "can_send_messages": can_send_messages,
+        "topic_id": topic_id,
+        "ok": (
+            status in {"administrator", "creator"}
+            and topic_id is not None
+        ),
     }
 
 
-async def save_fingerprint_json(bot: Bot, chat_id: str, fingerprint: dict, filename: str):
-    """Upload one compact fingerprint JSON artifact to Telegram."""
+async def save_fingerprint_json(
+    bot: Bot,
+    chat_id: str,
+    fingerprint: dict,
+    filename: str,
+    message_thread_id=None,
+):
+    """Upload one compact fingerprint JSON artifact into the bound forum topic."""
     check = await check_fingerprint_storage(bot, chat_id)
-    if not check["ok"]:
+    topic_id = message_thread_id or check.get("topic_id")
+
+    if check["status"] not in {"administrator", "creator"}:
         raise PermissionError(
-            f"Fingerprint storage unavailable: status={check['status']}, "
-            f"can_post_messages={check['can_post_messages']}"
+            f"Fingerprint storage unavailable: status={check['status']}"
+        )
+    if topic_id is None:
+        raise PermissionError(
+            "Fingerprint topic not bound. FINGERPRINTS topic me /fingerprint_bind bhejo."
         )
 
     payload = json.dumps(
@@ -51,6 +110,7 @@ async def save_fingerprint_json(bot: Bot, chat_id: str, fingerprint: dict, filen
         "🧠 Anime fingerprint\n"
         f"📦 {fingerprint.get('anime', 'Unknown')} "
         f"S{fingerprint.get('season', '?')} E{fingerprint.get('episode', '?')}\n"
+        f"🧩 Topic: {topic_id}\n"
         f"🕒 {datetime.now(timezone.utc).isoformat()}"
     )
 
@@ -58,6 +118,7 @@ async def save_fingerprint_json(bot: Bot, chat_id: str, fingerprint: dict, filen
         chat_id=chat_id,
         document=bio,
         caption=caption,
+        message_thread_id=int(topic_id),
     )
 
 
@@ -67,59 +128,29 @@ async def fingerprint_storage_status(bot: Bot, chat_id: str) -> str:
     except TelegramError as exc:
         return (
             "❌ FINGERPRINT STORAGE\n\n"
-            f"Channel: {chat_id}\n"
+            f"Group: {chat_id}\n"
             f"Telegram error: {exc}"
         )
 
     if info["ok"]:
         return (
             "✅ FINGERPRINT STORAGE READY\n\n"
-            f"📦 Channel: {info['chat_title']}\n"
+            f"📦 Group: {info['chat_title']}\n"
             f"🔗 @{info['chat_username'] or 'private'}\n"
             f"🤖 @{info['bot_username'] or info['bot_id']}\n"
-            "👑 Status: administrator\n"
-            "📝 can_post_messages: TRUE\n\n"
-            "🧠 Fingerprint JSON files can now be uploaded here."
+            f"👑 Status: {info['status']}\n"
+            f"🧩 Topic ID: {info['topic_id']}\n"
+            f"🛠️ Manage Topics: {info['can_manage_topics']}\n\n"
+            "🧠 Fingerprint JSON files will be uploaded into the bound topic."
         )
-
-    if info["status"] in {"administrator", "creator"}:
-        try:
-            probe = await bot.send_message(
-                chat_id=chat_id,
-                text="🧪 Fingerprint storage permission check",
-                disable_notification=True,
-            )
-            try:
-                await bot.delete_message(chat_id=chat_id, message_id=probe.message_id)
-            except TelegramError:
-                pass
-            return (
-                "✅ FINGERPRINT STORAGE READY\n\n"
-                f"📦 Channel: {info['chat_title']}\n"
-                f"🔗 @{info['chat_username'] or 'private'}\n"
-                f"🤖 @{info['bot_username'] or info['bot_id']}\n"
-                f"👑 Status: {info['status']}\n"
-                f"📝 API can_post_messages: {info['can_post_messages']}\n"
-                "🧪 Real send test: SUCCESS\n\n"
-                "🧠 Fingerprint JSON files can now be uploaded here."
-            )
-        except TelegramError as exc:
-            return (
-                "⚠️ FINGERPRINT STORAGE NOT READY\n\n"
-                f"📦 Channel: {info['chat_title']}\n"
-                f"🤖 @{info['bot_username'] or info['bot_id']}\n"
-                f"👤 Status: {info['status']}\n"
-                f"📝 API can_post_messages: {info['can_post_messages']}\n"
-                f"🧪 Real send test: FAILED\n"
-                f"Telegram: {exc}\n\n"
-                "Bot ko channel me post karne ki permission chahiye."
-            )
 
     return (
         "⚠️ FINGERPRINT STORAGE NOT READY\n\n"
-        f"📦 Channel: {info['chat_title']}\n"
+        f"📦 Group: {info['chat_title']}\n"
         f"🤖 @{info['bot_username'] or info['bot_id']}\n"
         f"👤 Status: {info['status']}\n"
-        f"📝 can_post_messages: {info['can_post_messages']}\n\n"
-        "Bot ko channel admin bana kar 'Post Messages' permission ON karo."
+        f"🛠️ Manage Topics: {info['can_manage_topics']}\n"
+        f"💬 Can send messages: {info['can_send_messages']}\n"
+        f"🧩 Topic ID: {info['topic_id'] or 'NOT BOUND'}\n\n"
+        "FINGERPRINTS topic ke andar /fingerprint_bind bhejo."
     )
