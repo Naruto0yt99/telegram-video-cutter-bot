@@ -68,12 +68,13 @@ from ffmpeg_utils import (
 
 from find_engine import _extract_remote_clip
 from find_pipeline_v3 import run_find_v3
+from remote_fingerprint import build_remote_fingerprint
 from yt_downloader import download_video_from_url
 from source_sync import sync_source_library, render_library_html
 from utils import unique_path
 from clip_handler import clip_command as source_clip_command
 from library_nav import library_command as nav_library_command, library_callback as nav_library_callback
-from fingerprint_storage import fingerprint_storage_status
+from fingerprint_storage import fingerprint_storage_status, bind_fingerprint_topic, get_fingerprint_topic_id, save_fingerprint_json
 
 
 logging.basicConfig(
@@ -453,6 +454,84 @@ async def fingerprint_status_command(update: Update, context: ContextTypes.DEFAU
     except Exception as exc:
         logger.exception("Fingerprint storage status failed")
         await update.message.reply_text(f"❌ Fingerprint storage check failed: {exc}")
+
+
+
+async def fingerprint_bind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("❌ Owner only.")
+        return
+    try:
+        configured = await context.bot.get_chat(FINGERPRINT_CHAT)
+        if update.effective_chat.id != configured.id:
+            await update.message.reply_text("❌ Ye command FINGERPRINTS topic ke andar bhejo.")
+            return
+        thread_id = await bind_fingerprint_topic(update)
+        await update.message.reply_text(
+            "✅ FINGERPRINT TOPIC BOUND\n\n"
+            f"🧩 Topic ID: {thread_id}\n"
+            "🧠 Ab fingerprints isi topic me save honge."
+        )
+    except Exception as exc:
+        logger.exception("Fingerprint topic bind failed")
+        await update.message.reply_text(f"❌ Topic bind failed: {exc}")
+
+
+async def fingerprint_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("❌ Owner only.")
+        return
+    raw = " ".join(context.args).strip()
+    match = re.match(r"^(.+?)\s+[Ss](\d+)\s+[Ee](\d+)$", raw, re.IGNORECASE)
+    if not match:
+        await update.message.reply_text("Usage:\n/fingerprint Death Note S1 E1")
+        return
+
+    anime, season, episode = match.groups()
+    anime, season, episode = anime.strip(), int(season), int(episode)
+    if get_fingerprint_topic_id() is None:
+        await update.message.reply_text("⚠️ Pehle FINGERPRINTS topic me /fingerprint_bind bhejo.")
+        return
+    source_url = get_best_source(anime, season, episode)
+    if not source_url:
+        await update.message.reply_text(f"❌ Source library me {anime} S{season} E{episode} nahi mila.")
+        return
+    if telethon_client is None:
+        await update.message.reply_text("❌ Telegram USER_SESSION connected nahi hai.")
+        return
+
+    status = await update.message.reply_text(
+        f"🧠 FINGERPRINT STARTED\n\n📚 {anime} S{season} E{episode}\n"
+        "📡 Remote Telegram scan...\n💾 Full episode local storage me save nahi hoga."
+    )
+    try:
+        async def progress(done, total):
+            step = max(1, total // 20)
+            if done == 1 or done == total or done % step == 0:
+                pct = min(96, int(done / max(1, total) * 90))
+                await safe_edit_text(
+                    status,
+                    f"🧠 FINGERPRINT — {pct}%\n\n"
+                    f"📚 {anime} S{season} E{episode}\n"
+                    f"🔎 Samples: {done}/{total}"
+                )
+
+        fingerprint = await build_remote_fingerprint(
+            telethon_client, source_url, anime, season, episode,
+            sample_every=2.0, progress=progress,
+        )
+        await safe_edit_text(status, "🧠 FINGERPRINT — 97%\n\n💾 JSON topic me upload ho raha hai...")
+        filename = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{anime}_S{season:02d}_E{episode:03d}") + ".json"
+        sent = await save_fingerprint_json(context.bot, FINGERPRINT_CHAT, fingerprint)
+        await safe_edit_text(
+            status,
+            f"✅ FINGERPRINT SAVED\n\n📚 {anime} S{season} E{episode}\n"
+            f"🧩 Samples: {len(fingerprint.get('times', []))}\n"
+            f"📦 {filename}\n🆔 Telegram message: {sent.message_id}"
+        )
+    except Exception as exc:
+        logger.exception("Fingerprint build failed")
+        await safe_edit_text(status, f"❌ FINGERPRINT FAILED\n\n{exc}")
 
 
 async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -942,6 +1021,8 @@ def main():
     application.add_handler(CommandHandler("edit", edit_handler))
     application.add_handler(CommandHandler("find", find_command))
     application.add_handler(CommandHandler("fingerprint_status", fingerprint_status_command))
+    application.add_handler(CommandHandler("fingerprint_bind", fingerprint_bind_command))
+    application.add_handler(CommandHandler("fingerprint", fingerprint_command))
     application.add_handler(CommandHandler("clip", source_clip_command))
     application.add_handler(CommandHandler("clips", source_clip_command))
     application.add_handler(CommandHandler("episode", source_clip_command))
