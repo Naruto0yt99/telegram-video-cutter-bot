@@ -522,7 +522,9 @@ async def fingerprint_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         await safe_edit_text(status, "🧠 FINGERPRINT — 97%\n\n💾 JSON topic me upload ho raha hai...")
         filename = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{anime}_S{season:02d}_E{episode:03d}") + ".json"
-        sent = await save_fingerprint_json(\n            context.bot, FINGERPRINT_CHAT, fingerprint, filename,\n        )
+        sent = await save_fingerprint_json(
+            context.bot, FINGERPRINT_CHAT, fingerprint, filename,
+        )
         await safe_edit_text(
             status,
             f"✅ FINGERPRINT SAVED\n\n📚 {anime} S{season} E{episode}\n"
