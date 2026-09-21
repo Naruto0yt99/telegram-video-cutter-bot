@@ -20,7 +20,7 @@ logger = logging.getLogger("find-pipeline-v3")
 GEMINI_ROOT = "https://generativelanguage.googleapis.com"
 # Requested model first; modern fallback keeps the pipeline usable if the legacy
 # model is unavailable for the account.
-GEMINI_MODELS = ("gemini-1.5-flash", "gemini-3.8-flash", "gemini-3.6-flash")
+GEMINI_MODELS = ("gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash")
 CHUNK_BYTES = 512 * 1024
 QUALITY_LOW_TO_HIGH = ("240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "auto")
 
@@ -71,62 +71,57 @@ async def _gemini_upload_path(path: Path):
 
 
 async def _gemini_upload_telegram(client, source_url: str, display_name: str):
-    """Stream a Telegram episode into Gemini without creating a local episode file."""
+    """Create a tiny visual proxy from Telegram and upload only that proxy to Gemini."""
+    import os
+    import tempfile
+
     chat, message_id = parse_telegram_message_link(source_url)
-    message, duration, size = await get_telegram_video_info(client, chat, message_id)
-    media = getattr(message, "media", None)
-    mime = "video/mp4"
-    document = getattr(message, "document", None)
-    if document is not None:
-        mime = getattr(document, "mime_type", None) or mime
+    _, duration, _ = await get_telegram_video_info(client, chat, message_id)
 
-    timeout = httpx.Timeout(60, read=600, write=600, connect=30)
-    async with httpx.AsyncClient(timeout=timeout) as http:
-        start = await http.post(
-            f"{GEMINI_ROOT}/upload/v1beta/files",
-            headers={
-                **_headers(),
-                "X-Goog-Upload-Protocol": "resumable",
-                "X-Goog-Upload-Command": "start",
-                "X-Goog-Upload-Header-Content-Length": str(size),
-                "X-Goog-Upload-Header-Content-Type": mime,
-                "Content-Type": "application/json",
-            },
-            json={"file": {"display_name": display_name}},
-        )
-        start.raise_for_status()
-        upload_url = start.headers.get("x-goog-upload-url")
-        if not upload_url:
-            raise RuntimeError("Gemini resumable upload URL nahi mila.")
+    server = open_telegram_range_server(client, source_url)
+    proxy = None
+    try:
+        fd, proxy = tempfile.mkstemp(prefix="gemini_proxy_", suffix=".mp4")
+        os.close(fd)
 
-        async def telegram_body():
-            # Telegram's MTProto stream is consumed incrementally and pushed
-            # straight into Gemini's resumable upload body.
-            async for chunk in client.iter_download(
-                media,
-                offset=0,
-                request_size=CHUNK_BYTES,
-                chunk_size=CHUNK_BYTES,
-            ):
-                if chunk:
-                    yield bytes(chunk)
+        cmd = [
+            FFMPEG_BIN, "-hide_banner", "-loglevel", "warning", "-y",
+            "-i", server.url,
+            "-vf", "fps=2,scale=-2:240",
+            "-an",
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "31",
+            "-movflags", "+faststart",
+            proxy,
+        ]
+        await run_command(*cmd)
 
-        uploaded = await http.post(
-            upload_url,
-            headers={
-                "Content-Length": str(size),
-                "X-Goog-Upload-Offset": "0",
-                "X-Goog-Upload-Command": "upload, finalize",
-                "Content-Type": mime,
-            },
-            content=telegram_body(),
-        )
-        uploaded.raise_for_status()
-        data = uploaded.json().get("file", {})
-        if not data.get("name"):
-            raise RuntimeError("Gemini ne Telegram stream ko file ke roop me accept nahi kiya.")
-        return data, duration, size
+        path = Path(proxy)
+        if not path.exists() or path.stat().st_size == 0:
+            raise RuntimeError("Gemini visual proxy empty bana.")
 
+        last_error = None
+        for attempt in range(4):
+            try:
+                file_data = await _gemini_upload_path(path)
+                if not file_data.get("name"):
+                    raise RuntimeError("Gemini ne visual proxy ko file ke roop me accept nahi kiya.")
+                return file_data, duration, path.stat().st_size
+            except Exception as exc:
+                last_error = exc
+                if attempt >= 3:
+                    raise
+                await asyncio.sleep(2 ** attempt)
+
+        raise last_error or RuntimeError("Gemini proxy upload failed.")
+    finally:
+        server.close()
+        if proxy:
+            try:
+                os.remove(proxy)
+            except OSError:
+                pass
 
 async def _wait_active(name: str):
     deadline = asyncio.get_running_loop().time() + 300
@@ -332,7 +327,7 @@ background and camera movement","characters":["..."],"location":"...","landmarks
         await progress(
             f"🎯 FIND — {25 + int(30*n/max(1,len(groups)))}%\n\n"
             f"📺 {anime} S{season} E{episode}\n"
-            "⬇️ Lowest-quality Telegram stream → Gemini File API..."
+            "🎞️ 240p/2fps compact visual proxy → Gemini..."
         )
         file_data, duration, size = await _gemini_upload_telegram(
             telegram_client,
