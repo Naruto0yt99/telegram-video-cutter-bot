@@ -62,7 +62,12 @@ async def build_remote_fingerprint(
         index = 0
 
         while True:
-            raw = await process.stdout.readexactly(frame_bytes) if process.stdout else b""
+            if not process.stdout:
+                break
+            try:
+                raw = await process.stdout.readexactly(frame_bytes)
+            except asyncio.IncompleteReadError:
+                break
             if not raw:
                 break
 
