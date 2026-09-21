@@ -9,6 +9,7 @@ import httpx
 
 from config import GEMINI_API_KEY, TEMP_DIR, FFMPEG_BIN
 from database import get_all_sources_for_episode
+from library_nav import canonical_anime
 from telegram_remote import get_telegram_video_info, open_telegram_range_server
 from ffmpeg_utils import run_command
 from telegram_media import parse_telegram_message_link
@@ -276,7 +277,7 @@ than inventing it. Return JSON only:
     # several Short scenes came from it.
     groups = {}
     for r in regions:
-        anime = str(r.get("anime") or "").strip()
+        anime = canonical_anime(str(r.get("anime") or "").strip()) or str(r.get("anime") or "").strip()
         season = r.get("season")
         episode = r.get("episode")
         try:
@@ -316,7 +317,7 @@ than inventing it. Return JSON only:
 
     results = []
     for idx, region in enumerate(regions, 1):
-        anime = str(region.get("anime") or "").strip()
+        anime = canonical_anime(str(region.get("anime") or "").strip()) or str(region.get("anime") or "").strip()
         try:
             key = (anime, int(region.get("season")), int(region.get("episode")))
         except (TypeError, ValueError):
