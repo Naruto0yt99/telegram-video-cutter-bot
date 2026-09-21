@@ -21,6 +21,7 @@ GEMINI_ROOT = "https://generativelanguage.googleapis.com"
 # Requested model first; modern fallback keeps the pipeline usable if the legacy
 # model is unavailable for the account.
 GEMINI_MODELS = ("gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash")
+GEMINI_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 CHUNK_BYTES = 512 * 1024
 QUALITY_LOW_TO_HIGH = ("240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "auto")
 
@@ -196,24 +197,71 @@ async def _generate(prompt, files):
         }
 
         for model in GEMINI_MODELS:
-            try:
-                r = await client.post(
-                    f"{GEMINI_ROOT}/v1beta/models/{model}:generateContent",
-                    headers={**_headers(), "Content-Type": "application/json"},
-                    json=payload,
-                )
-                r.raise_for_status()
-                data = r.json()
-                text_parts = []
-                for candidate in data.get("candidates", []):
-                    for part in candidate.get("content", {}).get("parts", []):
-                        if part.get("text"):
-                            text_parts.append(part["text"])
-                return _json("\n".join(text_parts))
-            except Exception as exc:
-                last = exc
-                logger.warning("Gemini model failed: %s: %s", model, exc)
+            for attempt in range(3):
+                try:
+                    r = await client.post(
+                        f"{GEMINI_ROOT}/v1beta/models/{model}:generateContent",
+                        headers={**_headers(), "Content-Type": "application/json"},
+                        json=payload,
+                    )
+                    if r.status_code in GEMINI_RETRYABLE_STATUS and attempt < 2:
+                        retry_after = r.headers.get("retry-after")
+                        try:
+                            delay = min(20.0, max(2.0, float(retry_after)))
+                        except (TypeError, ValueError):
+                            delay = 2.0 * (attempt + 1)
+                        logger.warning("Gemini retryable %s from %s; retrying in %.1fs", r.status_code, model, delay)
+                        await asyncio.sleep(delay)
+                        continue
+                    r.raise_for_status()
+                    data = r.json()
+                    text_parts = []
+                    for candidate in data.get("candidates", []):
+                        for part in candidate.get("content", {}).get("parts", []):
+                            if part.get("text"):
+                                text_parts.append(part["text"])
+                    return _json("\n".join(text_parts))
+                except Exception as exc:
+                    last = exc
+                    status = getattr(getattr(exc, "response", None), "status_code", None)
+                    if status in GEMINI_RETRYABLE_STATUS and attempt < 2:
+                        await asyncio.sleep(2.0 * (attempt + 1))
+                        continue
+                    logger.warning("Gemini model failed: %s: %s", model, exc)
+                    break
     raise last or RuntimeError("Gemini request failed.")
+
+
+def _normalize_regions(data):
+    """Accept the strict regions schema plus common Gemini JSON variants."""
+    if not isinstance(data, dict):
+        return []
+    raw = data.get("regions") or data.get("scenes") or data.get("shots") or data.get("segments")
+    if isinstance(raw, dict):
+        raw = raw.get("regions") or raw.get("scenes") or raw.get("shots") or raw.get("segments")
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        start = item.get("start_time", item.get("start"))
+        end = item.get("end_time", item.get("end"))
+        if start is None or end is None:
+            continue
+        try:
+            start = float(start)
+            end = float(end)
+        except (TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        normalized = dict(item)
+        normalized["start_time"] = start
+        normalized["end_time"] = end
+        normalized["anime"] = str(item.get("anime") or item.get("title") or item.get("anime_title") or "").strip()
+        out.append(normalized)
+    return out
 
 
 def _qualities(sources):
@@ -297,7 +345,24 @@ Return JSON only:
 background and camera movement","characters":["..."],"location":"...","landmarks":["..."]}]}""",
         [edit_file["name"]],
     )
-    regions = analysis.get("regions") if isinstance(analysis, dict) else None
+    regions = _normalize_regions(analysis)
+    if not regions:
+        logger.warning("Gemini first-pass returned no normalized regions: %s", str(analysis)[:2000])
+        retry_analysis = await _generate(
+            """Re-analyze VIDEO 1. Identify the anime footage in the Short by VISUAL CONTENT only.
+Return every distinct contiguous shot as a list. Do not require certainty about season, episode,
+or timestamp. If the exact anime is uncertain, give your best title guess and leave season/episode
+null. Never return an empty list when visible video frames contain anime footage.
+
+Return JSON only:
+{"regions":[{"start_time":0,"end_time":3,"anime":"best title guess","season":null,"episode":null,
+"description":"specific visible characters, setting, action, colors and camera movement",
+"characters":[],"location":"","landmarks":[]}]}
+
+The important requirement is to describe what is visibly present, not to explain uncertainty.""",
+            [edit_file["name"]],
+        )
+        regions = _normalize_regions(retry_analysis)
     if not regions:
         raise RuntimeError("Gemini ko Short me koi usable scene nahi mila.")
 
