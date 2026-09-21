@@ -477,6 +477,80 @@ async def fingerprint_bind_command(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text(f"❌ Topic bind failed: {exc}")
 
 
+async def _resolve_fingerprint_source(anime: str, season: int, episode: int):
+    """Resolve an episode directly from the configured Telegram library.
+
+    This is a fallback for fingerprint generation when the local SQLite catalog
+    has not indexed the episode yet. Only the Telegram message metadata is
+    inspected; the episode file is never downloaded here.
+    """
+    if telethon_client is None:
+        return None
+
+    target = re.sub(r"\\s+", " ", anime.strip().lower()).strip()
+    season = int(season)
+    episode = int(episode)
+
+    def message_text(message):
+        parts = []
+        caption = getattr(message, "message", None)
+        if caption:
+            parts.append(str(caption))
+        file_obj = getattr(message, "file", None)
+        name = getattr(file_obj, "name", None) if file_obj else None
+        if name:
+            parts.append(str(name))
+        return " ".join(parts)
+
+    def matches(message):
+        text_value = message_text(message)
+        if not text_value:
+            return False
+        normalized = re.sub(r"[^a-z0-9]+", " ", text_value.lower()).strip()
+        anime_tokens = [x for x in re.sub(r"[^a-z0-9]+", " ", target).split() if x]
+        if anime_tokens and not all(token in normalized.split() for token in anime_tokens):
+            return False
+
+        season_episode_patterns = (
+            rf"\\bs(?:eason\\s*)?0*{season}\\s*[-._ ]*e(?:p(?:isode)?\\s*)?0*{episode}\\b",
+            rf"\\bseason\\s+0*{season}\\s+episode\\s+0*{episode}\\b",
+            rf"\\b0*{season}\\s*[x×]\\s*0*{episode}\\b",
+        )
+        return any(re.search(pattern, normalized, re.IGNORECASE) for pattern in season_episode_patterns)
+
+    async def search_messages():
+        try:
+            async for message in telethon_client.iter_messages(
+                FINGERPRINT_CHAT,
+                search=anime,
+                limit=200,
+            ):
+                if matches(message) and getattr(message, "file", None):
+                    return message
+        except Exception:
+            logger.exception("Telegram fingerprint source search failed")
+
+        # Filename-only libraries are not always returned by Telegram's text
+        # search. Fall back to a bounded metadata scan.
+        try:
+            async for message in telethon_client.iter_messages(
+                FINGERPRINT_CHAT,
+                limit=5000,
+            ):
+                if matches(message) and getattr(message, "file", None):
+                    return message
+        except Exception:
+            logger.exception("Telegram fingerprint metadata fallback failed")
+        return None
+
+    message = await search_messages()
+    if message is None:
+        return None
+
+    username = FINGERPRINT_CHAT.lstrip("@")
+    return f"https://t.me/{username}/{message.id}"
+
+
 async def fingerprint_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
         await update.message.reply_text("❌ Owner only.")
@@ -494,7 +568,15 @@ async def fingerprint_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     source_url = get_best_source(anime, season, episode)
     if not source_url:
-        await update.message.reply_text(f"❌ Source library me {anime} S{season} E{episode} nahi mila.")
+        await update.message.reply_text(
+            f"🔎 Local catalog me {anime} S{season} E{episode} nahi mila.\\n"
+            "📡 Telegram library metadata se direct source dhoondh raha hoon..."
+        )
+        source_url = await _resolve_fingerprint_source(anime, season, episode)
+    if not source_url:
+        await update.message.reply_text(
+            f"❌ Telegram library me {anime} S{season} E{episode} ka episode message nahi mila."
+        )
         return
     if telethon_client is None:
         await update.message.reply_text("❌ Telegram USER_SESSION connected nahi hai.")
