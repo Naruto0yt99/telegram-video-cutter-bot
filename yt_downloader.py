@@ -18,7 +18,7 @@ async def download_video_from_url(url, user_id):
         # working copy at 720p saves download time, storage and Gemini upload
         # time while preserving enough visual detail for matching.
         "format": (
-            "bv*[ext=mp4][height<=720]+ba[ext=m4a]/"
+            "bv*[ext=mp4][height<=360]+ba[ext=m4a]/"
             "b[ext=mp4][height<=720]/"
             "b[height<=720]/"
             "b"
