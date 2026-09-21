@@ -16,6 +16,7 @@ CHECKPOINT_DIR = Path(TEMP_DIR) / "fingerprint_checkpoints"
 CHECKPOINT_INTERVAL = 20
 FRAME_READ_TIMEOUT = 120.0
 RETRY_DELAY = 3.0
+MAX_RETRIES_PER_SEGMENT = 3
 
 
 def _safe_name(value):
