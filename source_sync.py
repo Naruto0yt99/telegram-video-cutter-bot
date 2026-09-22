@@ -10,7 +10,7 @@ from telegram_media import is_video_message, get_message_video_name
 from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
-PARSER_VERSION = 28
+PARSER_VERSION = 29
 
 
 _QUALITY_PATTERNS = [
@@ -163,7 +163,7 @@ def _is_non_anime_topic(topic_text: str) -> bool:
         return False
     text = re.sub(r"[^a-z0-9]+", " ", text).strip()
     blocked = {
-        "clip", "clips", "twixter", "normal video", "normal videos",
+        "clip", "clips", "clip cutter", "twixter", "normal video", "normal videos",
         "video", "videos", "ai", "ai video", "ai videos", "ai generated",
         "edit", "edits", "amv", "short", "shorts", "meme", "memes",
         "random", "other", "others", "misc", "miscellaneous",
@@ -507,8 +507,6 @@ async def sync_source_library(client):
     skipped = 0
     newest_seen = last_id
     topic_cache = {}
-    context_anime = None
-    context_season = None
     # Special/movie ordinals are persisted in the database so a bot restart
     # cannot renumber title-based specials.
     with get_connection() as conn:
@@ -543,19 +541,23 @@ async def sync_source_library(client):
         message_id = getattr(message, "id", 0) or 0
         newest_seen = max(newest_seen, message_id)
 
-        topic_title = _topic_title_from_message(message)
-        if topic_title:
-            topic_anime = _topic_anime_fallback(topic_title)
-            if topic_anime:
-                context_anime = topic_anime
-                season_match = re.search(r"\b(?:Season|S)\s*[-._ ]?(\d{1,3})\b", topic_title, re.I)
-                context_season = str(int(season_match.group(1))) if season_match else None
-
         if not message or not is_video_message(message):
             skipped += 1
             continue
 
         topic_text = await _topic_text_for_message(client, entity, message, topic_cache)
+
+        # HARD RULE: only videos belonging to a real forum topic are library
+        # sources. General-chat videos, feedback/chat posts, and videos from
+        # unrelated topics must never create library entries.
+        if not topic_text:
+            skipped += 1
+            continue
+
+        topic_anime = _topic_anime_fallback(topic_text)
+        if not topic_anime or _is_non_anime_topic(topic_text):
+            skipped += 1
+            continue
 
         raw_text = _clean_caption(
             f"{getattr(message, 'message', '') or ''} {get_message_video_name(message)}"
@@ -570,14 +572,11 @@ async def sync_source_library(client):
                 )
             continue
 
-        local_context_anime = context_anime
-        local_context_season = context_season
-        topic_anime = _topic_anime_fallback(topic_text)
+        # The topic itself is the authoritative anime identity. Never
+        # carry anime/season context from a previous topic.
+        local_context_anime = topic_anime
         topic_match = re.search(r"\b(?:Season|S)\s*[-._ ]?(\d{1,3})\b", topic_text, re.I)
-        if topic_anime:
-            local_context_anime = topic_anime
-        if topic_match:
-            local_context_season = str(int(topic_match.group(1)))
+        local_context_season = str(int(topic_match.group(1))) if topic_match else None
 
         metadata = parse_episode_metadata(
             message,
@@ -586,20 +585,6 @@ async def sync_source_library(client):
             context_season=local_context_season,
         )
         link = _message_link(message)
-
-        if metadata:
-            context_anime = metadata["anime"]
-            # Specials (movie/OVA/OAD) are not numeric seasons and must not
-            # leak into the numeric season context for following episodes.
-            if str(metadata["season"]).isdigit():
-                context_season = metadata["season"]
-        elif topic_text:
-            topic_anime = canonical_anime(topic_text)
-            if topic_anime:
-                context_anime = topic_anime
-            season_match = re.search(r"\b(?:Season|S)\s*[-._ ]?(\d{1,3})\b", topic_text, re.I)
-            if season_match:
-                context_season = str(int(season_match.group(1)))
 
         if message_id <= 100:
             logger.info(
