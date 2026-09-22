@@ -74,7 +74,7 @@ from source_sync import sync_source_library, render_library_html
 from utils import unique_path
 from clip_handler import clip_command as source_clip_command
 from library_nav import library_command as nav_library_command, library_callback as nav_library_callback
-from fingerprint_storage import fingerprint_storage_status, bind_fingerprint_topic, get_fingerprint_topic_id, save_fingerprint_json
+from fingerprint_storage import fingerprint_storage_status, bind_fingerprint_topic, get_fingerprint_topic_id, save_fingerprint_json, save_fingerprint_pack
 
 
 logging.basicConfig(
@@ -600,7 +600,7 @@ async def fingerprint_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         fingerprint = await build_remote_fingerprint(
             telethon_client, source_url, anime, season, episode,
-            sample_every=2.0, progress=progress,
+            sample_every=8.0, progress=progress,
         )
         await safe_edit_text(status, "🧠 FINGERPRINT — 97%\n\n💾 JSON topic me upload ho raha hai...")
         filename = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{anime}_S{season:02d}_E{episode:03d}") + ".json"
