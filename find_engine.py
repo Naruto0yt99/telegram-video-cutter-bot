@@ -434,21 +434,20 @@ async def _verify_region(input_video, client, source_url, region, output_dir, pr
         # windows using frame signatures instead of downloading the full episode.
         # Gemini still performs final exact verification before accepting a match.
         try:
-            server = await open_telegram_range_server(client, source_url)
-            try:
-                visual_segment = dict(region)
-                visual_segment["start_time"] = 0.0
-                visual_segment["end_time"] = min(sample_len, 6.0)
-                visual_result = await find_visual_match(
-                    client,
-                    {"source_url": source_url},
-                    visual_segment,
-                    edit_sample,
-                    output_dir,
-                    float(server.duration),
-                )
-            finally:
-                await server.close()
+            # find_visual_match owns and reuses its Telegram range server.
+            # Do not open a second server here; that only adds an extra
+            # Telegram message lookup and range-server lifecycle.
+            visual_segment = dict(region)
+            visual_segment["start_time"] = 0.0
+            visual_segment["end_time"] = min(sample_len, 6.0)
+            visual_result = await find_visual_match(
+                client,
+                {"source_url": source_url},
+                visual_segment,
+                edit_sample,
+                output_dir,
+                float(region.get("_source_duration") or 0.0),
+            )
 
             visual_candidates = (visual_result or {}).get("candidates") or []
             if visual_candidates:
