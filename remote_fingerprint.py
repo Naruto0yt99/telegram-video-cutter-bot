@@ -14,8 +14,10 @@ from telegram_remote import open_telegram_range_server
 
 CHECKPOINT_DIR = Path(TEMP_DIR) / "fingerprint_checkpoints"
 CHECKPOINT_INTERVAL = 20
-FRAME_READ_TIMEOUT = 120.0
-RETRY_DELAY = 3.0
+FRAME_READ_TIMEOUT = 60.0
+SEGMENT_SAMPLES = 12
+SEGMENT_CONCURRENCY = 2
+RETRY_DELAY = 2.0
 MAX_RETRIES_PER_SEGMENT = 3
 
 
@@ -68,6 +70,110 @@ def _save_checkpoint(path, source_url, anime, season, episode, duration, sample_
     tmp.replace(path)
 
 
+async def _fingerprint_segment(
+    server_url,
+    start_time,
+    sample_count,
+    sample_every,
+    duration,
+    segment_id,
+):
+    """Decode one bounded sampling segment and return (times, hashes)."""
+    vf = (
+        f"fps=1/{float(sample_every):.6f},"
+        "scale=160:90:flags=bilinear,"
+        "format=gray"
+    )
+    frame_bytes = 160 * 90
+    segment_duration = max(
+        0.75,
+        min(
+            max(0.75, duration - start_time),
+            (max(1, sample_count - 1) * float(sample_every)) + 0.75,
+        ),
+    )
+
+    args = [
+        FFMPEG_BIN,
+        "-hide_banner",
+        "-loglevel", "error",
+        "-threads", "0",
+        "-ss", f"{max(0.0, start_time):.3f}",
+        "-i", server_url,
+        "-t", f"{segment_duration:.3f}",
+        "-vf", vf,
+        "-frames:v", str(max(1, int(sample_count))),
+        "-f", "rawvideo",
+        "-pix_fmt", "gray",
+        "-",
+    ]
+
+    process = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    hashes = []
+    try:
+        for local_index in range(max(1, int(sample_count))):
+            try:
+                raw = await asyncio.wait_for(
+                    process.stdout.readexactly(frame_bytes),
+                    timeout=FRAME_READ_TIMEOUT,
+                )
+            except asyncio.IncompleteReadError as exc:
+                raise RuntimeError(
+                    f"Segment {segment_id} ended after {len(hashes)}/{sample_count} samples."
+                ) from exc
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError(
+                    f"Segment {segment_id} stalled for {FRAME_READ_TIMEOUT:.0f}s."
+                ) from exc
+
+            arr = np.frombuffer(raw, dtype=np.uint8).reshape((90, 160))
+            mean = float(arr.mean())
+            std = max(1.0, float(arr.std()))
+            normalized = np.clip(
+                ((arr.astype(np.float32) - mean) / std) * 32.0 + 128.0,
+                0,
+                255,
+            ).astype(np.uint8)
+            small = normalized.reshape(9, 10, 16, 10).mean(axis=(1, 3))
+            hashes.append(np.clip(small, 0, 255).astype(np.uint8))
+
+        stderr = await process.stderr.read()
+        return_code = await process.wait()
+        if return_code != 0:
+            detail = stderr.decode("utf-8", errors="ignore").strip()
+            raise RuntimeError(
+                f"Segment {segment_id} FFmpeg failed: {detail or 'unknown error'}"
+            )
+
+        times = [
+            round(
+                min(
+                    start_time + index * sample_every,
+                    max(0.0, duration - 0.05),
+                ),
+                3,
+            )
+            for index in range(len(hashes))
+        ]
+        return times, hashes
+    except Exception:
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        try:
+            await process.wait()
+        except Exception:
+            pass
+        raise
+
+
 async def build_remote_fingerprint(
     client,
     source_url,
@@ -80,11 +186,12 @@ async def build_remote_fingerprint(
     """
     Build a compact visual fingerprint directly from Telegram.
 
-    The complete episode is never saved locally. The scan keeps the requested
-    2-second sampling, but it is resumable and self-healing: checkpoints are
-    written every 20 samples, remote range stalls are timed out, FFmpeg is
-    restarted from the last checkpoint, and completed checkpoints are deleted
-    only after the final fingerprint is safely returned.
+    The episode is never downloaded as one local file. Sampling is divided
+    into small bounded FFmpeg segments and two segments are processed in
+    parallel. Each segment has an explicit frame limit, so the final few
+    samples cannot hang while waiting for an EOF from a remote Telegram
+    range stream. A small checkpoint remains only for crash-resume safety;
+    the completed fingerprint and visual index are uploaded to Telegram.
     """
     checkpoint = _checkpoint_path(anime, season, episode)
     hashes = []
@@ -92,181 +199,136 @@ async def build_remote_fingerprint(
     server = None
 
     try:
-        while True:
-            server = await open_telegram_range_server(client, source_url)
-            duration = float(server.duration)
-            if duration <= 0:
-                raise RuntimeError("Episode duration unavailable.")
+        server = await open_telegram_range_server(client, source_url)
+        duration = float(server.duration)
+        if duration <= 0:
+            raise RuntimeError("Episode duration unavailable.")
 
-            if not hashes:
-                hashes, times = _load_checkpoint(
-                    checkpoint, source_url, duration, float(sample_every)
-                )
+        expected_total = max(1, int(math.ceil(duration / float(sample_every))))
 
-            completed = len(hashes)
-            if completed >= max(1, int(math.ceil(duration / sample_every))):
-                break
+        saved_hashes, saved_times = _load_checkpoint(
+            checkpoint, source_url, duration, float(sample_every)
+        )
+        if saved_hashes and len(saved_hashes) == len(saved_times):
+            hashes = saved_hashes[:expected_total]
+            times = saved_times[:expected_total]
 
-            resume_time = (
-                min(
-                    duration - 0.05,
-                    max(0.0, (times[-1] + sample_every)),
-                )
-                if times
-                else 0.0
-            )
-            remaining = max(0.05, duration - resume_time)
-            expected_total = max(1, int(math.ceil(duration / sample_every)))
-            expected_remaining = max(1, expected_total - completed)
+        # Build an explicit sample timeline. This avoids the old
+        # "decode one huge remote stream and hope EOF arrives" behavior.
+        sample_times = [
+            round(min(index * float(sample_every), max(0.0, duration - 0.05)), 3)
+            for index in range(expected_total)
+        ]
 
-            vf = (
-                f"fps=1/{float(sample_every):.6f},"
-                "scale=160:90:flags=bilinear,"
-                "format=gray"
-            )
-            frame_bytes = 160 * 90
+        existing = {
+            round(float(t), 3): h
+            for t, h in zip(times, hashes)
+            if h is not None
+        }
+        times = []
+        hashes = []
 
-            process = None
+        pending_indices = [
+            index
+            for index, sample_time in enumerate(sample_times)
+            if round(sample_time, 3) not in existing
+        ]
+
+        async def save_progress():
+            if not progress:
+                return
             try:
-                args = [
-                    FFMPEG_BIN,
-                    "-hide_banner",
-                    "-loglevel", "error",
-                    "-threads", "0",
-                ]
-                if resume_time > 0.05:
-                    args += ["-ss", f"{resume_time:.3f}"]
-                args += [
-                    "-i", server.url,
-                    "-vf", vf,
-                    "-f", "rawvideo",
-                    "-pix_fmt", "gray",
-                    "-",
-                ]
+                await progress(len(existing), expected_total)
+            except Exception:
+                pass
 
-                process = await asyncio.create_subprocess_exec(
-                    *args,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+        await save_progress()
+
+        semaphore = asyncio.Semaphore(SEGMENT_CONCURRENCY)
+
+        async def run_segment(segment_id, indices):
+            async with semaphore:
+                start_time = sample_times[indices[0]]
+                count = len(indices)
+                last_error = None
+                for attempt in range(1, MAX_RETRIES_PER_SEGMENT + 1):
+                    try:
+                        segment_times, segment_hashes = await _fingerprint_segment(
+                            server.url,
+                            start_time,
+                            count,
+                            float(sample_every),
+                            duration,
+                            segment_id,
+                        )
+                        if len(segment_hashes) != count:
+                            raise RuntimeError(
+                                f"Segment {segment_id} returned "
+                                f"{len(segment_hashes)}/{count} samples."
+                            )
+                        return indices, segment_times, segment_hashes
+                    except Exception as exc:
+                        last_error = exc
+                        if attempt < MAX_RETRIES_PER_SEGMENT:
+                            await asyncio.sleep(RETRY_DELAY * attempt)
+                raise RuntimeError(
+                    f"Fingerprint segment {segment_id} failed after "
+                    f"{MAX_RETRIES_PER_SEGMENT} attempts: {last_error}"
                 )
 
-                local_index = 0
-                while True:
-                    if not process.stdout:
-                        break
-                    try:
-                        raw = await asyncio.wait_for(
-                            process.stdout.readexactly(frame_bytes),
-                            timeout=FRAME_READ_TIMEOUT,
-                        )
-                    except asyncio.IncompleteReadError:
-                        break
-                    except asyncio.TimeoutError:
-                        raise RuntimeError(
-                            f"FFmpeg/Telegram stream stalled for {FRAME_READ_TIMEOUT:.0f}s."
-                        )
+        segments = [
+            pending_indices[offset:offset + SEGMENT_SAMPLES]
+            for offset in range(0, len(pending_indices), SEGMENT_SAMPLES)
+        ]
 
-                    if not raw:
-                        break
-
-                    arr = np.frombuffer(raw, dtype=np.uint8).reshape((90, 160))
-                    mean = float(arr.mean())
-                    std = max(1.0, float(arr.std()))
-                    normalized = np.clip(
-                        ((arr.astype(np.float32) - mean) / std) * 32.0 + 128.0,
-                        0,
-                        255,
-                    ).astype(np.uint8)
-                    small = normalized.reshape(9, 10, 16, 10).mean(axis=(1, 3))
-                    hashes.append(np.clip(small, 0, 255).astype(np.uint8))
-                    timestamp = min(
-                        resume_time + local_index * sample_every,
-                        max(0.0, duration - 0.05),
+        for offset in range(0, len(segments), SEGMENT_CONCURRENCY):
+            batch = segments[offset:offset + SEGMENT_CONCURRENCY]
+            results = await asyncio.gather(
+                *(
+                    run_segment(
+                        offset + local_id + 1,
+                        segment_indices,
                     )
-                    times.append(round(float(timestamp), 3))
-                    local_index += 1
+                    for local_id, segment_indices in enumerate(batch)
+                )
+            )
 
-                    if len(hashes) % CHECKPOINT_INTERVAL == 0:
-                        _save_checkpoint(
-                            checkpoint, source_url, anime, season, episode,
-                            duration, sample_every, hashes, times,
-                        )
+            for indices, segment_times, segment_hashes in results:
+                for index, sample_time, sample_hash in zip(
+                    indices, segment_times, segment_hashes
+                ):
+                    existing[round(sample_time, 3)] = sample_hash
 
-                    if progress:
-                        try:
-                            await progress(len(hashes), expected_total)
-                        except Exception:
-                            pass
+            ordered_times = []
+            ordered_hashes = []
+            for sample_time in sample_times:
+                key = round(sample_time, 3)
+                if key in existing:
+                    ordered_times.append(sample_time)
+                    ordered_hashes.append(existing[key])
 
-                stderr = b""
-                if process.stderr:
-                    stderr = await process.stderr.read()
-                return_code = await process.wait()
+            times = ordered_times
+            hashes = ordered_hashes
 
-                if return_code != 0:
-                    detail = stderr.decode("utf-8", errors="ignore").strip()
-                    raise RuntimeError(
-                        f"FFmpeg fingerprint scan failed: {detail or 'unknown FFmpeg error'}"
-                    )
-
-                if not hashes:
-                    raise RuntimeError("No usable frames were extracted.")
-
-                if len(hashes) < expected_total:
-                    # Normal EOF can be a few frames short. If it is materially
-                    # short, restart from the last checkpoint instead of silently
-                    # accepting an incomplete fingerprint.
-                    if len(hashes) <= completed:
-                        raise RuntimeError("Fingerprint scan made no progress.")
-                    _save_checkpoint(
-                        checkpoint, source_url, anime, season, episode,
-                        duration, sample_every, hashes, times,
-                    )
-                    continue
-
-                break
-
-            except Exception:
-                if process is not None and process.returncode is None:
-                    try:
-                        process.kill()
-                    except ProcessLookupError:
-                        pass
-                if process is not None:
-                    try:
-                        await process.wait()
-                    except Exception:
-                        pass
-
+            if len(hashes) % CHECKPOINT_INTERVAL == 0 or len(hashes) == expected_total:
                 _save_checkpoint(
                     checkpoint, source_url, anime, season, episode,
                     duration, sample_every, hashes, times,
                 )
-                await asyncio.sleep(RETRY_DELAY)
-            finally:
-                if process is not None and process.returncode is None:
-                    try:
-                        process.kill()
-                    except ProcessLookupError:
-                        pass
-                    try:
-                        await process.wait()
-                    except Exception:
-                        pass
-                if server is not None:
-                    await server.close()
-                    server = None
+            await save_progress()
 
-            # If we reached here after an exception/partial EOF, reopen the
-            # Telegram range server and resume from the last durable checkpoint.
-            if len(hashes) >= expected_total:
-                break
+        if len(hashes) != expected_total:
+            missing = expected_total - len(hashes)
+            raise RuntimeError(
+                f"Fingerprint incomplete: {len(hashes)}/{expected_total}; "
+                f"{missing} samples missing."
+            )
 
         arr = np.asarray(hashes, dtype=np.uint8)
         compressed = zlib.compress(arr.tobytes(), level=9)
         encoded = base64.b64encode(compressed).decode("ascii")
         result = {
-            "version": 3,
+            "version": 4,
             "format": "compact_uint8_zlib_base64",
             "type": "episode_visual_fingerprint",
             "anime": anime,
