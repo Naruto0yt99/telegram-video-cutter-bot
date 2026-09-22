@@ -1109,7 +1109,7 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("library", nav_library_command))
-    application.add_handler(CallbackQueryHandler(nav_library_callback, pattern=r"^la:|^lt:|^lb$"))
+    application.add_handler(CallbackQueryHandler(nav_library_callback, pattern=r"^la:|^ls:|^lt:|^lb$"))
     application.add_handler(CommandHandler("save", save_command))
     application.add_handler(CommandHandler("edit", edit_handler))
     application.add_handler(CommandHandler("find", find_command))
