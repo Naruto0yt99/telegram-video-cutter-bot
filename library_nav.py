@@ -169,7 +169,12 @@ def _anime_page(tree):
     rows = []
     names = sorted(tree, key=str.casefold)
     for anime in names:
-        rows.append([InlineKeyboardButton(f"🎬 {anime}", callback_data=f"la:{_callback_key(anime)}")])
+        rows.append([
+            InlineKeyboardButton(
+                f"🎬 {anime}",
+                callback_data=f"la:{_callback_key(anime)}",
+            )
+        ])
     return "📚 <b>ANIME LIBRARY</b>\n\nTap an anime:", _keyboard(rows)
 
 
@@ -186,42 +191,172 @@ def _content_label(season):
     return f"Season {season}"
 
 
-def _series_page(tree, anime):
+def _merged_seasons(tree, anime):
+    """Merge all internal series records into the public anime hierarchy."""
+    merged = {}
+    for series_data in tree.get(anime, {}).values():
+        for season, episodes in series_data.items():
+            target_season = merged.setdefault(season, {})
+            for episode, sources in episodes.items():
+                target_episode = target_season.setdefault(episode, {})
+                target_episode.update(sources)
+    return merged
+
+
+def _season_page(tree, anime):
+    seasons = _merged_seasons(tree, anime)
     rows = []
-    for series in sorted(tree.get(anime, {}), key=str.casefold):
-        rows.append([InlineKeyboardButton(f"📚 {series}", callback_data=f"lr:{_callback_key(anime + "|" + series)}")])
-    rows.append([InlineKeyboardButton("⬅️ Anime", callback_data="lb")])
-    return f"🎬 <b>{escape(anime)}</b>\n\nChoose series:", _keyboard(rows)
+    for season in sorted(seasons, key=_season_sort_key):
+        rows.append([
+            InlineKeyboardButton(
+                f"📺 {_content_label(season)}",
+                callback_data=f"lt:{_callback_key(anime + "|" + season)}",
+            )
+        ])
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="lb")])
+    return f"🎬 <b>{escape(anime)}</b>", _keyboard(rows)
 
 
-def _season_page(tree, anime, series):
+def _episode_page(tree, anime, season):
+    seasons = _merged_seasons(tree, anime)
+    episodes = seasons.get(season, {})
+    lines = [
+        f"🎬 <b>{escape(anime)}</b>",
+        f"📺 <b>{escape(_content_label(season))}</b>",
+        "",
+    ]
     rows = []
-    for season in sorted(tree.get(anime, {}).get(series, {}), key=_season_sort_key):
-        rows.append([InlineKeyboardButton(f"📺 {_content_label(season)}", callback_data=f"ls:{_callback_key(anime + "|" + series + "|" + season)}")])
-    rows.append([InlineKeyboardButton("⬅️ Series", callback_data=f"lr:{_token(anime + "|" + series)}")])
-    title = series if len(tree.get(anime, {})) > 1 else anime
-    return f"🎬 <b>{escape(title)}</b>\n\nChoose Season / OVA / Movie:", _keyboard(rows)
 
-
-def _episode_page(tree, anime, series, season):
-    episodes = tree.get(anime, {}).get(series, {}).get(season, {})
-    title = series if len(tree.get(anime, {})) > 1 else anime
-    lines = [f"🎬 <b>{escape(title)}</b>", f"📺 <b>{escape(_content_label(season))}</b>", ""]
-    rows = []
-
-    for episode in sorted(episodes, key=lambda x: int(x) if str(x).isdigit() else str(x)):
+    for episode in sorted(
+        episodes,
+        key=lambda x: int(x) if str(x).isdigit() else str(x),
+    ):
         sources = episodes[episode]
-        links = _quality_links(sources)
-        lines.append(f"🎞️ <b>Episode {escape(episode)}</b> — {links}")
+        preferred = [
+            "2160p", "1440p", "1080p", "720p",
+            "480p", "360p", "auto",
+        ]
+        qualities = [
+            q for q in preferred
+            if q in sources
+        ]
+        quality_text = " / ".join(
+            "Source" if q == "auto" else q
+            for q in qualities
+        )
+        lines.append(
+            f"🎞️ <b>Episode {escape(str(episode))}</b> — {quality_text}"
+        )
 
-    if len(tree.get(anime, {})) > 1:
-        back_data = f"lr:{_callback_key(anime + '|' + series)}"
-        back_label = "⬅️ Series"
-    else:
-        back_data = "lb"
-        back_label = "⬅️ Anime"
-    rows.append([InlineKeyboardButton(back_label, callback_data=back_data)])
+        # Each quality is a real URL button to the exact Telegram video
+        # message. The source_sync layer stores topic-aware message links.
+        quality_buttons = []
+        for quality in qualities:
+            label = "Source" if quality == "auto" else quality
+            quality_buttons.append(
+                InlineKeyboardButton(
+                    label,
+                    url=sources[quality],
+                )
+            )
+        if quality_buttons:
+            rows.append(quality_buttons)
+
+    rows.append([
+        InlineKeyboardButton(
+            "⬅️ Back",
+            callback_data=f"la:{_callback_key(anime)}",
+        )
+    ])
     return "\n".join(lines), _keyboard(rows)
+
+
+async def library_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tree = _load_tree()
+    if not tree:
+        await update.message.reply_text("📚 Library abhi empty hai.")
+        return
+    text, markup = _anime_page(tree)
+    await update.message.reply_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=markup,
+        disable_web_page_preview=True,
+    )
+
+
+async def library_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    tree = _load_tree()
+    data = query.data or ""
+
+    try:
+        if data == "lb":
+            text, markup = _anime_page(tree)
+
+        elif data.startswith("la:"):
+            anime = _resolve_key(tree, data[3:])
+            if not isinstance(anime, str) or anime not in tree:
+                await query.answer(
+                    "Anime library entry nahi mila.",
+                    show_alert=True,
+                )
+                return
+            text, markup = _season_page(tree, anime)
+
+        elif data.startswith("lt:"):
+            key = data[3:]
+            resolved = None
+            for anime in tree:
+                for season in _merged_seasons(tree, anime):
+                    if _callback_key(anime + "|" + season) == key:
+                        resolved = (anime, season)
+                        break
+                if resolved:
+                    break
+
+            if not resolved:
+                await query.answer(
+                    "Season library entry nahi mila.",
+                    show_alert=True,
+                )
+                return
+
+            anime, season = resolved
+            text, markup = _episode_page(tree, anime, season)
+
+        else:
+            return
+
+        try:
+            await query.edit_message_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=markup,
+                disable_web_page_preview=True,
+            )
+        except Exception as edit_exc:
+            logger.warning(
+                "Library edit failed; sending fresh page: %s",
+                edit_exc,
+            )
+            await query.message.reply_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=markup,
+                disable_web_page_preview=True,
+            )
+
+    except Exception:
+        logger.exception("Library navigation failed")
+        try:
+            await query.answer(
+                "Library load failed.",
+                show_alert=True,
+            )
+        except Exception:
+            pass
 
 
 async def library_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
