@@ -167,8 +167,7 @@ def _keyboard(rows):
 
 def _anime_page(tree):
     rows = []
-    names = sorted(tree, key=str.casefold)
-    for anime in names:
+    for anime in sorted(tree, key=str.casefold):
         rows.append([
             InlineKeyboardButton(
                 f"🎬 {anime}",
@@ -192,14 +191,13 @@ def _content_label(season):
 
 
 def _merged_seasons(tree, anime):
-    """Merge all internal series records into the public anime hierarchy."""
+    """Merge internal series records into the public anime hierarchy."""
     merged = {}
     for series_data in tree.get(anime, {}).values():
         for season, episodes in series_data.items():
-            target_season = merged.setdefault(season, {})
+            target = merged.setdefault(season, {})
             for episode, sources in episodes.items():
-                target_episode = target_season.setdefault(episode, {})
-                target_episode.update(sources)
+                target.setdefault(episode, {}).update(sources)
     return merged
 
 
@@ -210,7 +208,7 @@ def _season_page(tree, anime):
         rows.append([
             InlineKeyboardButton(
                 f"📺 {_content_label(season)}",
-                callback_data=f"lt:{_callback_key(anime + "|" + season)}",
+                callback_data=f"lt:{_callback_key(anime + '|' + season)}",
             )
         ])
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data="lb")])
@@ -218,28 +216,24 @@ def _season_page(tree, anime):
 
 
 def _episode_page(tree, anime, season):
-    seasons = _merged_seasons(tree, anime)
-    episodes = seasons.get(season, {})
+    episodes = _merged_seasons(tree, anime).get(season, {})
     lines = [
         f"🎬 <b>{escape(anime)}</b>",
         f"📺 <b>{escape(_content_label(season))}</b>",
         "",
     ]
     rows = []
+    preferred = [
+        "2160p", "1440p", "1080p", "720p",
+        "480p", "360p", "auto",
+    ]
 
     for episode in sorted(
         episodes,
         key=lambda x: int(x) if str(x).isdigit() else str(x),
     ):
         sources = episodes[episode]
-        preferred = [
-            "2160p", "1440p", "1080p", "720p",
-            "480p", "360p", "auto",
-        ]
-        qualities = [
-            q for q in preferred
-            if q in sources
-        ]
+        qualities = [q for q in preferred if q in sources]
         quality_text = " / ".join(
             "Source" if q == "auto" else q
             for q in qualities
@@ -248,19 +242,18 @@ def _episode_page(tree, anime, season):
             f"🎞️ <b>Episode {escape(str(episode))}</b> — {quality_text}"
         )
 
-        # Each quality is a real URL button to the exact Telegram video
-        # message. The source_sync layer stores topic-aware message links.
-        quality_buttons = []
+        # One row per episode: every quality button opens the exact Telegram
+        # video message stored for that quality.
+        buttons = []
         for quality in qualities:
-            label = "Source" if quality == "auto" else quality
-            quality_buttons.append(
+            buttons.append(
                 InlineKeyboardButton(
-                    label,
+                    "Source" if quality == "auto" else quality,
                     url=sources[quality],
                 )
             )
-        if quality_buttons:
-            rows.append(quality_buttons)
+        if buttons:
+            rows.append(buttons)
 
     rows.append([
         InlineKeyboardButton(
@@ -276,6 +269,7 @@ async def library_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not tree:
         await update.message.reply_text("📚 Library abhi empty hai.")
         return
+
     text, markup = _anime_page(tree)
     await update.message.reply_text(
         text,
@@ -358,78 +352,3 @@ async def library_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-
-async def library_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tree = _load_tree()
-    if not tree:
-        await update.message.reply_text("📚 Library abhi empty hai.")
-        return
-    text, markup = _anime_page(tree)
-    await update.message.reply_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=markup,
-        disable_web_page_preview=True,
-    )
-
-
-async def library_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    tree = _load_tree()
-    data = query.data or ""
-
-    try:
-        if data == "lb":
-            text, markup = _anime_page(tree)
-        elif data.startswith("la:"):
-            anime = _resolve_key(tree, data[3:])
-            if not isinstance(anime, str) or anime not in tree:
-                await query.answer("Anime library entry nahi mila.", show_alert=True)
-                return
-            if len(tree[anime]) > 1:
-                text, markup = _series_page(tree, anime)
-            else:
-                series = next(iter(tree[anime]))
-                text, markup = _season_page(tree, anime, series)
-        elif data.startswith("lr:"):
-            resolved = _resolve_key(tree, data[3:])
-            if not isinstance(resolved, tuple) or len(resolved) != 2:
-                await query.answer("Series library entry nahi mila.", show_alert=True)
-                return
-            anime, series = resolved
-            if anime not in tree or series not in tree.get(anime, {}):
-                await query.answer("Series library entry nahi mila.", show_alert=True)
-                return
-            text, markup = _season_page(tree, anime, series)
-        elif data.startswith("ls:"):
-            resolved = _resolve_key(tree, data[3:])
-            if not isinstance(resolved, tuple) or len(resolved) != 3:
-                await query.answer("Season library entry nahi mila.", show_alert=True)
-                return
-            anime, series, season = resolved
-            text, markup = _episode_page(tree, anime, series, season)
-        else:
-            return
-
-        try:
-            await query.edit_message_text(
-                text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=markup,
-                disable_web_page_preview=True,
-            )
-        except Exception as edit_exc:
-            logger.warning("Library edit failed; sending fresh page: %s", edit_exc)
-            await query.message.reply_text(
-                text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=markup,
-                disable_web_page_preview=True,
-            )
-    except Exception:
-        logger.exception("Library navigation failed")
-        try:
-            await query.answer("Library load failed.", show_alert=True)
-        except Exception:
-            pass
