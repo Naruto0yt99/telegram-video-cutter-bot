@@ -561,7 +561,7 @@ async def find_and_build(input_video, user_id, telethon_client, progress_message
     input_video=Path(input_video)
     if not input_video.exists(): raise RuntimeError("Input video nahi mila.")
     if progress_message:
-        try: await progress_message.edit_text("🎯 FIND — 10%\n\n🧠 Gemini visual fingerprint bana raha hai...\nHar rapid-cut scene ko alag identify kar raha hoon.")
+        try: await progress_message.edit_text("🎯 FIND — 10%\n\n🧠 Gemini edit ke scenes identify kar raha hai...\nUske baad Telegram se sirf targeted visual windows search honge.")
         except Exception: pass
     regions=await analyze_video(input_video)
     if not regions: raise RuntimeError("Gemini ko koi usable anime scene nahi mila.")
