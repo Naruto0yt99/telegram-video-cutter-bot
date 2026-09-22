@@ -10,7 +10,7 @@ from telegram_media import is_video_message, get_message_video_name
 from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
-PARSER_VERSION = 27
+PARSER_VERSION = 28
 
 
 _QUALITY_PATTERNS = [
@@ -405,14 +405,23 @@ def _library_has_sources():
 
 
 def _message_link(message: Message):
-    link = getattr(message, "link", None)
-    if link:
-        return link
+    """Build an exact public message link, including its forum topic path."""
     chat = getattr(message, "chat", None)
     username = getattr(chat, "username", None)
-    if username:
-        return f"https://t.me/{username}/{message.id}"
-    return None
+    if not username:
+        return getattr(message, "link", None)
+
+    reply = getattr(message, "reply_to", None)
+    thread_id = None
+    if reply:
+        thread_id = getattr(reply, "reply_to_top_id", None)
+        if not thread_id:
+            thread_id = getattr(reply, "reply_to_msg_id", None)
+
+    if thread_id and int(thread_id) != int(message.id):
+        return f"https://t.me/{username}/{int(thread_id)}/{int(message.id)}?single"
+
+    return f"https://t.me/{username}/{int(message.id)}?single"
 
 
 async def _topic_text_for_message(client, entity, message, cache):
@@ -449,12 +458,25 @@ def _topic_title_from_message(message):
 def _reset_index_for_parser_upgrade(last_version: int):
     if last_version == PARSER_VERSION:
         return
-    chat_name = str(SOURCE_CHAT).lstrip("@")
-    prefix = f"https://t.me/{chat_name}/%"
+
+    # Source was moved from @animeclipcutter to @AnimeNation012.
+    # Remove only entries belonging to either source chat; keep unrelated
+    # manually-added links intact.
     with get_connection() as conn:
-        conn.execute("DELETE FROM library WHERE source_url LIKE ?", (prefix,))
+        conn.execute(
+            "DELETE FROM library WHERE source_url LIKE ? OR source_url LIKE ?",
+            (
+                "https://t.me/animeclipcutter/%",
+                "https://t.me/AnimeNation012/%",
+            ),
+        )
         conn.commit()
-    logger.info("Rebuilding source index after parser upgrade %s -> %s", last_version, PARSER_VERSION)
+
+    logger.info(
+        "Rebuilding source index after parser upgrade %s -> %s",
+        last_version,
+        PARSER_VERSION,
+    )
 
 
 async def sync_source_library(client):
