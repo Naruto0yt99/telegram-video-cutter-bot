@@ -1,10 +1,14 @@
 import io
 import json
+import tempfile
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 from telegram import Bot
 from telegram.error import TelegramError
+
+from remote_fingerprint import build_fingerprint_index_image
 
 
 TOPIC_BIND_FILE = Path("data/fingerprint_topic.json")
@@ -120,6 +124,39 @@ async def save_fingerprint_json(
         caption=caption,
         message_thread_id=int(topic_id),
     )
+
+
+async def save_fingerprint_pack(bot: Bot, chat_id: str, fingerprint: dict, filename: str, message_thread_id=None):
+    check = await check_fingerprint_storage(bot, chat_id)
+    topic_id = message_thread_id or check.get("topic_id")
+    if check["status"] not in {"administrator", "creator"}:
+        raise PermissionError(f"Fingerprint storage unavailable: status={check['status']}")
+    if topic_id is None:
+        raise PermissionError("Fingerprint topic not bound. FINGERPRINTS topic me /fingerprint_bind bhejo.")
+
+    safe = filename[:-4] if filename.endswith(".zip") else filename
+    with tempfile.TemporaryDirectory(prefix="fp_pack_") as tmp:
+        root = Path(tmp)
+        json_path = root / "fingerprint.json"
+        index_path = root / "index.jpg"
+        json_path.write_text(json.dumps(fingerprint, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        build_fingerprint_index_image(fingerprint, index_path, every_seconds=10.0, columns=12)
+        zip_path = root / f"{safe}.zip"
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+            zf.write(json_path, "fingerprint.json")
+            zf.write(index_path, "index.jpg")
+        payload = zip_path.read_bytes()
+
+    if len(payload) > 50 * 1024 * 1024:
+        raise ValueError("Fingerprint pack 50 MB se bada ho gaya.")
+    bio = io.BytesIO(payload)
+    bio.name = f"{safe}.zip"
+    caption = (
+        "🧠 Anime fingerprint pack\\n"
+        f"📚 {fingerprint.get('anime', 'Unknown')} S{fingerprint.get('season', '?')} E{fingerprint.get('episode', '?')}\\n"
+        "🧩 Contains: fingerprint.json + visual index.jpg"
+    )
+    return await bot.send_document(chat_id=chat_id, document=bio, caption=caption, message_thread_id=int(topic_id))
 
 
 async def fingerprint_storage_status(bot: Bot, chat_id: str) -> str:
