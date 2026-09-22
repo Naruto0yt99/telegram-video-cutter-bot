@@ -675,7 +675,16 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
     except Exception as exc:
         logger.exception("Find failed")
-        await safe_edit_text(status, f"❌ FIND FAILED\n\n{exc}")
+        error_text = str(exc)
+        if error_text.startswith("RETRY_LIMIT_REACHED:"):
+            await safe_edit_text(
+                status,
+                "🛑 PROCESSING STOPPED\n\n"
+                "⚠️ Same step ne 2 retries ke baad bhi response nahi diya.\n"
+                "❌ Is problem ki wajah se bot ne processing aage continue nahi ki."
+            )
+        else:
+            await safe_edit_text(status, f"❌ FIND FAILED\n\n{exc}")
     finally:
         cleanup_user_temp(user_id)
 
