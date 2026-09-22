@@ -10,6 +10,7 @@ import numpy as np
 
 from config import FFMPEG_BIN, TEMP_DIR
 from telegram_media import parse_telegram_message_link
+from telethon.errors import FileReferenceExpiredError
 
 
 CHECKPOINT_DIR = Path(TEMP_DIR) / "fingerprint_checkpoints"
@@ -174,6 +175,196 @@ async def _fingerprint_segment(
         raise
 
 
+
+DOWNLOAD_CHUNK_BYTES = 512 * 1024
+DOWNLOAD_CHUNK_TIMEOUT = 30.0
+MAX_DOWNLOAD_RETRIES = 2
+DOWNLOAD_RETRY_DELAY = 2.0
+
+
+async def _download_episode_resumable(
+    client,
+    message,
+    source_url,
+    temp_path,
+):
+    """Download a Telegram episode into a resumable .part file.
+
+    Only complete chunks are appended. If the network disappears, the partial
+    file is kept and the next fingerprint run resumes from its exact size.
+    The final file is atomically renamed only after the expected byte count is
+    reached, so a partial episode can never be mistaken for a complete one.
+    """
+    media = getattr(message, "media", None)
+    document = getattr(media, "document", None)
+    if document is None:
+        raise RuntimeError("Telegram source message me downloadable document nahi hai.")
+
+    total_size = int(getattr(document, "size", 0) or 0)
+    if total_size <= 0:
+        raise RuntimeError("Telegram episode file size nahi mila.")
+
+    part_path = Path(str(temp_path) + ".part")
+    meta_path = Path(str(part_path) + ".json")
+
+    metadata = {
+        "version": 1,
+        "source_url": source_url,
+        "expected_size": total_size,
+        "message_id": int(getattr(message, "id", 0) or 0),
+    }
+
+    # Never resume bytes belonging to a different Telegram source/file.
+    if part_path.exists():
+        try:
+            old = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            old = None
+        if (
+            not isinstance(old, dict)
+            or old.get("source_url") != source_url
+            or int(old.get("expected_size", -1)) != total_size
+            or int(old.get("message_id", -1)) != int(getattr(message, "id", 0) or 0)
+        ):
+            part_path.unlink(missing_ok=True)
+            meta_path.unlink(missing_ok=True)
+
+    if not part_path.exists():
+        meta_path.write_text(
+            json.dumps(metadata, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        with part_path.open("wb"):
+            pass
+    elif not meta_path.exists():
+        # An untracked partial file is unsafe to resume because its source is
+        # unknown. Restart it cleanly rather than risking mixed bytes.
+        part_path.unlink(missing_ok=True)
+        meta_path.write_text(
+            json.dumps(metadata, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        with part_path.open("wb"):
+            pass
+
+    current = part_path.stat().st_size
+    if current > total_size:
+        part_path.unlink(missing_ok=True)
+        current = 0
+        with part_path.open("wb"):
+            pass
+
+    while current < total_size:
+        last_error = None
+
+        for attempt in range(1, MAX_DOWNLOAD_RETRIES + 1):
+            try:
+                # Refresh the Telegram message for every retry. This also gives
+                # Telethon a fresh file reference after expiration.
+                if attempt > 1:
+                    refreshed = await client.get_messages(
+                        getattr(message, "chat_id", None),
+                        ids=message.id,
+                    )
+                    if refreshed:
+                        message = refreshed
+                        media = getattr(message, "media", None)
+                        document = getattr(media, "document", None)
+                        if document is None:
+                            raise RuntimeError("Refreshed Telegram media missing.")
+                        refreshed_size = int(getattr(document, "size", 0) or 0)
+                        if refreshed_size and refreshed_size != total_size:
+                            raise RuntimeError(
+                                f"Telegram file size changed during download "
+                                f"({total_size} -> {refreshed_size})."
+                            )
+
+                current = part_path.stat().st_size
+                iterator = client.iter_download(
+                    message.media,
+                    offset=current,
+                    request_size=DOWNLOAD_CHUNK_BYTES,
+                    chunk_size=DOWNLOAD_CHUNK_BYTES,
+                )
+
+                while current < total_size:
+                    chunk = await asyncio.wait_for(
+                        iterator.__anext__(),
+                        timeout=DOWNLOAD_CHUNK_TIMEOUT,
+                    )
+                    if not chunk:
+                        raise RuntimeError(
+                            f"Telegram download stopped at {current}/{total_size} bytes."
+                        )
+
+                    remaining = total_size - current
+                    if len(chunk) > remaining:
+                        chunk = chunk[:remaining]
+
+                    # Append only after a complete Telegram chunk is received.
+                    # A network interruption therefore leaves a safe resume point.
+                    with part_path.open("ab") as handle:
+                        handle.write(chunk)
+                        handle.flush()
+
+                    current += len(chunk)
+
+                if current == total_size:
+                    break
+
+            except StopAsyncIteration:
+                current = part_path.stat().st_size
+                if current >= total_size:
+                    break
+                last_error = RuntimeError(
+                    f"Telegram download ended early at {current}/{total_size} bytes."
+                )
+            except FileReferenceExpiredError as exc:
+                last_error = exc
+                try:
+                    refreshed = await client.get_messages(
+                        getattr(message, "chat_id", None),
+                        ids=message.id,
+                    )
+                    if refreshed:
+                        message = refreshed
+                except Exception:
+                    pass
+            except asyncio.TimeoutError as exc:
+                last_error = RuntimeError(
+                    f"Episode download chunk stalled for {DOWNLOAD_CHUNK_TIMEOUT:.0f}s."
+                )
+            except Exception as exc:
+                last_error = exc
+
+            if part_path.exists():
+                current = part_path.stat().st_size
+            if current >= total_size:
+                break
+
+            if attempt < MAX_DOWNLOAD_RETRIES:
+                await asyncio.sleep(DOWNLOAD_RETRY_DELAY)
+
+        if current >= total_size:
+            break
+
+        detail = str(last_error or "unknown download error")
+        raise RuntimeError(
+            "RETRY_LIMIT_REACHED: "
+            f"Episode download stopped at {current}/{total_size} bytes "
+            f"after {MAX_DOWNLOAD_RETRIES} retries. {detail}"
+        )
+
+    if part_path.stat().st_size != total_size:
+        raise RuntimeError(
+            f"Episode download incomplete: {part_path.stat().st_size}/{total_size} bytes."
+        )
+
+    # Atomic rename: only the fully downloaded file gets the .episode name.
+    part_path.replace(temp_path)
+    meta_path.unlink(missing_ok=True)
+    return temp_path, total_size
+
 async def build_remote_fingerprint(
     client,
     source_url,
@@ -196,6 +387,7 @@ async def build_remote_fingerprint(
     """
     checkpoint = _checkpoint_path(anime, season, episode)
     temp_path = None
+    fingerprint_complete = False
 
     try:
         chat, message_id = parse_telegram_message_link(source_url)
@@ -223,15 +415,26 @@ async def build_remote_fingerprint(
             f"{_safe_name(anime)}_S{int(season)}E{int(episode)}.episode"
         )
 
-        # Reuse a complete temporary download if a previous fingerprint run was
-        # interrupted after the download finished.
-        if not temp_path.exists() or temp_path.stat().st_size < 1024:
+        # Reuse a complete temporary download if a previous fingerprint run
+        # finished downloading but was interrupted during local FFmpeg scanning.
+        if temp_path.exists() and temp_path.stat().st_size >= 1024:
             if progress:
                 try:
                     await progress(0, expected_total)
                 except Exception:
                     pass
-            await client.download_media(message, file=str(temp_path))
+        else:
+            if progress:
+                try:
+                    await progress(0, expected_total)
+                except Exception:
+                    pass
+            await _download_episode_resumable(
+                client,
+                message,
+                source_url,
+                temp_path,
+            )
 
         if not temp_path.exists() or temp_path.stat().st_size < 1024:
             raise RuntimeError("Episode download incomplete or empty.")
@@ -353,9 +556,14 @@ async def build_remote_fingerprint(
                 pass
 
         checkpoint.unlink(missing_ok=True)
+        fingerprint_complete = True
         return result
     finally:
-        if temp_path is not None:
+        # Successful fingerprints release the full temporary episode. If local
+        # fingerprinting is interrupted, keep the completed episode so the next
+        # run can skip the network download; resumable .part files are kept by
+        # the downloader itself after network failures.
+        if fingerprint_complete and temp_path is not None:
             try:
                 temp_path.unlink(missing_ok=True)
             except Exception:
