@@ -84,7 +84,7 @@ GEMINI_API_KEY = env(
 )
 
 # Dedicated source channel containing the episode library.
-SOURCE_CHAT = "@animeclipcutter"
+SOURCE_CHAT = "@AnimeNation012"
 
 # Telegram channel used to store generated episode fingerprint JSON files.
 FINGERPRINT_CHAT = env(
