@@ -198,11 +198,56 @@ def _distinct_results(results, distance=10.0):
     return chosen
 
 
+async def _parallel_search_windows(
+    server_url,
+    starts,
+    target_groups,
+    usable_regions,
+    window,
+    source_duration,
+    job_dir,
+    fps,
+    concurrency=2,
+):
+    semaphore = asyncio.Semaphore(max(1, int(concurrency)))
+
+    async def search_one(start):
+        async with semaphore:
+            try:
+                result = await _search_window(
+                    server_url,
+                    target_groups,
+                    usable_regions,
+                    start,
+                    min(window, max(1.0, source_duration - start)),
+                    job_dir,
+                    fps=fps,
+                )
+                return result
+            except Exception as exc:
+                logger = __import__("logging").getLogger("visual-matcher")
+                logger.info("visual window failed start=%s: %s", start, exc)
+                return None
+
+    results = await asyncio.gather(*(search_one(start) for start in starts))
+    return [result for result in results if result]
+
+
 async def find_visual_match(client, candidate, segment, target_video, job_dir, source_duration):
-    """Hierarchical remote visual retrieval returning several independent candidates."""
+    """Hierarchical remote visual retrieval without full-episode fingerprinting.
+
+    The search is intentionally bounded:
+    - one Telegram range server is reused for coarse + refine passes;
+    - coarse windows run with small bounded concurrency;
+    - only the best distinct coarse hits are refined at higher FPS;
+    - no persistent full-episode fingerprint is required for /find.
+    """
     from telegram_remote import open_telegram_range_server
 
-    target_duration = max(1.0, float(segment["end_time"]) - float(segment["start_time"]))
+    target_duration = max(
+        1.0,
+        float(segment["end_time"]) - float(segment["start_time"]),
+    )
     target_dir = job_dir / f"target_frames_{int(float(segment['start_time']) * 10)}"
     target_fps = 1.5 if target_duration <= 20 else 0.75
     target_frames = await _extract_frames(target_video, target_dir, fps=target_fps)
@@ -226,104 +271,125 @@ async def find_visual_match(client, candidate, segment, target_video, job_dir, s
     max_start = max(0.0, source_duration - window)
 
     if hint is not None:
+        # Keep the hint path tight. The old implementation tried 11 windows;
+        # this covers the local neighborhood plus progressively wider recovery.
         starts = _unique_starts(
             [
                 hint - window / 2,
-                hint - 18,
-                hint + 18,
+                hint,
+                hint + window / 2,
                 hint - 45,
                 hint + 45,
-                hint - 90,
-                hint + 90,
-                hint - 180,
-                hint + 180,
-                hint - 300,
-                hint + 300,
+                hint - 120,
+                hint + 120,
             ],
             max_start,
         )
     else:
-        step = max(55.0, window * 1.15)
-        count = min(28, max(8, int(source_duration / step) + 1))
+        # No hint: sparse whole-episode coverage. Windows are intentionally
+        # larger than the stride so neighboring windows overlap enough to catch
+        # scenes near a boundary without needing a full visual fingerprint.
+        step = max(80.0, window * 1.25)
+        count = min(18, max(10, int(source_duration / step) + 1))
         starts = _unique_starts(
             [max_start * i / max(1, count - 1) for i in range(count)],
             max_start,
         )
 
-    coarse = []
     server = None
     try:
         server = await open_telegram_range_server(client, candidate["source_url"])
-        for start in starts:
+
+        # Telegram/Termux is already doing chunk-level parallel reads. Keep
+        # window-level concurrency deliberately small because find_engine.py
+        # can run up to four scenes at the same time.
+        coarse = await _parallel_search_windows(
+            server.url,
+            starts,
+            target_groups,
+            usable_regions,
+            window,
+            source_duration,
+            job_dir,
+            fps=0.5,
+            concurrency=2,
+        )
+
+        if not coarse:
+            return None
+
+        # Refine only the best distinct coarse hits. Reuse the same range server
+        # instead of reopening Telegram for every candidate.
+        refined = []
+        refine_results = _distinct_results(
+            coarse,
+            distance=max(8.0, target_duration * 0.7),
+        )[:3]
+
+        refine_tasks = []
+        for coarse_result in refine_results:
+            coarse_center = float(coarse_result["source_time"])
+            refine_start = max(0.0, coarse_center - 14.0)
+            refine_duration = min(
+                source_duration - refine_start,
+                max(22.0, target_duration * 1.7 + 8.0),
+            )
+            refine_tasks.append(
+                (
+                    refine_start,
+                    refine_duration,
+                )
+            )
+
+        async def refine_one(item):
+            refine_start, refine_duration = item
             try:
-                result = await _search_window(
+                return await _search_window(
                     server.url,
                     target_groups,
                     usable_regions,
-                    start,
-                    min(window, max(1.0, source_duration - start)),
+                    refine_start,
+                    max(1.0, refine_duration),
                     job_dir,
-                    fps=0.5,
+                    fps=2.0,
                 )
             except Exception as exc:
                 logger = __import__("logging").getLogger("visual-matcher")
-                logger.info("coarse window failed start=%s: %s", start, exc)
-                continue
-            if result:
-                coarse.append(result)
+                logger.info("visual refine failed start=%s: %s", refine_start, exc)
+                return None
+
+        refined = [
+            result
+            for result in await asyncio.gather(
+                *(refine_one(item) for item in refine_tasks)
+            )
+            if result
+        ]
+
+        pool = refined or coarse
+        candidates = []
+        for result in _distinct_results(
+            pool,
+            distance=max(6.0, target_duration * 0.5),
+        ):
+            center = float(result["source_time"])
+            margin = max(7.0, min(15.0, target_duration * 0.65))
+            start = max(0.0, center - margin)
+            end = min(source_duration, center + margin + target_duration)
+            candidates.append({
+                "start": start,
+                "end": max(start + 1.0, end),
+                "center": center,
+                "score": float(result["score"]),
+                "median_distance": float(result["median_distance"]),
+                "progression": float(result["progression"]),
+                "coverage": float(result.get("coverage", 0.0)),
+            })
+
+        candidates.sort(key=lambda x: x["score"])
+        if not candidates:
+            return None
+        return candidates[0] | {"candidates": candidates}
     finally:
         if server is not None:
             await server.close()
-
-    if not coarse:
-        return None
-
-    refined = []
-    for coarse_result in _distinct_results(coarse, distance=max(8.0, target_duration * 0.7)):
-        coarse_center = float(coarse_result["source_time"])
-        refine_start = max(0.0, coarse_center - 14.0)
-        refine_duration = min(
-            source_duration - refine_start,
-            max(22.0, target_duration * 1.7 + 8.0),
-        )
-        server = None
-        try:
-            server = await open_telegram_range_server(client, candidate["source_url"])
-            result = await _search_window(
-                server.url,
-                target_groups,
-                usable_regions,
-                refine_start,
-                max(1.0, refine_duration),
-                job_dir,
-                fps=2.0,
-            )
-            if result:
-                refined.append(result)
-        except Exception:
-            pass
-        finally:
-            if server is not None:
-                await server.close()
-
-    pool = refined or coarse
-    candidates = []
-    for result in _distinct_results(pool, distance=max(6.0, target_duration * 0.5)):
-        center = float(result["source_time"])
-        margin = max(7.0, min(15.0, target_duration * 0.65))
-        start = max(0.0, center - margin)
-        end = min(source_duration, center + margin + target_duration)
-        candidates.append({
-            "start": start,
-            "end": max(start + 1.0, end),
-            "center": center,
-            "score": float(result["score"]),
-            "median_distance": float(result["median_distance"]),
-            "progression": float(result["progression"]),
-            "coverage": float(result.get("coverage", 0.0)),
-        })
-
-    candidates.sort(key=lambda x: x["score"])
-    if not candidates:
-        return None
-    return candidates[0] | {"candidates": candidates}
