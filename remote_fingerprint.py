@@ -284,3 +284,48 @@ async def build_remote_fingerprint(
     finally:
         if server is not None:
             await server.close()
+
+
+def build_fingerprint_index_image(fingerprint, output_path, every_seconds=10.0, columns=12):
+    """Render a compact visual index from stored fingerprint samples."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    hashes = fingerprint.get("hashes")
+    if not hashes:
+        raise ValueError("Fingerprint has no hashes.")
+
+    raw = zlib.decompress(base64.b64decode(str(hashes).encode("ascii")))
+    shape = tuple(int(x) for x in fingerprint.get("shape", []))
+    if len(shape) != 3:
+        raise ValueError("Invalid fingerprint shape.")
+    arr = np.frombuffer(raw, dtype=np.uint8).reshape(shape)
+    times = [float(x) for x in fingerprint.get("times", [])]
+    sample_every = float(fingerprint.get("sample_every", 2.0) or 2.0)
+    step = max(1, int(round(float(every_seconds) / sample_every)))
+    selected = list(range(0, len(arr), step))
+    if selected and selected[-1] != len(arr) - 1:
+        selected.append(len(arr) - 1)
+    if not selected:
+        selected = [0]
+
+    thumb_w, thumb_h = 160, 90
+    label_h = 18
+    columns = max(1, int(columns))
+    rows = int(math.ceil(len(selected) / columns))
+    canvas = Image.new("RGB", (columns * thumb_w, rows * (thumb_h + label_h)), "white")
+    draw = ImageDraw.Draw(canvas)
+    for pos, idx in enumerate(selected):
+        gray = Image.fromarray(arr[idx], mode="L").resize((thumb_w, thumb_h), Image.Resampling.BILINEAR)
+        tile = Image.merge("RGB", (gray, gray, gray))
+        x = (pos % columns) * thumb_w
+        y = (pos // columns) * (thumb_h + label_h)
+        canvas.paste(tile, (x, y))
+        seconds = times[idx] if idx < len(times) else idx * sample_every
+        mins = int(seconds // 60)
+        secs = int(seconds % 60)
+        draw.rectangle((x, y + thumb_h, x + thumb_w, y + thumb_h + label_h), fill="white")
+        draw.text((x + 3, y + thumb_h + 2), f"{mins:02d}:{secs:02d}", fill="black")
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(output_path, format="JPEG", quality=88, optimize=True)
+    return output_path
