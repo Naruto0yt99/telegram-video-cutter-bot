@@ -277,34 +277,26 @@ async def find_visual_match(client, candidate, segment, target_video, job_dir, s
         max_start = max(0.0, source_duration - window)
 
         if hint is not None:
-        # Keep the hint path tight. The old implementation tried 11 windows;
-        # this covers the local neighborhood plus progressively wider recovery.
-        starts = _unique_starts(
-            [
-                hint - window / 2,
-                hint,
-                hint + window / 2,
-                hint - 45,
-                hint + 45,
-                hint - 120,
-                hint + 120,
-            ],
-            max_start,
-        )
-    else:
-        # No hint: sparse whole-episode coverage. Windows are intentionally
-        # larger than the stride so neighboring windows overlap enough to catch
-        # scenes near a boundary without needing a full visual fingerprint.
-        step = max(80.0, window * 1.25)
-        count = min(18, max(10, int(source_duration / step) + 1))
-        starts = _unique_starts(
-            [max_start * i / max(1, count - 1) for i in range(count)],
-            max_start,
-        )
+            starts = _unique_starts(
+                [
+                    hint - window / 2,
+                    hint,
+                    hint + window / 2,
+                    hint - 45,
+                    hint + 45,
+                    hint - 120,
+                    hint + 120,
+                ],
+                max_start,
+            )
+        else:
+            step = max(80.0, window * 1.25)
+            count = min(18, max(10, int(source_duration / step) + 1))
+            starts = _unique_starts(
+                [max_start * i / max(1, count - 1) for i in range(count)],
+                max_start,
+            )
 
-        # Telegram/Termux is already doing chunk-level parallel reads. Keep
-        # window-level concurrency deliberately small because find_engine.py
-        # can run up to four scenes at the same time.
         coarse = await _parallel_search_windows(
             server.url,
             starts,
@@ -320,28 +312,10 @@ async def find_visual_match(client, candidate, segment, target_video, job_dir, s
         if not coarse:
             return None
 
-        # Refine only the best distinct coarse hits. Reuse the same range server
-        # instead of reopening Telegram for every candidate.
-        refined = []
         refine_results = _distinct_results(
             coarse,
             distance=max(8.0, target_duration * 0.7),
         )[:3]
-
-        refine_tasks = []
-        for coarse_result in refine_results:
-            coarse_center = float(coarse_result["source_time"])
-            refine_start = max(0.0, coarse_center - 14.0)
-            refine_duration = min(
-                source_duration - refine_start,
-                max(22.0, target_duration * 1.7 + 8.0),
-            )
-            refine_tasks.append(
-                (
-                    refine_start,
-                    refine_duration,
-                )
-            )
 
         async def refine_one(item):
             refine_start, refine_duration = item
@@ -359,6 +333,16 @@ async def find_visual_match(client, candidate, segment, target_video, job_dir, s
                 logger = __import__("logging").getLogger("visual-matcher")
                 logger.info("visual refine failed start=%s: %s", refine_start, exc)
                 return None
+
+        refine_tasks = []
+        for coarse_result in refine_results:
+            coarse_center = float(coarse_result["source_time"])
+            refine_start = max(0.0, coarse_center - 14.0)
+            refine_duration = min(
+                source_duration - refine_start,
+                max(22.0, target_duration * 1.7 + 8.0),
+            )
+            refine_tasks.append((refine_start, refine_duration))
 
         refined = [
             result
