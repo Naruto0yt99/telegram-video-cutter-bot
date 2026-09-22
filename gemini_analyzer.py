@@ -89,8 +89,9 @@ def _generate_sync(model: str, payload: dict):
                 last_error = exc
                 status = exc.response.status_code if exc.response is not None else None
                 logger.warning(
-                    "Gemini request failed model=%s attempt=%s status=%s: %s",
-                    model, attempt + 1, status, exc,
+                    "Gemini request failed model=%s attempt=%s status=%s body=%s",
+                    model, attempt + 1, status,
+                    (exc.response.text[:2000] if exc.response is not None else ""),
                 )
                 # 503/429 are commonly transient service/rate-limit responses.
                 # Retry the same model briefly before falling through to the next
@@ -141,7 +142,6 @@ def _generate_video_prompt(file_name: str, prompt: str, thinking_level="low"):
         # visual detail to distinguish characters, locations and actions.
         "generationConfig": {
             "responseMimeType": "application/json",
-            "mediaResolution": "MEDIA_RESOLUTION_MEDIUM",
             "thinkingConfig": {"thinkingLevel": str(thinking_level or "low").lower()},
         },
     }
