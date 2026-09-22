@@ -103,7 +103,7 @@ async def _gemini_upload_telegram(client, source_url: str, display_name: str):
             raise RuntimeError("Gemini visual proxy empty bana.")
 
         last_error = None
-        for attempt in range(4):
+        for attempt in range(3):
             try:
                 file_data = await _gemini_upload_path(path)
                 if not file_data.get("name"):
@@ -111,7 +111,7 @@ async def _gemini_upload_telegram(client, source_url: str, display_name: str):
                 return file_data, duration, path.stat().st_size
             except Exception as exc:
                 last_error = exc
-                if attempt >= 3:
+                if attempt >= 2:
                     raise
                 await asyncio.sleep(2 ** attempt)
 
