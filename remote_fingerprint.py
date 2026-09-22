@@ -74,7 +74,7 @@ async def build_remote_fingerprint(
     anime,
     season,
     episode,
-    sample_every=2.0,
+    sample_every=8.0,
     progress=None,
 ):
     """
@@ -132,7 +132,7 @@ async def build_remote_fingerprint(
                     FFMPEG_BIN,
                     "-hide_banner",
                     "-loglevel", "error",
-                    "-threads", "1",
+                    "-threads", "0",
                 ]
                 if resume_time > 0.05:
                     args += ["-ss", f"{resume_time:.3f}"]
