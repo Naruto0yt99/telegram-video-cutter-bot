@@ -600,7 +600,7 @@ async def fingerprint_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         fingerprint = await build_remote_fingerprint(
             telethon_client, source_url, anime, season, episode,
-            sample_every=8.0, progress=progress,
+            sample_every=2.0, progress=progress,
         )
         await safe_edit_text(status, "🧠 FINGERPRINT — 97%\n\n💾 JSON topic me upload ho raha hai...")
         filename = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{anime}_S{season:02d}_E{episode:03d}") + ".json"
