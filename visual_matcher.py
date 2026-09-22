@@ -259,18 +259,24 @@ async def find_visual_match(client, candidate, segment, target_video, job_dir, s
     if not target_groups:
         return None
 
-    hint = segment.get("source_start_hint")
+    server = None
     try:
-        hint = None if hint is None else float(hint)
-    except (TypeError, ValueError):
-        hint = None
-    if hint is not None:
-        hint = max(0.0, min(hint, max(0.0, source_duration - 1.0)))
+        server = await open_telegram_range_server(client, candidate["source_url"])
+        if not source_duration or source_duration <= 0:
+            source_duration = float(server.duration)
 
-    window = max(28.0, min(75.0, target_duration * 2.8 + 14.0))
-    max_start = max(0.0, source_duration - window)
+        hint = segment.get("source_start_hint")
+        try:
+            hint = None if hint is None else float(hint)
+        except (TypeError, ValueError):
+            hint = None
+        if hint is not None:
+            hint = max(0.0, min(hint, max(0.0, source_duration - 1.0)))
 
-    if hint is not None:
+        window = max(28.0, min(75.0, target_duration * 2.8 + 14.0))
+        max_start = max(0.0, source_duration - window)
+
+        if hint is not None:
         # Keep the hint path tight. The old implementation tried 11 windows;
         # this covers the local neighborhood plus progressively wider recovery.
         starts = _unique_starts(
@@ -295,10 +301,6 @@ async def find_visual_match(client, candidate, segment, target_video, job_dir, s
             [max_start * i / max(1, count - 1) for i in range(count)],
             max_start,
         )
-
-    server = None
-    try:
-        server = await open_telegram_range_server(client, candidate["source_url"])
 
         # Telegram/Termux is already doing chunk-level parallel reads. Keep
         # window-level concurrency deliberately small because find_engine.py
