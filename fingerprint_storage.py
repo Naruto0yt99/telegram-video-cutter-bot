@@ -159,6 +159,30 @@ async def save_fingerprint_pack(bot: Bot, chat_id: str, fingerprint: dict, filen
     return await bot.send_document(chat_id=chat_id, document=bio, caption=caption, message_thread_id=int(topic_id))
 
 
+async def clear_saved_fingerprint_artifacts(client, chat_id, topic_id):
+    """Delete only fingerprint artifacts from the bound FINGERPRINTS topic."""
+    if client is None:
+        raise RuntimeError("Telegram USER_SESSION connected nahi hai.")
+    if topic_id is None:
+        raise RuntimeError("FINGERPRINTS topic bound nahi hai.")
+
+    markers = (
+        "RAW FINGERPRINT",
+        "FINGERPRINT PDF",
+        "VISUAL INDEX",
+        "Anime fingerprint",
+        "Anime fingerprint pack",
+    )
+    deleted = 0
+    async for message in client.iter_messages(chat_id, reply_to=int(topic_id)):
+        caption = str(getattr(message, "message", "") or "")
+        file_name = str(getattr(getattr(message, "file", None), "name", "") or "")
+        if any(marker.lower() in caption.lower() for marker in markers) or "fingerprint" in file_name.lower():
+            await client.delete_messages(chat_id, [message.id])
+            deleted += 1
+    return deleted
+
+
 async def fingerprint_storage_status(bot: Bot, chat_id: str) -> str:
     try:
         info = await check_fingerprint_storage(bot, chat_id)
