@@ -230,7 +230,10 @@ async def _generate(prompt, files):
                         for part in candidate.get("content", {}).get("parts", []):
                             if part.get("text"):
                                 text_parts.append(part["text"])
-                    raw_text = "\n".join(text_parts)
+                    raw_text = "\n".join(text_parts).strip()
+                    if not raw_text:
+                        logger.warning("Gemini returned empty text model=%s response=%s", model, str(data)[:4000])
+                        raise RuntimeError(f"Gemini returned empty text ({model})")
                     try:
                         return _json(raw_text)
                     except Exception as exc:
