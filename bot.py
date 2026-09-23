@@ -1060,6 +1060,7 @@ async def post_init(application: Application):
     if TG_API_ID and TG_API_HASH:
         telethon_client = TelegramClient(TELEGRAM_SESSION, TG_API_ID, TG_API_HASH)
         await telethon_client.start()
+        application.bot_data["telethon_client"] = telethon_client
         logger.info("Telethon source client connected.")
         # The USER_SESSION above is the only client required for source access.
         # The bot-token MTProto client is intentionally lazy: authenticating it on
