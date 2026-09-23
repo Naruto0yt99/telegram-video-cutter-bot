@@ -20,7 +20,7 @@ logger = logging.getLogger("find-pipeline-v3")
 GEMINI_ROOT = "https://generativelanguage.googleapis.com"
 # Requested model first; modern fallback keeps the pipeline usable if the legacy
 # model is unavailable for the account.
-GEMINI_MODELS = ("gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash")
+GEMINI_MODELS = ("gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite")
 GEMINI_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 CHUNK_BYTES = 512 * 1024
 QUALITY_LOW_TO_HIGH = ("240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "auto")
@@ -441,12 +441,23 @@ start/end are ORIGINAL EPISODE seconds, not Short seconds.
 Use exact visible action/continuity. Account for intro offsets, release timing,
 speed changes, crops, subtitles and transitions. Do not match merely because
 characters are similar. Confidence below 0.80 means match=false."""
-        match = await _generate(prompt, [edit_file["name"], ep["gemini_name"]])
-        if not isinstance(match, dict) or not match.get("match"):
+        try:
+            match = await _generate(prompt, [edit_file["name"], ep["gemini_name"]])
+        except Exception as exc:
+            logger.warning("Scene %s exact-match step skipped; continuing remaining scenes: %s", idx, exc)
+            await progress("🎯 FIND — scene %s skip\n\n⚠️ Is scene ka exact timestamp verify nahi ho saka.\n➡️ Baaki scenes continue ho rahe hain..." % idx)
             continue
-        start = float(match.get("start", 0) or 0)
-        end = float(match.get("end", 0) or 0)
+        if not isinstance(match, dict) or not match.get("match"):
+            logger.info("Scene %s had no reliable Gemini match; continuing.", idx)
+            continue
+        try:
+            start = float(match.get("start", 0) or 0)
+            end = float(match.get("end", 0) or 0)
+        except (TypeError, ValueError):
+            logger.warning("Scene %s returned invalid timestamps; continuing.", idx)
+            continue
         if end <= start:
+            logger.warning("Scene %s returned empty interval; continuing.", idx)
             continue
         results.append({
             "index": idx,
