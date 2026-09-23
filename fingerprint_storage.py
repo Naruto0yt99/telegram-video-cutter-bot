@@ -170,6 +170,7 @@ async def clear_saved_fingerprint_artifacts(client, chat_id, topic_id):
         "RAW FINGERPRINT",
         "FINGERPRINT PDF",
         "VISUAL INDEX",
+        "VISUAL INDEX PDF",
         "Anime fingerprint",
         "Anime fingerprint pack",
     )
@@ -327,29 +328,26 @@ async def save_fingerprint_artifacts(
         )
 
     index_path = Path(index_path)
-    if index_path.stat().st_size <= 10 * 1024 * 1024:
-        with index_path.open("rb") as handle:
-            index_msg = await bot.send_photo(
-                chat_id=chat_id,
-                photo=handle,
-                caption=(
-                    "🖼️ VISUAL INDEX\n"
-                    f"📚 {fingerprint.get('anime','Unknown')} S{fingerprint.get('season','?')} E{fingerprint.get('episode','?')}\n"
-                    f"⏱️ One real frame every 2 seconds"
-                ),
-                message_thread_id=int(topic_id),
-            )
-    else:
-        with index_path.open("rb") as handle:
-            index_msg = await bot.send_document(
-                chat_id=chat_id,
-                document=handle,
-                caption=(
-                    "🖼️ VISUAL INDEX (document)\n"
-                    f"📚 {fingerprint.get('anime','Unknown')} S{fingerprint.get('season','?')} E{fingerprint.get('episode','?')}"
-                ),
-                message_thread_id=int(topic_id),
-            )
+    if index_path.suffix.lower() != ".pdf":
+        raise ValueError("Visual index must be a PDF with one frame per page.")
+
+    if index_path.stat().st_size > 50 * 1024 * 1024:
+        raise ValueError(
+            "Visual index PDF 50 MB se bada ho gaya. "
+            "Sampling interval badhao ya frame resolution kam karo."
+        )
+
+    with index_path.open("rb") as handle:
+        index_msg = await bot.send_document(
+            chat_id=chat_id,
+            document=handle,
+            caption=(
+                "🗂️ VISUAL INDEX PDF\n"
+                f"📚 {fingerprint.get('anime','Unknown')} S{fingerprint.get('season','?')} E{fingerprint.get('episode','?')}\n"
+                "🖼️ One real frame per page • 2s interval"
+            ),
+            message_thread_id=int(topic_id),
+        )
 
     return {
         "json": json_msg,
