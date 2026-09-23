@@ -67,7 +67,7 @@ from ffmpeg_utils import (
 
 from find_engine import _extract_remote_clip
 from find_pipeline_v3 import run_find_v3
-from remote_fingerprint import build_remote_fingerprint, build_video_index_image
+from remote_fingerprint import build_remote_fingerprint, build_video_index_pdf
 from yt_downloader import download_video_from_url
 from source_sync import sync_source_library, render_library_html
 from utils import unique_path
@@ -630,9 +630,9 @@ async def fingerprint_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         temp_episode = Path(fingerprint.pop("_temp_episode_path"))
         filename = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{anime}_S{season:02d}_E{episode:03d}") + ".json"
-        index_path = user_temp_dir(update.effective_user.id) / f"{Path(filename).stem}_index.jpg"
+        index_path = user_temp_dir(update.effective_user.id) / f"{Path(filename).stem}_visual_index.pdf"
         await safe_edit_text(status, "🧠 FINGERPRINT — 96%\n\n🖼️ Real episode frames ka visual index ban raha hai...")
-        build_video_index_image(temp_episode, index_path, every_seconds=2.0, columns=12)
+        build_video_index_pdf(temp_episode, index_path, every_seconds=2.0)
         await safe_edit_text(status, "🧠 FINGERPRINT — 98%\n\n☁️ JSON + PDF + index Telegram me save ho rahe hain...")
         artifacts = await save_fingerprint_artifacts(
             context.bot,
@@ -649,7 +649,7 @@ async def fingerprint_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"🧩 Samples: {len(fingerprint.get('times', []))}\n"
             f"📄 PDF message: {artifacts['pdf'].message_id}\n"
             f"🖼️ Index message: {artifacts['index'].message_id}\n\n"
-            "📚 /saves se apni aankho se verify kar sakte ho."
+            "📚 /saves se PDF ko page-by-page verify kar sakte ho."
         )
     except Exception as exc:
         logger.exception("Fingerprint build failed")
