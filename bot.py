@@ -67,13 +67,14 @@ from ffmpeg_utils import (
 
 from find_engine import _extract_remote_clip
 from find_pipeline_v3 import run_find_v3
-from remote_fingerprint import build_remote_fingerprint
+from remote_fingerprint import build_remote_fingerprint, build_video_index_image
 from yt_downloader import download_video_from_url
 from source_sync import sync_source_library, render_library_html
 from utils import unique_path
 from clip_handler import clip_command as source_clip_command
 from library_nav import library_command as nav_library_command, library_deeplink as nav_library_deeplink
-from fingerprint_storage import fingerprint_storage_status, bind_fingerprint_topic, get_fingerprint_topic_id, save_fingerprint_json, save_fingerprint_pack
+from fingerprint_storage import fingerprint_storage_status, bind_fingerprint_topic, get_fingerprint_topic_id, save_fingerprint_json, save_fingerprint_pack, save_fingerprint_artifacts
+from fingerprint_library import saves_command, saves_deeplink
 
 
 logging.basicConfig(
@@ -176,6 +177,8 @@ async def send_file(update: Update, path: Path, caption: str):
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await nav_library_deeplink(update, context):
+        return
+    if await saves_deeplink(update, context):
         return
     await update.message.reply_text(
         "🎬 ANIME VIDEO BOT\n\n"
@@ -601,18 +604,30 @@ async def fingerprint_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         fingerprint = await build_remote_fingerprint(
             telethon_client, source_url, anime, season, episode,
-            sample_every=2.0, progress=progress,
+            sample_every=2.0, progress=progress, keep_temp=True,
         )
-        await safe_edit_text(status, "🧠 FINGERPRINT — 97%\n\n💾 JSON topic me upload ho raha hai...")
+        temp_episode = Path(fingerprint.pop("_temp_episode_path"))
         filename = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{anime}_S{season:02d}_E{episode:03d}") + ".json"
-        sent = await save_fingerprint_json(
-            context.bot, FINGERPRINT_CHAT, fingerprint, filename,
+        index_path = user_temp_dir(update.effective_user.id) / f"{Path(filename).stem}_index.jpg"
+        await safe_edit_text(status, "🧠 FINGERPRINT — 96%\n\n🖼️ Real episode frames ka visual index ban raha hai...")
+        build_video_index_image(temp_episode, index_path, every_seconds=2.0, columns=12)
+        await safe_edit_text(status, "🧠 FINGERPRINT — 98%\n\n☁️ JSON + PDF + index Telegram me save ho rahe hain...")
+        artifacts = await save_fingerprint_artifacts(
+            context.bot,
+            FINGERPRINT_CHAT,
+            fingerprint,
+            filename,
+            index_path,
         )
+        temp_episode.unlink(missing_ok=True)
+        index_path.unlink(missing_ok=True)
         await safe_edit_text(
             status,
-            f"✅ FINGERPRINT SAVED\n\n📚 {anime} S{season} E{episode}\n"
+            f"✅ FINGERPRINT + INDEX SAVED\n\n📚 {anime} S{season} E{episode}\n"
             f"🧩 Samples: {len(fingerprint.get('times', []))}\n"
-            f"📦 {filename}\n🆔 Telegram message: {sent.message_id}"
+            f"📄 PDF message: {artifacts['pdf'].message_id}\n"
+            f"🖼️ Index message: {artifacts['index'].message_id}\n\n"
+            "📚 /saves se apni aankho se verify kar sakte ho."
         )
     except Exception as exc:
         logger.exception("Fingerprint build failed")
@@ -1110,6 +1125,7 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("library", nav_library_command))
+    application.add_handler(CommandHandler("saves", saves_command))
     application.add_handler(CommandHandler("save", save_command))
     application.add_handler(CommandHandler("edit", edit_handler))
     application.add_handler(CommandHandler("find", find_command))
