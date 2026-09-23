@@ -45,6 +45,7 @@ _TOPIC_EXCLUDES = {
     "twixter", "clips", "clip cutter", "feedback", "application", "cc",
     "ai videos", "overlay", "phonks", "normal video", "normal videos",
     "random", "other", "others", "misc", "miscellaneous",
+    "feed back", "feedback chat", "feedback topic",
 }
 
 def _norm(value: str) -> str:
@@ -106,8 +107,11 @@ def _load_tree():
         # Keep OG Naruto, Shippuden and Movies as separate series under one Naruto node.
         if series not in {"Naruto", "Naruto Shippuden", "Naruto Movies"} and anime == "Naruto":
             series = "Naruto"
-        season = str(row["season"])
-        episode = str(row["episode"])
+        raw_season = str(row["season"])
+        raw_episode = str(row["episode"])
+        # Merge padded numeric values (01/1, 001/1) into one library node.
+        season = str(int(raw_season)) if raw_season.isdigit() else raw_season
+        episode = str(int(raw_episode)) if raw_episode.isdigit() else raw_episode
         tree.setdefault(anime, {}).setdefault(series, {}).setdefault(season, {}).setdefault(episode, {})[
             row["quality"]
         ] = row["source_url"]
@@ -171,10 +175,20 @@ def _episode_page(tree, anime, series, season, bot_username):
     for episode in sorted(episodes, key=lambda x: int(x) if str(x).isdigit() else str(x)):
         sources = episodes[episode]
         links = []
+        real_quality_links = []
+        auto_link = None
         for quality in preferred:
             url = sources.get(quality)
-            if url:
-                links.append(_source_link("Source" if quality == "auto" else quality, url))
+            if not url:
+                continue
+            if quality == "auto":
+                auto_link = _source_link("Source", url)
+            else:
+                real_quality_links.append(_source_link(quality, url))
+
+        # A "Source" upload is only a fallback when no quality-specific
+        # source exists. Never show it as a duplicate episode.
+        links = real_quality_links or ([auto_link] if auto_link else [])
         if links:
             lines.append(f"🎞️ <b>Episode {html.escape(episode)}</b> — " + " / ".join(links))
     if len(lines) == 4:
