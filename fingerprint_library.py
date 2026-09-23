@@ -12,7 +12,7 @@ from config import FINGERPRINT_CHAT
 logger = logging.getLogger("anime-bot.saves")
 
 BOT_USERNAME = "AnimeclipcutterBot"
-TOPIC_EXCLUDES = {"raw fingerprint", "fingerprint pdf", "visual index"}
+TOPIC_EXCLUDES = {"raw fingerprint", "fingerprint pdf", "visual index", "visual index pdf"}
 
 def _enc(route):
     return base64.urlsafe_b64encode(route.encode()).decode().rstrip("=")
@@ -42,7 +42,7 @@ def _artifact_kind(message):
         return "json"
     if "fingerprint pdf" in text or name.endswith(".pdf"):
         return "pdf"
-    if "visual index" in text or name.endswith((".jpg", ".jpeg", ".png")):
+    if "visual index" in text or "visual index pdf" in text or name.endswith((".jpg", ".jpeg", ".png", ".pdf")):
         return "index"
     return None
 
@@ -140,7 +140,7 @@ def _render(artifacts, route):
         if item.get("json"):
             lines.append("🧾 " + _msg_link("Raw Fingerprint JSON", item["json"]))
         if item.get("index"):
-            lines.append("🖼️ " + _msg_link("Index Image", item["index"]))
+            lines.append("🗂️ " + _msg_link("Visual Index PDF", item["index"]))
         if len(lines) == 4:
             lines.append("❌ Artifacts missing.")
         lines.append("")
