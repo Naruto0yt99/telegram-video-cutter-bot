@@ -296,8 +296,8 @@ def parse_episode_metadata(
 
     # Attack on Titan OAD files are sometimes stored inside a topic named
     # "Season 04 (OAD)". OAD in the actual filename/caption is authoritative.
-    if anime == "Attack on Titan" and re.search(r"\\bOAD\\b", combined, re.I):
-        oad_ep = re.search(r"\\bOAD\\s*E?\\s*0*(\\d{1,2})\\b", combined, re.I)
+    if anime == "Attack on Titan" and re.search(r"\bOAD\b", combined, re.I):
+        oad_ep = re.search(r"\bOAD\s*E?\s*0*(\d{1,2})\b", combined, re.I)
         if oad_ep:
             content_type = "oad"
             episode = oad_ep.group(1)
