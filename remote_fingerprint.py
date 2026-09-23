@@ -373,6 +373,7 @@ async def build_remote_fingerprint(
     episode,
     sample_every=2.0,
     progress=None,
+    keep_temp=False,
 ):
     """
     Build a detailed visual fingerprint from the complete Telegram episode.
@@ -556,6 +557,8 @@ async def build_remote_fingerprint(
                 pass
 
         checkpoint.unlink(missing_ok=True)
+        if keep_temp:
+            result["_temp_episode_path"] = str(temp_path)
         fingerprint_complete = True
         return result
     finally:
@@ -563,7 +566,7 @@ async def build_remote_fingerprint(
         # fingerprinting is interrupted, keep the completed episode so the next
         # run can skip the network download; resumable .part files are kept by
         # the downloader itself after network failures.
-        if fingerprint_complete and temp_path is not None:
+        if fingerprint_complete and temp_path is not None and not keep_temp:
             try:
                 temp_path.unlink(missing_ok=True)
             except Exception:
@@ -613,3 +616,125 @@ def build_fingerprint_index_image(fingerprint, output_path, every_seconds=10.0, 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     canvas.save(output_path, format="JPEG", quality=88, optimize=True)
     return output_path
+
+
+def build_video_index_image(video_path, output_path, every_seconds=2.0, columns=12):
+    """Build a human-viewable contact sheet from real episode video frames.
+
+    The image is temporary and contains actual anime frames with timestamps;
+    the source episode itself is never retained by this function.
+    """
+    import io
+    from PIL import Image, ImageDraw, ImageFont
+
+    video_path = str(video_path)
+    every_seconds = max(0.5, float(every_seconds))
+    columns = max(1, int(columns))
+
+    args = [
+        FFMPEG_BIN,
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", video_path,
+        "-vf", f"fps=1/{every_seconds:.6f},scale=160:90:flags=lanczos",
+        "-q:v", "5",
+        "-f", "image2pipe",
+        "-vcodec", "mjpeg",
+        "-",
+    ]
+
+    process = None
+    try:
+        process = __import__("subprocess").Popen(
+            args,
+            stdout=__import__("subprocess").PIPE,
+            stderr=__import__("subprocess").PIPE,
+        )
+        frames = []
+        stream = process.stdout
+        while True:
+            chunk = stream.read(1)
+            if not chunk:
+                break
+            if chunk != b"\xff":
+                continue
+            if stream.read(1) != b"\xd8":
+                continue
+            data = bytearray(b"\xff\xd8")
+            while True:
+                part = stream.read(8192)
+                if not part:
+                    break
+                data.extend(part)
+                end = data.rfind(b"\xff\xd9")
+                if end >= 0:
+                    frame_bytes = bytes(data[:end + 2])
+                    leftover = data[end + 2:]
+                    frames.append(frame_bytes)
+                    # Reconstructing leftover bytes in a pipe is not possible
+                    # after read-ahead, so use PIL's incremental parser instead.
+                    break
+            if len(frames) > 0:
+                # The simple pipe reader above can consume bytes beyond EOI.
+                # Stop here and fall back to a safer ffmpeg frame-file mode.
+                break
+        process.kill()
+        process.wait(timeout=5)
+    except Exception:
+        if process is not None:
+            try:
+                process.kill()
+                process.wait(timeout=5)
+            except Exception:
+                pass
+        frames = []
+
+    # Safer implementation: ask ffmpeg to write a bounded sequence of JPEGs
+    # into a temporary directory, then assemble them. This avoids keeping any
+    # episode frames after the function returns.
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory(prefix="episode_index_") as tmp:
+        tmp_path = Path(tmp)
+        pattern = str(tmp_path / "frame_%06d.jpg")
+        args = [
+            FFMPEG_BIN,
+            "-hide_banner",
+            "-loglevel", "error",
+            "-i", video_path,
+            "-vf", f"fps=1/{every_seconds:.6f},scale=160:90:flags=lanczos",
+            "-q:v", "5",
+            pattern,
+        ]
+        import subprocess
+        result = subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        if result.returncode != 0:
+            detail = result.stderr.decode("utf-8", errors="ignore").strip()
+            raise RuntimeError(f"Index image FFmpeg failed: {detail or 'unknown error'}")
+
+        files = sorted(tmp_path.glob("frame_*.jpg"))
+        if not files:
+            raise RuntimeError("Index image me koi real video frame nahi mila.")
+
+        thumb_w, thumb_h = 160, 90
+        label_h = 20
+        rows = int(math.ceil(len(files) / columns))
+        canvas = Image.new("RGB", (columns * thumb_w, rows * (thumb_h + label_h)), "white")
+        draw = ImageDraw.Draw(canvas)
+
+        for idx, frame_file in enumerate(files):
+            with Image.open(frame_file) as image:
+                image = image.convert("RGB")
+                x = (idx % columns) * thumb_w
+                y = (idx // columns) * (thumb_h + label_h)
+                canvas.paste(image, (x, y))
+            seconds = idx * every_seconds
+            mins = int(seconds // 60)
+            secs = int(seconds % 60)
+            draw.rectangle((x, y + thumb_h, x + thumb_w, y + thumb_h + label_h), fill="white")
+            draw.text((x + 3, y + thumb_h + 2), f"{mins:02d}:{secs:02d}", fill="black")
+
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        canvas.save(output_path, format="JPEG", quality=82, optimize=True)
+        return output_path
