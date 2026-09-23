@@ -18,7 +18,6 @@ from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
@@ -73,7 +72,7 @@ from yt_downloader import download_video_from_url
 from source_sync import sync_source_library, render_library_html
 from utils import unique_path
 from clip_handler import clip_command as source_clip_command
-from library_nav import library_command as nav_library_command, library_callback as nav_library_callback
+from library_nav import library_command as nav_library_command, library_deeplink as nav_library_deeplink
 from fingerprint_storage import fingerprint_storage_status, bind_fingerprint_topic, get_fingerprint_topic_id, save_fingerprint_json, save_fingerprint_pack
 
 
@@ -176,6 +175,8 @@ async def send_file(update: Update, path: Path, caption: str):
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await nav_library_deeplink(update, context):
+        return
     await update.message.reply_text(
         "🎬 ANIME VIDEO BOT\n\n"
         "📚 /library — clickable source library\n"
