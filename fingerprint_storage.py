@@ -207,7 +207,7 @@ async def get_saved_fingerprint_keys(client, chat_id, topic_id):
         if not match:
             continue
         key = (match.group(1).strip().lower(), int(match.group(2)), int(match.group(3)))
-        found.setdefault(key, set()).add(caption.splitlines()[0].strip())
+        found.setdefault(key, set()).update(marker for marker in ("RAW FINGERPRINT", "FINGERPRINT PDF", "VISUAL INDEX PDF") if marker in caption)
 
     complete = set()
     for key, markers in found.items():
