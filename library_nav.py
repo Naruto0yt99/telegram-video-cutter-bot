@@ -14,6 +14,7 @@ logger = logging.getLogger("anime-bot.library")
 
 BOT_USERNAME = "AnimeclipcutterBot"
 LIBRARY_PAGE_CHAR_LIMIT = 3600
+LIBRARY_MAX_EPISODES_PER_PAGE = 20
 
 _CANONICAL = {
     "a gentle noble's vacation recommendation": "A Gentle Noble's Vacation Recommendation",
@@ -227,9 +228,10 @@ def _episode_chunks(episodes, bot_username, anime, series, season):
         ]
         return "\n".join(header + [x[1] for x in items[start:end]]) + nav
 
-    # Find the minimum page count that can satisfy the Telegram message limit.
-    page_count = 1
+    # Keep long episode lists readable even when they technically fit the character limit.
+    # The minimum page count is driven by both episode count and message length.
     total = len(items)
+    page_count = max(1, (total + LIBRARY_MAX_EPISODES_PER_PAGE - 1) // LIBRARY_MAX_EPISODES_PER_PAGE)
     while page_count <= total:
         base, remainder = divmod(total, page_count)
         start = 0
