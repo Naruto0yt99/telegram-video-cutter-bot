@@ -88,6 +88,10 @@ async def _gemini_upload_telegram(client, source_url: str, display_name: str):
 
         cmd = [
             FFMPEG_BIN, "-hide_banner", "-loglevel", "warning", "-y",
+            "-seekable", "1", "-multiple_requests", "1",
+            "-initial_request_size", str(2 * 1024 * 1024),
+            "-request_size", str(2 * 1024 * 1024),
+            "-short_seek_size", str(2 * 1024 * 1024),
             "-i", server.url,
             "-vf", "fps=2,scale=-2:240",
             "-an",
@@ -97,7 +101,23 @@ async def _gemini_upload_telegram(client, source_url: str, display_name: str):
             "-movflags", "+faststart",
             proxy,
         ]
-        await run_command(*cmd)
+        last_error = None
+        for attempt in range(3):
+            try:
+                await run_command(*cmd)
+                if Path(proxy).exists() and Path(proxy).stat().st_size > 0:
+                    break
+            except Exception as exc:
+                last_error = exc
+                try:
+                    os.remove(proxy)
+                except OSError:
+                    pass
+                if attempt >= 2:
+                    raise
+                await asyncio.sleep(1.5 * (attempt + 1))
+        if not Path(proxy).exists() or Path(proxy).stat().st_size == 0:
+            raise last_error or RuntimeError("Telegram visual proxy empty bana.")
 
         path = Path(proxy)
         if not path.exists() or path.stat().st_size == 0:
