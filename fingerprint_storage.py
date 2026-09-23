@@ -191,3 +191,144 @@ async def fingerprint_storage_status(bot: Bot, chat_id: str) -> str:
         f"🧩 Topic ID: {info['topic_id'] or 'NOT BOUND'}\n\n"
         "FINGERPRINTS topic ke andar /fingerprint_bind bhejo."
     )
+
+
+async def save_fingerprint_artifacts(
+    bot: Bot,
+    chat_id: str,
+    fingerprint: dict,
+    json_filename: str,
+    index_path,
+    message_thread_id=None,
+):
+    """Store one episode fingerprint as separate JSON, PDF and visual-index messages."""
+    from pathlib import Path
+    import textwrap
+
+    check = await check_fingerprint_storage(bot, chat_id)
+    topic_id = message_thread_id or check.get("topic_id")
+    if check["status"] not in {"administrator", "creator"}:
+        raise PermissionError(f"Fingerprint storage unavailable: status={check['status']}")
+    if topic_id is None:
+        raise PermissionError("Fingerprint topic not bound. FINGERPRINTS topic me /fingerprint_bind bhejo.")
+
+    root = Path(index_path).parent
+    safe = Path(json_filename).stem
+    pdf_path = root / f"{safe}.pdf"
+
+    # Human-readable PDF: includes the full machine JSON in wrapped monospace text,
+    # so the user can inspect exactly what is stored for FIND.
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_LEFT
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Preformatted, PageBreak
+    from reportlab.lib.units import mm
+
+    raw_json = json.dumps(
+        {k: v for k, v in fingerprint.items() if not k.startswith("_")},
+        ensure_ascii=False,
+        indent=2,
+    )
+    wrapped = []
+    for line in raw_json.splitlines():
+        if len(line) <= 105:
+            wrapped.append(line)
+        else:
+            wrapped.extend(textwrap.wrap(line, width=105, break_long_words=True, break_on_hyphens=False))
+    doc = SimpleDocTemplate(
+        str(pdf_path),
+        pagesize=A4,
+        rightMargin=12 * mm,
+        leftMargin=12 * mm,
+        topMargin=12 * mm,
+        bottomMargin=12 * mm,
+    )
+    styles = getSampleStyleSheet()
+    mono = ParagraphStyle(
+        "FingerprintMono",
+        parent=styles["Code"],
+        fontName="Courier",
+        fontSize=6.2,
+        leading=7.2,
+        alignment=TA_LEFT,
+        textColor=colors.black,
+    )
+    story = [
+        Paragraph("AnimeClipCutter — Episode Fingerprint", styles["Title"]),
+        Spacer(1, 5 * mm),
+        Paragraph(
+            f"<b>{fingerprint.get('anime','Unknown')} S{fingerprint.get('season','?')} E{fingerprint.get('episode','?')}</b>",
+            styles["Heading2"],
+        ),
+        Paragraph(
+            f"Duration: {fingerprint.get('duration','?')}s &nbsp;&nbsp; "
+            f"Sample interval: {fingerprint.get('sample_every','?')}s &nbsp;&nbsp; "
+            f"Samples: {len(fingerprint.get('times', []))}",
+            styles["BodyText"],
+        ),
+        Spacer(1, 3 * mm),
+        Paragraph("Below is the stored machine fingerprint JSON:", styles["BodyText"]),
+        Spacer(1, 2 * mm),
+        Preformatted("\n".join(wrapped), mono),
+    ]
+    doc.build(story)
+
+    payload = json.dumps(
+        {k: v for k, v in fingerprint.items() if not k.startswith("_")},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    bio = io.BytesIO(payload)
+    bio.name = json_filename if json_filename.endswith(".json") else json_filename + ".json"
+    json_msg = await bot.send_document(
+        chat_id=chat_id,
+        document=bio,
+        caption=(
+            "🧠 RAW FINGERPRINT\n"
+            f"📚 {fingerprint.get('anime','Unknown')} S{fingerprint.get('season','?')} E{fingerprint.get('episode','?')}"
+        ),
+        message_thread_id=int(topic_id),
+    )
+
+    with pdf_path.open("rb") as handle:
+        pdf_msg = await bot.send_document(
+            chat_id=chat_id,
+            document=handle,
+            caption=(
+                "📄 FINGERPRINT PDF\n"
+                f"📚 {fingerprint.get('anime','Unknown')} S{fingerprint.get('season','?')} E{fingerprint.get('episode','?')}"
+            ),
+            message_thread_id=int(topic_id),
+        )
+
+    index_path = Path(index_path)
+    if index_path.stat().st_size <= 10 * 1024 * 1024:
+        with index_path.open("rb") as handle:
+            index_msg = await bot.send_photo(
+                chat_id=chat_id,
+                photo=handle,
+                caption=(
+                    "🖼️ VISUAL INDEX\n"
+                    f"📚 {fingerprint.get('anime','Unknown')} S{fingerprint.get('season','?')} E{fingerprint.get('episode','?')}\n"
+                    f"⏱️ One real frame every 2 seconds"
+                ),
+                message_thread_id=int(topic_id),
+            )
+    else:
+        with index_path.open("rb") as handle:
+            index_msg = await bot.send_document(
+                chat_id=chat_id,
+                document=handle,
+                caption=(
+                    "🖼️ VISUAL INDEX (document)\n"
+                    f"📚 {fingerprint.get('anime','Unknown')} S{fingerprint.get('season','?')} E{fingerprint.get('episode','?')}"
+                ),
+                message_thread_id=int(topic_id),
+            )
+
+    return {
+        "json": json_msg,
+        "pdf": pdf_msg,
+        "index": index_msg,
+    }
