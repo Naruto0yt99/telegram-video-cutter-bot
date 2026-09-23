@@ -10,7 +10,7 @@ from telegram_media import is_video_message, get_message_video_name
 from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
-PARSER_VERSION = 29
+PARSER_VERSION = 30
 
 
 _QUALITY_PATTERNS = [
@@ -455,6 +455,16 @@ def _topic_title_from_message(message):
     return _clean_caption(title) if title else ""
 
 
+def _topic_root_id(message):
+    reply = getattr(message, "reply_to", None)
+    if not reply:
+        return None
+    top_id = getattr(reply, "reply_to_top_id", None)
+    if not top_id:
+        top_id = getattr(reply, "reply_to_msg_id", None)
+    return int(top_id) if top_id else None
+
+
 def _reset_index_for_parser_upgrade(last_version: int):
     if last_version == PARSER_VERSION:
         return
@@ -507,6 +517,9 @@ async def sync_source_library(client):
     skipped = 0
     newest_seen = last_id
     topic_cache = {}
+    # Episode marker posts in a forum topic apply to following video uploads
+    # until the next marker, allowing 360p/720p/1080p to share one episode.
+    topic_episode_state = {}
     # Special/movie ordinals are persisted in the database so a bot restart
     # cannot renumber title-based specials.
     with get_connection() as conn:
@@ -541,7 +554,26 @@ async def sync_source_library(client):
         message_id = getattr(message, "id", 0) or 0
         newest_seen = max(newest_seen, message_id)
 
-        if not message or not is_video_message(message):
+        if not message:
+            skipped += 1
+            continue
+
+        topic_id = _topic_root_id(message)
+        raw_message_text = _clean_caption(
+            f"{getattr(message, 'message', '') or ''} {get_message_video_name(message)}"
+        )
+        marker_season, marker_episode, marker_match, marker_type, marker_global = _episode_from_text(
+            raw_message_text
+        )
+        if topic_id and marker_episode is not None:
+            topic_episode_state[topic_id] = {
+                "season": marker_season,
+                "episode": str(marker_episode),
+                "content_type": marker_type,
+                "has_global_episode": marker_global,
+            }
+
+        if not is_video_message(message):
             skipped += 1
             continue
 
@@ -559,9 +591,7 @@ async def sync_source_library(client):
             skipped += 1
             continue
 
-        raw_text = _clean_caption(
-            f"{getattr(message, 'message', '') or ''} {get_message_video_name(message)}"
-        )
+        raw_text = raw_message_text
         if _is_batch_or_link_message(raw_text):
             skipped += 1
             if message_id <= 100:
@@ -584,6 +614,44 @@ async def sync_source_library(client):
             context_anime=local_context_anime,
             context_season=local_context_season,
         )
+
+        # If this video has no episode number, inherit the latest marker from
+        # the SAME forum topic only. This fixes text markers followed by
+        # multiple quality uploads and prevents cross-topic contamination.
+        pending = topic_episode_state.get(topic_id) if topic_id else None
+        own_episode = _episode_from_text(raw_text)[1]
+        if pending and own_episode is None:
+            if metadata is None:
+                metadata = {
+                    "anime": "Naruto" if local_context_anime in {"Naruto", "Naruto Shippuden", "Naruto Movies"} else local_context_anime,
+                    "series": local_context_anime,
+                    "season": str(pending["season"] or local_context_season or "1"),
+                    "episode": str(pending["episode"]),
+                    "quality": _detect_quality(raw_text) or "auto",
+                    "special_title": None,
+                }
+            else:
+                metadata["episode"] = str(pending["episode"])
+                if pending["season"]:
+                    metadata["season"] = str(pending["season"])
+                if pending["content_type"] in {"oad", "ova", "special", "movie"}:
+                    metadata["season"] = pending["content_type"]
+                    metadata["special_title"] = None
+
+            if (
+                metadata
+                and metadata.get("series") == "Naruto Shippuden"
+                and metadata.get("season") in {"16", "17"}
+                and not pending["has_global_episode"]
+            ):
+                normalized = _naruto_global_episode(
+                    "Naruto Shippuden",
+                    str(metadata["season"]),
+                    metadata["episode"],
+                )
+                if normalized:
+                    metadata["episode"] = normalized
+
         link = _message_link(message)
 
         if message_id <= 100:
