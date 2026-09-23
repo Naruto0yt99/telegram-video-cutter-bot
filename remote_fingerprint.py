@@ -371,7 +371,7 @@ async def build_remote_fingerprint(
     anime,
     season,
     episode,
-    sample_every=2.0,
+    sample_every=0.1,
     progress=None,
     keep_temp=False,
 ):
