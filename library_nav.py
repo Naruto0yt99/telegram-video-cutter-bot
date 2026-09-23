@@ -31,8 +31,12 @@ _CANONICAL = {
     "re zero": "Re:Zero",
     "re:zero": "Re:Zero",
     "re zero starting life": "Re:Zero",
+    "re zero starting life i": "Re:Zero",
+    "re zero starting life in": "Re:Zero",
     "re zero starting life in another world": "Re:Zero",
     "re:zero starting life": "Re:Zero",
+    "re:zero starting life i": "Re:Zero",
+    "re:zero starting life in": "Re:Zero",
     "re:zero starting life in another world": "Re:Zero",
 }
 
