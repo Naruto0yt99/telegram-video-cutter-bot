@@ -73,7 +73,7 @@ from source_sync import sync_source_library, render_library_html
 from utils import unique_path
 from clip_handler import clip_command as source_clip_command
 from library_nav import library_command as nav_library_command, library_deeplink as nav_library_deeplink
-from fingerprint_storage import fingerprint_storage_status, bind_fingerprint_topic, get_fingerprint_topic_id, save_fingerprint_json, save_fingerprint_pack, save_fingerprint_artifacts
+from fingerprint_storage import fingerprint_storage_status, bind_fingerprint_topic, get_fingerprint_topic_id, save_fingerprint_json, save_fingerprint_pack, save_fingerprint_artifacts, clear_saved_fingerprint_artifacts
 from fingerprint_library import saves_command, saves_deeplink
 
 
@@ -461,6 +461,28 @@ async def fingerprint_status_command(update: Update, context: ContextTypes.DEFAU
 
 
 
+async def fingerprint_clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("❌ Owner only.")
+        return
+    try:
+        topic_id = get_fingerprint_topic_id()
+        if topic_id is None:
+            await update.message.reply_text("⚠️ Pehle FINGERPRINTS topic me /fingerprint_bind bhejo.")
+            return
+        deleted = await clear_saved_fingerprint_artifacts(
+            telethon_client, FINGERPRINT_CHAT, topic_id
+        )
+        await update.message.reply_text(
+            "🧹 OLD FINGERPRINTS DELETED\n\n"
+            f"🗑️ Artifact messages removed: {deleted}\n"
+            "🧠 Ab naya 0.1-second fingerprint clean slate par banega."
+        )
+    except Exception as exc:
+        logger.exception("Fingerprint cleanup failed")
+        await update.message.reply_text(f"❌ Fingerprint cleanup failed: {exc}")
+
+
 async def fingerprint_bind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
         await update.message.reply_text("❌ Owner only.")
@@ -604,7 +626,7 @@ async def fingerprint_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         fingerprint = await build_remote_fingerprint(
             telethon_client, source_url, anime, season, episode,
-            sample_every=2.0, progress=progress, keep_temp=True,
+            sample_every=0.1, progress=progress, keep_temp=True,
         )
         temp_episode = Path(fingerprint.pop("_temp_episode_path"))
         filename = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{anime}_S{season:02d}_E{episode:03d}") + ".json"
@@ -1132,6 +1154,7 @@ def main():
     application.add_handler(CommandHandler("find", find_command))
     application.add_handler(CommandHandler("fingerprint_status", fingerprint_status_command))
     application.add_handler(CommandHandler("fingerprint_bind", fingerprint_bind_command))
+    application.add_handler(CommandHandler("fingerprint_clear", fingerprint_clear_command))
     application.add_handler(CommandHandler("fingerprint", fingerprint_command))
     application.add_handler(CommandHandler("clip", source_clip_command))
     application.add_handler(CommandHandler("clips", source_clip_command))
