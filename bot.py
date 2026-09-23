@@ -704,7 +704,7 @@ def _parse_fingerprint_batch_specs(raw):
     return specs, force
 
 
-async def _run_fingerprint_batch(owner_id, chat_id, specs, force):
+async def _run_fingerprint_batch(bot, owner_id, chat_id, specs, force):
     global fingerprint_batch_state
     failed_final = []
     retry_later = []
@@ -748,7 +748,7 @@ async def _run_fingerprint_batch(owner_id, chat_id, specs, force):
         fingerprint_batch_state["total"] = len(queue)
         fingerprint_batch_state["pending"] = list(queue)
 
-        status = await application.bot.send_message(
+        status = await bot.send_message(
             chat_id,
             "🚀 FINGERPRINT QUEUE STARTED\\n\\n"
             f"📦 Queue: {len(queue)} episodes\\n"
@@ -769,7 +769,7 @@ async def _run_fingerprint_batch(owner_id, chat_id, specs, force):
                     f"{'🔁 Retry round' if retry_round else '▶️ Processing'}"
                 )
                 fingerprint, artifacts = await _build_fingerprint_episode(
-                    application.bot, owner_id, anime, season, episode, status
+                    bot, owner_id, anime, season, episode, status
                 )
                 completed.append(item)
                 fingerprint_batch_state["done"] += 1
@@ -828,7 +828,7 @@ async def _run_fingerprint_batch(owner_id, chat_id, specs, force):
             lines.append("\\n⏸️ Pending: " + ", ".join(f"{a} S{s} E{e}" for a,s,e in fingerprint_batch_state["pending"][:40]))
         if failed_final:
             lines.append("\\n❌ Failed: " + ", ".join(f"{x[0]} S{x[1]} E{x[2]}" for x in failed_final[:40]))
-        await application.bot.send_message(chat_id, "\\n".join(lines))
+        await bot.send_message(chat_id, "\\n".join(lines))
     except Exception as exc:
         logger.exception("Fingerprint batch crashed")
         fingerprint_batch_state["status"] = "error"
@@ -852,7 +852,7 @@ async def fingerprint_all_command(update: Update, context: ContextTypes.DEFAULT_
         return
     fingerprint_batch_stop = asyncio.Event()
     fingerprint_batch_task = asyncio.create_task(
-        _run_fingerprint_batch(update.effective_user.id, update.effective_chat.id, specs, force)
+        _run_fingerprint_batch(context.bot, update.effective_user.id, update.effective_chat.id, specs, force)
     )
     await update.message.reply_text(
         "✅ Fingerprint queue background me start kar di.\\n"
