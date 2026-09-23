@@ -580,7 +580,7 @@ async def _resolve_fingerprint_source(anime: str, season: int, episode: int):
     return f"https://t.me/{username}/{message.id}"
 
 
-async def _build_fingerprint_episode(bot, user_id, anime, season, episode, status_message):
+async def _build_fingerprint_episode(bot, user_id, anime, season, episode, status_message, temp_root=None):
     """Build and save one fingerprint using the same 0.1s format as /fingerprint."""
     source_url = get_best_source(anime, season, episode)
     if not source_url:
@@ -611,7 +611,9 @@ async def _build_fingerprint_episode(bot, user_id, anime, season, episode, statu
             r"[^A-Za-z0-9._-]+", "_",
             f"{anime}_S{season:02d}_E{episode:03d}"
         ) + ".json"
-        index_path = user_temp_dir(user_id) / f"{Path(filename).stem}_visual_index.pdf"
+        work_dir = Path(temp_root) if temp_root is not None else user_temp_dir(user_id)
+        work_dir.mkdir(parents=True, exist_ok=True)
+        index_path = work_dir / f"{Path(filename).stem}_visual_index.pdf"
         await safe_edit_text(
             status_message,
             f"🧠 FINGERPRINT — 96%\n\n📚 {anime} S{season} E{episode}\n"
@@ -705,6 +707,8 @@ def _parse_fingerprint_batch_specs(raw):
 
 
 async def _run_fingerprint_batch(bot, owner_id, chat_id, specs, force):
+    batch_temp_root = Path(TEMP_DIR) / "fingerprint_batch" / str(owner_id)
+    batch_temp_root.mkdir(parents=True, exist_ok=True)
     global fingerprint_batch_state
     failed_final = []
     retry_later = []
@@ -769,7 +773,7 @@ async def _run_fingerprint_batch(bot, owner_id, chat_id, specs, force):
                     f"{'🔁 Retry round' if retry_round else '▶️ Processing'}"
                 )
                 fingerprint, artifacts = await _build_fingerprint_episode(
-                    bot, owner_id, anime, season, episode, status
+                    bot, owner_id, anime, season, episode, status, temp_root=batch_temp_root
                 )
                 completed.append(item)
                 fingerprint_batch_state["done"] += 1
@@ -781,7 +785,14 @@ async def _run_fingerprint_batch(bot, owner_id, chat_id, specs, force):
                 logger.exception("Batch fingerprint failed %s S%s E%s", anime, season, episode)
                 return False
             finally:
-                cleanup_user_temp(owner_id)
+                try:
+                    for child in batch_temp_root.iterdir():
+                        if child.is_file() or child.is_symlink():
+                            child.unlink(missing_ok=True)
+                        elif child.is_dir():
+                            shutil.rmtree(child, ignore_errors=True)
+                except Exception:
+                    logger.exception("Batch fingerprint temp cleanup failed")
 
         for item in list(queue):
             if fingerprint_batch_stop is not None and fingerprint_batch_stop.is_set():
