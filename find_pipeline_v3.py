@@ -185,9 +185,6 @@ async def _generate(prompt, files):
                                 "mime_type": "video/mp4",
                                 "file_uri": uri,
                             },
-                            "video_metadata": {
-                                "fps": 5,
-                            },
                             "media_processing": "AGENTIC",
                         }
                         for uri in uris
@@ -217,6 +214,11 @@ async def _generate(prompt, files):
                         logger.warning("Gemini retryable %s from %s; retrying in %.1fs", r.status_code, model, delay)
                         await asyncio.sleep(delay)
                         continue
+                    if r.status_code >= 400:
+                        body = r.text[:4000]
+                        logger.error("Gemini HTTP %s model=%s body=%s", r.status_code, model, body)
+                        if r.status_code not in GEMINI_RETRYABLE_STATUS:
+                            raise RuntimeError(f"Gemini HTTP {r.status_code} ({model}): {body}")
                     r.raise_for_status()
                     data = r.json()
                     text_parts = []
