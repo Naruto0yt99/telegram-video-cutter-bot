@@ -596,8 +596,8 @@ async def _build_fingerprint_episode(bot, user_id, anime, season, episode, statu
             pct = min(96, int(done / max(1, total) * 90))
             await safe_edit_text(
                 status_message,
-                f"🧠 FINGERPRINT — {pct}%\\n\\n"
-                f"📚 {anime} S{season} E{episode}\\n"
+                f"🧠 FINGERPRINT — {pct}%\n\n"
+                f"📚 {anime} S{season} E{episode}\n"
                 f"🔎 Samples: {done}/{total}"
             )
 
@@ -614,13 +614,13 @@ async def _build_fingerprint_episode(bot, user_id, anime, season, episode, statu
         index_path = user_temp_dir(user_id) / f"{Path(filename).stem}_visual_index.pdf"
         await safe_edit_text(
             status_message,
-            f"🧠 FINGERPRINT — 96%\\n\\n📚 {anime} S{season} E{episode}\\n"
+            f"🧠 FINGERPRINT — 96%\n\n📚 {anime} S{season} E{episode}\n"
             "🖼️ Real episode frames ka visual index ban raha hai..."
         )
         build_video_index_pdf(temp_episode, index_path, every_seconds=2.0)
         await safe_edit_text(
             status_message,
-            f"🧠 FINGERPRINT — 98%\\n\\n📚 {anime} S{season} E{episode}\\n"
+            f"🧠 FINGERPRINT — 98%\n\n📚 {anime} S{season} E{episode}\n"
             "☁️ JSON + PDF + index Telegram me save ho rahe hain..."
         )
         artifacts = await save_fingerprint_artifacts(
@@ -644,7 +644,7 @@ async def fingerprint_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     raw = " ".join(context.args).strip()
     match = re.match(r"^(.+?)\\s+[Ss](\\d+)\\s+[Ee](\\d+)$", raw, re.IGNORECASE)
     if not match:
-        await update.message.reply_text("Usage:\\n/fingerprint Death Note S1 E1")
+        await update.message.reply_text("Usage:\n/fingerprint Death Note S1 E1")
         return
 
     anime, season, episode = match.groups()
@@ -653,8 +653,8 @@ async def fingerprint_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("⚠️ Pehle FINGERPRINTS topic me /fingerprint_bind bhejo.")
         return
     status = await update.message.reply_text(
-        f"🧠 FINGERPRINT STARTED\\n\\n📚 {anime} S{season} E{episode}\\n"
-        "📡 Remote Telegram scan...\\n💾 Full episode local storage me save nahi hoga."
+        f"🧠 FINGERPRINT STARTED\n\n📚 {anime} S{season} E{episode}\n"
+        "📡 Remote Telegram scan...\n💾 Full episode local storage me save nahi hoga."
     )
     try:
         fingerprint, artifacts = await _build_fingerprint_episode(
@@ -662,15 +662,15 @@ async def fingerprint_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         await safe_edit_text(
             status,
-            f"✅ FINGERPRINT + INDEX SAVED\\n\\n📚 {anime} S{season} E{episode}\\n"
-            f"🧩 Samples: {len(fingerprint.get('times', []))}\\n"
-            f"📄 PDF message: {artifacts['pdf'].message_id}\\n"
-            f"🖼️ Index message: {artifacts['index'].message_id}\\n\\n"
+            f"✅ FINGERPRINT + INDEX SAVED\n\n📚 {anime} S{season} E{episode}\n"
+            f"🧩 Samples: {len(fingerprint.get('times', []))}\n"
+            f"📄 PDF message: {artifacts['pdf'].message_id}\n"
+            f"🖼️ Index message: {artifacts['index'].message_id}\n\n"
             "📚 /saves se PDF ko page-by-page verify kar sakte ho."
         )
     except Exception as exc:
         logger.exception("Fingerprint build failed")
-        await safe_edit_text(status, f"❌ FINGERPRINT FAILED\\n\\n{exc}")
+        await safe_edit_text(status, f"❌ FINGERPRINT FAILED\n\n{exc}")
     finally:
         cleanup_user_temp(update.effective_user.id)
 
@@ -693,13 +693,13 @@ def _parse_fingerprint_batch_specs(raw):
         match = re.match(r"^(.+?)\\s+[Ss](\\d+)$", part, re.IGNORECASE)
         if not match:
             raise ValueError(
-                f"Invalid item: {part}\\nFormat: Anime Name S1 | Other Anime S1"
+                f"Invalid item: {part}\nFormat: Anime Name S1 | Other Anime S1"
             )
         specs.append((match.group(1).strip(), int(match.group(2))))
     if not specs:
         raise ValueError(
-            "Usage:\\n/fingerprint_all Death Note S1\\n"
-            "or\\n/fingerprint_all Death Note S1 | Re:Zero S1 | AOT S1"
+            "Usage:\n/fingerprint_all Death Note S1\n"
+            "or\n/fingerprint_all Death Note S1 | Re:Zero S1 | AOT S1"
         )
     return specs, force
 
@@ -750,10 +750,10 @@ async def _run_fingerprint_batch(bot, owner_id, chat_id, specs, force):
 
         status = await bot.send_message(
             chat_id,
-            "🚀 FINGERPRINT QUEUE STARTED\\n\\n"
-            f"📦 Queue: {len(queue)} episodes\\n"
-            f"⏭️ Already saved: {len(skipped)}\\n"
-            "🔁 Failed episodes end me retry honge.\\n"
+            "🚀 FINGERPRINT QUEUE STARTED\n\n"
+            f"📦 Queue: {len(queue)} episodes\n"
+            f"⏭️ Already saved: {len(skipped)}\n"
+            "🔁 Failed episodes end me retry honge.\n"
             "🛑 /fingerprint_all_stop se safe stop kar sakte ho."
         )
 
@@ -763,9 +763,9 @@ async def _run_fingerprint_batch(bot, owner_id, chat_id, specs, force):
             try:
                 await safe_edit_text(
                     status,
-                    f"🧠 FINGERPRINT QUEUE\\n\\n"
-                    f"📚 {anime} S{season} E{episode}\\n"
-                    f"📊 Done: {fingerprint_batch_state['done']}/{fingerprint_batch_state['total']}\\n"
+                    f"🧠 FINGERPRINT QUEUE\n\n"
+                    f"📚 {anime} S{season} E{episode}\n"
+                    f"📊 Done: {fingerprint_batch_state['done']}/{fingerprint_batch_state['total']}\n"
                     f"{'🔁 Retry round' if retry_round else '▶️ Processing'}"
                 )
                 fingerprint, artifacts = await _build_fingerprint_episode(
@@ -823,16 +823,16 @@ async def _run_fingerprint_batch(bot, owner_id, chat_id, specs, force):
             f"⏸️ Pending: {len(fingerprint_batch_state['pending'])}",
         ]
         if completed:
-            lines.append("\\n✅ Done: " + ", ".join(f"{a} S{s} E{e}" for a,s,e in completed[:40]))
+            lines.append("\n✅ Done: " + ", ".join(f"{a} S{s} E{e}" for a,s,e in completed[:40]))
         if fingerprint_batch_state["pending"]:
-            lines.append("\\n⏸️ Pending: " + ", ".join(f"{a} S{s} E{e}" for a,s,e in fingerprint_batch_state["pending"][:40]))
+            lines.append("\n⏸️ Pending: " + ", ".join(f"{a} S{s} E{e}" for a,s,e in fingerprint_batch_state["pending"][:40]))
         if failed_final:
-            lines.append("\\n❌ Failed: " + ", ".join(f"{x[0]} S{x[1]} E{x[2]}" for x in failed_final[:40]))
-        await bot.send_message(chat_id, "\\n".join(lines))
+            lines.append("\n❌ Failed: " + ", ".join(f"{x[0]} S{x[1]} E{x[2]}" for x in failed_final[:40]))
+        await bot.send_message(chat_id, "\n".join(lines))
     except Exception as exc:
         logger.exception("Fingerprint batch crashed")
         fingerprint_batch_state["status"] = "error"
-        await application.bot.send_message(chat_id, f"❌ FINGERPRINT QUEUE STOPPED\\n\\n{exc}")
+        await bot.send_message(chat_id, f"❌ FINGERPRINT QUEUE STOPPED\n\n{exc}")
     finally:
         fingerprint_batch_state["current"] = None
 
@@ -855,8 +855,8 @@ async def fingerprint_all_command(update: Update, context: ContextTypes.DEFAULT_
         _run_fingerprint_batch(context.bot, update.effective_user.id, update.effective_chat.id, specs, force)
     )
     await update.message.reply_text(
-        "✅ Fingerprint queue background me start kar di.\\n"
-        "Bot normal commands bhi handle karega.\\n"
+        "✅ Fingerprint queue background me start kar di.\n"
+        "Bot normal commands bhi handle karega.\n"
         f"Mode: {'FORCE rebuild' if force else 'existing skip'}"
     )
 
@@ -882,11 +882,11 @@ async def fingerprint_all_status_command(update: Update, context: ContextTypes.D
     current = state.get("current")
     current_text = f"{current[0]} S{current[1]} E{current[2]}" if current else "None"
     await update.message.reply_text(
-        "🧠 FINGERPRINT QUEUE STATUS\\n\\n"
-        f"Status: {state.get('status')}\\n"
-        f"Current: {current_text}\\n"
-        f"Completed: {state.get('done', 0)}/{state.get('total', 0)}\\n"
-        f"Pending: {len(state.get('pending', []))}\\n"
+        "🧠 FINGERPRINT QUEUE STATUS\n\n"
+        f"Status: {state.get('status')}\n"
+        f"Current: {current_text}\n"
+        f"Completed: {state.get('done', 0)}/{state.get('total', 0)}\n"
+        f"Pending: {len(state.get('pending', []))}\n"
         f"Failed: {len(state.get('failed', []))}"
     )
 
