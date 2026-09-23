@@ -693,3 +693,92 @@ def build_video_index_image(video_path, output_path, every_seconds=2.0, columns=
         output_path.parent.mkdir(parents=True, exist_ok=True)
         canvas.save(output_path, format="JPEG", quality=82, optimize=True)
         return output_path
+
+
+def build_video_index_pdf(video_path, output_path, every_seconds=2.0):
+    """Build a PPT-like PDF: one real episode frame per page.
+
+    Frames are sampled from the temporary full episode at the requested
+    interval. No contact sheet is created. Each page contains exactly one
+    frame plus its timestamp, so Gemini/humans can inspect individual frames.
+    """
+    from PIL import Image
+    import subprocess
+    import tempfile
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.utils import ImageReader
+
+    video_path = str(video_path)
+    every_seconds = max(0.5, float(every_seconds))
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="episode_index_pdf_") as tmp:
+        tmp_path = Path(tmp)
+        pattern = str(tmp_path / "frame_%06d.jpg")
+        args = [
+            FFMPEG_BIN,
+            "-hide_banner",
+            "-loglevel", "error",
+            "-i", video_path,
+            "-vf", f"fps=1/{every_seconds:.6f},scale=640:360:flags=lanczos",
+            "-q:v", "4",
+            pattern,
+        ]
+        result = subprocess.run(
+            args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.decode("utf-8", errors="ignore").strip()
+            raise RuntimeError(
+                f"Index PDF FFmpeg failed: {detail or 'unknown error'}"
+            )
+
+        files = sorted(tmp_path.glob("frame_*.jpg"))
+        if not files:
+            raise RuntimeError("Index PDF me koi real video frame nahi mila.")
+
+        page_w, page_h = landscape(A4)
+        pdf = canvas.Canvas(str(output_path), pagesize=(page_w, page_h))
+        margin = 28
+        title_y = page_h - 28
+        max_w = page_w - (2 * margin)
+        max_h = page_h - 95
+
+        for idx, frame_file in enumerate(files):
+            with Image.open(frame_file) as image:
+                image = image.convert("RGB")
+                width, height = image.size
+
+            scale = min(max_w / width, max_h / height)
+            draw_w = width * scale
+            draw_h = height * scale
+            x = (page_w - draw_w) / 2
+            y = 48 + (max_h - draw_h) / 2
+
+            seconds = idx * every_seconds
+            mins = int(seconds // 60)
+            secs = seconds % 60
+            timestamp = f"{mins:02d}:{secs:04.1f}"
+
+            pdf.setFont("Helvetica-Bold", 14)
+            pdf.drawString(margin, title_y, f"Frame {idx + 1}  •  {timestamp}")
+            pdf.drawImage(
+                ImageReader(str(frame_file)),
+                x,
+                y,
+                width=draw_w,
+                height=draw_h,
+                preserveAspectRatio=True,
+                mask="auto",
+            )
+            pdf.setFont("Helvetica", 9)
+            pdf.drawString(margin, 24, "AnimeClipCutter visual index • one real frame per page")
+            pdf.showPage()
+
+        pdf.save()
+
+    return output_path
