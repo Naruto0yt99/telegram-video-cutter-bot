@@ -13,6 +13,7 @@ from database import get_connection
 logger = logging.getLogger("anime-bot.library")
 
 BOT_USERNAME = "AnimeclipcutterBot"
+LIBRARY_PAGE_CHAR_LIMIT = 3600
 
 _CANONICAL = {
     "a gentle noble's vacation recommendation": "A Gentle Noble's Vacation Recommendation",
@@ -48,6 +49,7 @@ _TOPIC_EXCLUDES = {
     "feed back", "feedback chat", "feedback topic",
 }
 
+
 def _norm(value: str) -> str:
     value = unicodedata.normalize("NFKC", value or "")
     value = value.casefold().replace("&", " and ")
@@ -55,8 +57,10 @@ def _norm(value: str) -> str:
     value = re.sub(r"_+", " ", value)
     return re.sub(r"\s+", " ", value).strip()
 
+
 def _compact(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", _norm(value))
+
 
 def canonical_anime(value: str):
     norm = _norm(value)
@@ -73,19 +77,24 @@ def canonical_anime(value: str):
             return _CANONICAL[key]
     return re.sub(r"\s+", " ", value or "").strip() or None
 
+
 def _encode_route(route: str) -> str:
     return base64.urlsafe_b64encode(route.encode("utf-8")).decode("ascii").rstrip("=")
+
 
 def _decode_route(payload: str) -> str:
     raw = payload[4:] if payload.startswith("lib_") else payload
     raw += "=" * (-len(raw) % 4)
     return base64.urlsafe_b64decode(raw.encode("ascii")).decode("utf-8")
 
+
 def _link(bot_username: str, label: str, route: str) -> str:
     return f'<a href="https://t.me/{bot_username}?start=lib_{_encode_route(route)}">{html.escape(label)}</a>'
 
+
 def _source_link(label: str, url: str) -> str:
     return f'<a href="{html.escape(url, quote=True)}">{html.escape(label)}</a>'
+
 
 def _load_tree():
     tree = {}
@@ -104,12 +113,10 @@ def _load_tree():
         if not anime:
             continue
         series = canonical_anime(row["series"] or row["anime"]) or str(row["series"] or row["anime"])
-        # Keep OG Naruto, Shippuden and Movies as separate series under one Naruto node.
         if series not in {"Naruto", "Naruto Shippuden", "Naruto Movies"} and anime == "Naruto":
             series = "Naruto"
         raw_season = str(row["season"])
         raw_episode = str(row["episode"])
-        # Merge padded numeric values (01/1, 001/1) into one library node.
         season = str(int(raw_season)) if raw_season.isdigit() else raw_season
         episode = str(int(raw_episode)) if raw_episode.isdigit() else raw_episode
         tree.setdefault(anime, {}).setdefault(series, {}).setdefault(season, {}).setdefault(episode, {})[
@@ -117,12 +124,14 @@ def _load_tree():
         ] = row["source_url"]
     return tree
 
+
 def _season_sort_key(value: str):
     match = re.search(r"\d+", str(value))
     if match:
         return (0, int(match.group()))
     labels = {"ova": 1, "oad": 2, "special": 3, "movie": 4}
     return (labels.get(_norm(value), 9), _norm(value))
+
 
 def _content_label(season):
     norm = _norm(season)
@@ -136,10 +145,12 @@ def _content_label(season):
         return "Movies"
     return f"Season {season}"
 
+
 def _anime_page(tree, bot_username):
-    lines = ["📚 <b>ANIME LIBRARY</b>", "", ""] 
+    lines = ["📚 <b>ANIME LIBRARY</b>", "", ""]
     lines.extend(f"🎬 {_link(bot_username, anime, 'a|' + anime)}" for anime in sorted(tree, key=str.casefold))
     return "\n".join(lines), None
+
 
 def _series_page(tree, anime, bot_username):
     series = tree.get(anime, {})
@@ -148,6 +159,7 @@ def _series_page(tree, anime, bot_username):
         lines.append(f"📺 {_link(bot_username, name, 's|' + anime + '|' + name)}")
     lines.extend(["", f"⬅️ {_link(bot_username, 'Back', 'home')}"])
     return "\n".join(lines), None
+
 
 def _season_page(tree, anime, series, bot_username):
     seasons = tree.get(anime, {}).get(series, {})
@@ -163,51 +175,124 @@ def _season_page(tree, anime, series, bot_username):
     lines.extend(["", f"⬅️ {_link(bot_username, 'Back', 'a|' + anime)}"])
     return "\n".join(lines), None
 
-def _episode_page(tree, anime, series, season, bot_username):
+
+def _episode_line(episode, sources):
+    preferred = ["2160p", "1440p", "1080p", "720p", "480p", "360p", "auto"]
+    real_quality_links = []
+    auto_link = None
+    for quality in preferred:
+        url = sources.get(quality)
+        if not url:
+            continue
+        if quality == "auto":
+            auto_link = _source_link("Source", url)
+        else:
+            real_quality_links.append(_source_link(quality, url))
+    links = real_quality_links or ([auto_link] if auto_link else [])
+    if not links:
+        return None
+    return f"🎞️ <b>Episode {html.escape(str(episode))}</b> — " + " / ".join(links)
+
+
+def _episode_chunks(episodes, bot_username, anime, series, season):
+    """Split episodes into balanced contiguous pages, considering actual HTML length.
+
+    The page count is chosen from the message-length constraint, then episodes
+    are distributed as evenly as possible. For 37 episodes this produces 19 + 18,
+    not an arbitrary break such as 34 + 3.
+    """
+    items = []
+    for episode in sorted(episodes, key=lambda x: int(x) if str(x).isdigit() else str(x)):
+        line = _episode_line(episode, episodes[episode])
+        if line:
+            items.append((episode, line))
+
+    if not items:
+        return [[]]
+
+    def render_count(count, start, end, page_count):
+        nav = ""
+        if page_count > 1:
+            nav = "\n\n" + " / ".join(
+                part for part in (
+                    "⬅️ Previous" if start > 0 else "",
+                    "➡️ Next" if end < len(items) else "",
+                ) if part
+            )
+        header = [
+            f"🎬 <b>{html.escape(anime)}</b>",
+            f"📺 <b>{html.escape(series)}</b>",
+            f"📁 <b>{html.escape(_content_label(season))}</b>",
+            "",
+        ]
+        return "\n".join(header + [x[1] for x in items[start:end]]) + nav
+
+    # Find the minimum page count that can satisfy the Telegram message limit.
+    page_count = 1
+    total = len(items)
+    while page_count <= total:
+        base, remainder = divmod(total, page_count)
+        start = 0
+        fits = True
+        for page_index in range(page_count):
+            size = base + (1 if page_index < remainder else 0)
+            end = start + size
+            if len(render_count(size, start, end, page_count)) > LIBRARY_PAGE_CHAR_LIMIT:
+                fits = False
+                break
+            start = end
+        if fits:
+            break
+        page_count += 1
+
+    base, remainder = divmod(total, page_count)
+    chunks = []
+    start = 0
+    for page_index in range(page_count):
+        size = base + (1 if page_index < remainder else 0)
+        chunks.append(items[start:start + size])
+        start += size
+    return chunks
+
+
+def _episode_page(tree, anime, series, season, bot_username, page=1):
     episodes = tree.get(anime, {}).get(series, {}).get(season, {})
+    chunks = _episode_chunks(episodes, bot_username, anime, series, season)
+    page = max(1, min(int(page or 1), len(chunks)))
+    current = chunks[page - 1]
+
     lines = [
         f"🎬 <b>{html.escape(anime)}</b>",
         f"📺 <b>{html.escape(series)}</b>",
         f"📁 <b>{html.escape(_content_label(season))}</b>",
         "",
     ]
-    preferred = ["2160p", "1440p", "1080p", "720p", "480p", "360p", "auto"]
-    for episode in sorted(episodes, key=lambda x: int(x) if str(x).isdigit() else str(x)):
-        sources = episodes[episode]
-        links = []
-        real_quality_links = []
-        auto_link = None
-        for quality in preferred:
-            url = sources.get(quality)
-            if not url:
-                continue
-            if quality == "auto":
-                auto_link = _source_link("Source", url)
-            else:
-                real_quality_links.append(_source_link(quality, url))
+    lines.extend(line for _, line in current)
 
-        # A "Source" upload is only a fallback when no quality-specific
-        # source exists. Never show it as a duplicate episode.
-        links = real_quality_links or ([auto_link] if auto_link else [])
-        if links:
-            lines.append(f"🎞️ <b>Episode {html.escape(episode)}</b> — " + " / ".join(links))
-    if len(lines) == 4:
-        lines.append("No episodes found.")
-    lines.extend(["", f"⬅️ {_link(bot_username, 'Back', 's|' + anime + '|' + series)}"])
+    nav = []
+    if page > 1:
+        nav.append(_link(bot_username, "⬅️ Previous", f"t|{anime}|{series}|{season}|{page - 1}"))
+    if page < len(chunks):
+        nav.append(_link(bot_username, "➡️ Next", f"t|{anime}|{series}|{season}|{page + 1}"))
+    nav.append(_link(bot_username, "⬅️ Back", f"s|{anime}|{series}"))
+    lines.extend(["", " / ".join(nav)])
     return "\n".join(lines), None
+
 
 def _render_route(tree, route, bot_username):
     parts = route.split("|")
     if parts == ["home"]:
         return _anime_page(tree, bot_username)
     if parts and parts[0] == "a" and len(parts) == 2:
-        anime = parts[1]
-        return _series_page(tree, anime, bot_username)
+        return _series_page(tree, parts[1], bot_username)
     if parts and parts[0] == "s" and len(parts) == 3:
         return _season_page(tree, parts[1], parts[2], bot_username)
     if parts and parts[0] == "t" and len(parts) == 4:
-        return _episode_page(tree, parts[1], parts[2], parts[3], bot_username)
+        return _episode_page(tree, parts[1], parts[2], parts[3], bot_username, 1)
+    if parts and parts[0] == "t" and len(parts) == 5:
+        return _episode_page(tree, parts[1], parts[2], parts[3], bot_username, int(parts[4]))
     return _anime_page(tree, bot_username)
+
 
 async def library_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tree = _load_tree()
@@ -225,6 +310,7 @@ async def library_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sent.chat_id,
         sent.message_id,
     )
+
 
 async def library_deeplink(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args or []
@@ -249,7 +335,6 @@ async def library_deeplink(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             context.application.bot_data["library_messages"][update.effective_user.id] = (chat_id, message_id)
 
-        # The deep-link /start message itself is only a navigation trigger.
         if update.message:
             try:
                 await update.message.delete()
