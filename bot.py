@@ -733,7 +733,7 @@ async def _run_fingerprint_batch(bot, owner_id, chat_id, specs, force):
             anime = _resolve_batch_anime(requested_anime) or requested_anime
             episodes = get_episodes(anime, season)
             if not episodes:
-                failed_final.append((anime, season, "library me koi episode nahi mila"))
+                failed_final.append((anime, season, 0, "library me koi episode nahi mila"))
                 continue
             for episode_raw in episodes:
                 try:
@@ -815,7 +815,10 @@ async def _run_fingerprint_batch(bot, owner_id, chat_id, specs, force):
             if fingerprint_batch_stop is not None and fingerprint_batch_stop.is_set():
                 break
             ok = await process_one(item, retry_round=True)
-            if not ok and item not in [x[:3] for x in failed_final]:
+            if ok:
+                if item in retry_later:
+                    retry_later.remove(item)
+            elif item not in [x[:3] for x in failed_final]:
                 failed_final.append((*item, "2 retry rounds ke baad bhi fail"))
 
         if fingerprint_batch_stop is not None and fingerprint_batch_stop.is_set():
