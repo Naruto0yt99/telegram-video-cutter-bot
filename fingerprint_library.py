@@ -54,13 +54,13 @@ def _episode_key_from_message(message):
         ] if x
     )
     match = re.search(
-        r"(?P<anime>.+?)\s+S(?P<season>\d+)\s+E(?P<episode>\d+)",
+        r"(?:^|\n|📚\s*)(?P<anime>.+?)\s+S(?P<season>\d+)\s+E(?P<episode>\d+)\b",
         text,
         re.IGNORECASE,
     )
     if not match:
         return None
-    anime = re.sub(r"^(?:🧠\s*|📄\s*|🖼️\s*)", "", match.group("anime")).strip()
+    anime = re.sub(r"^(?:🧠\s*|📄\s*|🖼️\s*|📚\s*)", "", match.group("anime")).strip()
     anime = re.sub(r"\s+(?:raw fingerprint|fingerprint pdf|visual index).*?$", "", anime, flags=re.IGNORECASE)
     return anime.strip(), int(match.group("season")), int(match.group("episode"))
 
@@ -153,7 +153,19 @@ async def saves_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Pehle /fingerprint Death Note S1 E1 chalao."
         )
         return
-    text = _render(artifacts, "home")
+
+    route = "home"
+    raw = " ".join(context.args or []).strip()
+    direct = re.match(
+        r"^(.+?)\s+(?:[Ss]eason\s*)?(\d+)\s+[Ee](?:p(?:isode)?\s*)?(\d+)$",
+        raw,
+        re.IGNORECASE,
+    )
+    if direct:
+        anime, season, episode = direct.groups()
+        route = f"e|{anime.strip()}|{int(season)}|{int(episode)}"
+
+    text = _render(artifacts, route)
     sent = await update.message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
     context.application.bot_data.setdefault("saves_messages", {})[update.effective_user.id] = (sent.chat_id, sent.message_id)
 
