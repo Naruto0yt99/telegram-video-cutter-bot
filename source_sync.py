@@ -84,7 +84,7 @@ def _episode_from_text(text: str):
             if global_match:
                 return (
                     match.group("season"),
-                    global_match.group("episode"),
+                    global_match.group("global_episode"),
                     match,
                     "season",
                     True,
