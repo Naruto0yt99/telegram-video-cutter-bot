@@ -10,7 +10,7 @@ from telegram_media import is_video_message, get_message_video_name
 from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
-PARSER_VERSION = 30
+PARSER_VERSION = 31
 
 
 _QUALITY_PATTERNS = [
@@ -77,7 +77,7 @@ def _episode_from_text(text: str):
         match = pattern.search(text)
         if match:
             global_match = re.search(
-                r"\s*[\[(]\s*(?P<episode>\d{1,4})\s*[\])]",
+                r"\s*[\[(]\s*(?P<global_episode>\d{1,4})\s*[\])]",
                 text[match.end():],
                 re.I,
             )
@@ -167,6 +167,7 @@ def _is_non_anime_topic(topic_text: str) -> bool:
         "video", "videos", "ai", "ai video", "ai videos", "ai generated",
         "edit", "edits", "amv", "short", "shorts", "meme", "memes",
         "random", "other", "others", "misc", "miscellaneous",
+        "feedback", "feed back", "feedback chat", "feedback topic",
     }
     return text in blocked
 
@@ -292,6 +293,15 @@ def parse_episode_metadata(
         return None
 
     quality = _detect_quality(combined) or "auto"
+
+    # Attack on Titan OAD files are sometimes stored inside a topic named
+    # "Season 04 (OAD)". OAD in the actual filename/caption is authoritative.
+    if anime == "Attack on Titan" and re.search(r"\\bOAD\\b", combined, re.I):
+        oad_ep = re.search(r"\\bOAD\\s*E?\\s*0*(\\d{1,2})\\b", combined, re.I)
+        if oad_ep:
+            content_type = "oad"
+            episode = oad_ep.group(1)
+            has_global_episode = True
 
     if content_type == "season":
         if season is None and anime == "Naruto Shippuden":
@@ -568,7 +578,7 @@ async def sync_source_library(client):
         if topic_id and marker_episode is not None:
             topic_episode_state[topic_id] = {
                 "season": marker_season,
-                "episode": str(marker_episode),
+                "episode": str(int(marker_episode)),
                 "content_type": marker_type,
                 "has_global_episode": marker_global,
             }
@@ -626,12 +636,12 @@ async def sync_source_library(client):
                     "anime": "Naruto" if local_context_anime in {"Naruto", "Naruto Shippuden", "Naruto Movies"} else local_context_anime,
                     "series": local_context_anime,
                     "season": str(pending["season"] or local_context_season or "1"),
-                    "episode": str(pending["episode"]),
+                    "episode": str(int(pending["episode"])),
                     "quality": _detect_quality(raw_text) or "auto",
                     "special_title": None,
                 }
             else:
-                metadata["episode"] = str(pending["episode"])
+                metadata["episode"] = str(int(pending["episode"]))
                 if pending["season"]:
                     metadata["season"] = str(pending["season"])
                 if pending["content_type"] in {"oad", "ova", "special", "movie"}:
