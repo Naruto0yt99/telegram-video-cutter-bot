@@ -3,12 +3,13 @@ import json
 import logging
 import mimetypes
 import re
+import difflib
 from pathlib import Path
 
 import httpx
 
 from config import GEMINI_API_KEY, TEMP_DIR, FFMPEG_BIN
-from database import get_all_sources_for_episode
+from database import get_all_sources_for_episode, get_animes, get_seasons, get_episodes
 from library_nav import canonical_anime
 from telegram_remote import get_telegram_video_info, open_telegram_range_server
 from ffmpeg_utils import run_command
@@ -300,6 +301,75 @@ def _source_pair(anime, season, episode):
     return sources[low_q], sources[high_q], sources
 
 
+def _library_anime_match(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    canonical = canonical_anime(raw)
+    try:
+        available = [canonical_anime(x) or str(x).strip() for x in get_animes()]
+    except Exception:
+        available = []
+    available = list(dict.fromkeys(x for x in available if x))
+    if canonical and any(str(x).casefold() == str(canonical).casefold() for x in available):
+        return next(x for x in available if str(x).casefold() == str(canonical).casefold())
+    if not available:
+        return canonical
+    norm = lambda x: re.sub(r"[^a-z0-9]+", "", str(x).casefold())
+    compact = norm(raw)
+    scored = []
+    for name in available:
+        n = norm(name)
+        score = difflib.SequenceMatcher(None, compact, n).ratio()
+        if compact and (compact in n or n in compact):
+            score += 0.20
+        scored.append((score, name))
+    scored.sort(reverse=True, key=lambda x: x[0])
+    return scored[0][1] if scored and scored[0][0] >= 0.55 else canonical
+
+
+def _episode_candidates(anime, season, episode):
+    try:
+        seasons = [str(x) for x in get_seasons(anime)]
+    except Exception:
+        seasons = []
+    if not seasons:
+        return [(anime, season, episode)]
+    requested_season = str(season) if season is not None else None
+    selected_season = requested_season if requested_season in seasons else None
+    if selected_season is None and requested_season:
+        m = re.search(r"\d+", requested_season)
+        if m:
+            wanted = int(m.group())
+            numeric_seasons = []
+            for x in seasons:
+                mx = re.search(r"\d+", x)
+                numeric_seasons.append((abs(int(mx.group()) - wanted), x) if mx else (10**9, x))
+            selected_season = min(numeric_seasons)[1]
+    if selected_season is None:
+        selected_season = seasons[0]
+    try:
+        episodes = [str(x) for x in get_episodes(anime, selected_season)]
+    except Exception:
+        episodes = []
+    if not episodes:
+        return [(anime, selected_season, episode)]
+    if episode is None:
+        return [(anime, selected_season, e) for e in sorted(episodes, key=lambda x: int(x) if x.isdigit() else 10**9)[:8]]
+    wanted = str(episode)
+    nums = sorted(episodes, key=lambda x: int(x) if x.isdigit() else 10**9)
+    if wanted in nums:
+        pos = nums.index(wanted)
+        ordered = nums[max(0, pos - 2):pos + 3]
+    else:
+        try:
+            w = int(wanted)
+            ordered = sorted(nums, key=lambda x: abs(int(x) - w))[:5]
+        except Exception:
+            ordered = nums[:5]
+    return [(anime, selected_season, e) for e in dict.fromkeys(ordered)]
+
+
 async def _extract_high_res(client, source_url, start, end, output):
     server = await open_telegram_range_server(client, source_url)
     try:
@@ -392,20 +462,30 @@ The important requirement is to describe what is visibly present, not to explain
     # several Short scenes came from it.
     groups = {}
     for r in regions:
-        anime = canonical_anime(str(r.get("anime") or "").strip()) or str(r.get("anime") or "").strip()
+        anime = _library_anime_match(r.get("anime"))
+        if not anime:
+            continue
         season = r.get("season")
         episode = r.get("episode")
         try:
-            season = int(season)
-            episode = int(episode)
+            season = int(season) if season is not None else None
         except (TypeError, ValueError):
-            continue
-        low, high, sources = _source_pair(anime, season, episode)
-        if low and high:
-            groups.setdefault((anime, season, episode), (low, high, sources))
-
+            season = None
+        try:
+            episode = int(episode) if episode is not None else None
+        except (TypeError, ValueError):
+            episode = None
+        for cand_anime, cand_season, cand_episode in _episode_candidates(anime, season, episode):
+            try:
+                cand_season_i = int(cand_season)
+                cand_episode_i = int(cand_episode)
+            except (TypeError, ValueError):
+                continue
+            low, high, sources = _source_pair(cand_anime, cand_season_i, cand_episode_i)
+            if low and high:
+                groups.setdefault((cand_anime, cand_season_i, cand_episode_i), (low, high, sources))
     if not groups:
-        raise RuntimeError("Gemini ke identified anime/episodes Telegram library me nahi mile.")
+        raise RuntimeError("Gemini ke identified anime/episodes Telegram library me nahi mile. Anime title/episode ko library aliases ke saath resolve nahi kiya ja saka.")
 
     episode_files = {}
     for n, ((anime, season, episode), (low, high, _)) in enumerate(groups.items(), 1):
