@@ -184,6 +184,37 @@ async def clear_saved_fingerprint_artifacts(client, chat_id, topic_id):
     return deleted
 
 
+async def get_saved_fingerprint_keys(client, chat_id, topic_id):
+    """Return (anime, season, episode) keys that have all three saved artifacts."""
+    if client is None:
+        raise RuntimeError("Telegram USER_SESSION connected nahi hai.")
+    if topic_id is None:
+        raise RuntimeError("FINGERPRINTS topic bound nahi hai.")
+
+    found = {}
+    async for message in client.iter_messages(chat_id, reply_to=int(topic_id)):
+        caption = str(getattr(message, "message", "") or "")
+        if not any(marker in caption for marker in (
+            "RAW FINGERPRINT", "FINGERPRINT PDF", "VISUAL INDEX PDF"
+        )):
+            continue
+        match = re.search(
+            r"📚\\s*(.+?)\\s+S(\\d+)\\s+E(\\d+)",
+            caption,
+            re.IGNORECASE,
+        )
+        if not match:
+            continue
+        key = (match.group(1).strip().lower(), int(match.group(2)), int(match.group(3)))
+        found.setdefault(key, set()).add(caption.splitlines()[0].strip())
+
+    complete = set()
+    for key, markers in found.items():
+        if {"RAW FINGERPRINT", "FINGERPRINT PDF", "VISUAL INDEX PDF"}.issubset(markers):
+            complete.add(key)
+    return complete
+
+
 async def fingerprint_storage_status(bot: Bot, chat_id: str) -> str:
     try:
         info = await check_fingerprint_storage(bot, chat_id)
