@@ -125,7 +125,7 @@ async def _gemini_upload_telegram(client, source_url: str, display_name: str):
                 pass
 
 async def _wait_active(name: str):
-    deadline = asyncio.get_running_loop().time() + 300
+    deadline = asyncio.get_running_loop().time() + 180
     async with httpx.AsyncClient(timeout=60) as client:
         while asyncio.get_running_loop().time() < deadline:
             r = await client.get(f"{GEMINI_ROOT}/v1beta/{name}", headers=_headers())
@@ -185,7 +185,8 @@ async def _generate(prompt, files):
                                 "mime_type": "video/mp4",
                                 "file_uri": uri,
                             },
-                            "media_processing": "AGENTIC",
+                            "media_processing": "STATIC",
+                            "media_resolution": {"level": "MEDIA_RESOLUTION_LOW"},
                         }
                         for uri in uris
                     ],
@@ -194,18 +195,19 @@ async def _generate(prompt, files):
             }],
             "generationConfig": {
                 "responseMimeType": "application/json",
+                "thinkingConfig": {"thinkingLevel": "low", "includeThoughts": False},
             },
         }
 
         for model in GEMINI_MODELS:
-            for attempt in range(3):
+            for attempt in range(2):
                 try:
                     r = await client.post(
                         f"{GEMINI_ROOT}/v1beta/models/{model}:generateContent",
                         headers={**_headers(), "Content-Type": "application/json"},
                         json=payload,
                     )
-                    if r.status_code in GEMINI_RETRYABLE_STATUS and attempt < 2:
+                    if r.status_code in GEMINI_RETRYABLE_STATUS and attempt < 1:
                         retry_after = r.headers.get("retry-after")
                         try:
                             delay = min(20.0, max(2.0, float(retry_after)))
