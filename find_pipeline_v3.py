@@ -220,13 +220,22 @@ async def _generate(prompt, files):
                         if r.status_code not in GEMINI_RETRYABLE_STATUS:
                             raise RuntimeError(f"Gemini HTTP {r.status_code} ({model}): {body}")
                     r.raise_for_status()
-                    data = r.json()
+                    try:
+                        data = r.json()
+                    except Exception as exc:
+                        logger.error("Gemini returned non-JSON HTTP body model=%s body=%s", model, r.text[:4000])
+                        raise RuntimeError(f"Gemini response JSON parse failed ({model}): {r.text[:1000]}") from exc
                     text_parts = []
                     for candidate in data.get("candidates", []):
                         for part in candidate.get("content", {}).get("parts", []):
                             if part.get("text"):
                                 text_parts.append(part["text"])
-                    return _json("\n".join(text_parts))
+                    raw_text = "\n".join(text_parts)
+                    try:
+                        return _json(raw_text)
+                    except Exception as exc:
+                        logger.error("Gemini returned invalid JSON model=%s text=%s", model, raw_text[:4000])
+                        raise RuntimeError(f"Gemini returned invalid JSON ({model}): {raw_text[:1000]}") from exc
                 except Exception as exc:
                     last = exc
                     status = getattr(getattr(exc, "response", None), "status_code", None)
