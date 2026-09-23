@@ -383,8 +383,8 @@ async def build_remote_fingerprint(
     HTTP seeking, Telegram range stalls, and file-reference/range-server issues.
     The temporary episode is deleted after the fingerprint is built.
 
-    Default sampling is every 2 seconds, giving a much denser timeline than the
-    old 8-second remote fingerprint and making scene matching more precise.
+    Default sampling is every 0.1 seconds, giving 10 samples per second for
+    fine-grained temporal matching.
     """
     checkpoint = _checkpoint_path(anime, season, episode)
     temp_path = None
