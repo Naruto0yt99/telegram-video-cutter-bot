@@ -80,11 +80,17 @@ async def _load_artifacts(context):
 
     artifacts = {}
     async for message in client.iter_messages(FINGERPRINT_CHAT, limit=5000):
-        thread_id = getattr(message, "reply_to_msg_id", None)
         if getattr(message, "media", None) is None:
             continue
-        # Telegram/Telethon topic filtering can vary by version. Captions are
-        # the second safety check; all generated artifacts have distinctive captions.
+
+        # Keep only artifacts from the bound FINGERPRINTS forum topic.
+        reply_to = getattr(message, "reply_to", None)
+        top_id = getattr(reply_to, "reply_to_top_id", None) if reply_to else None
+        reply_msg_id = getattr(reply_to, "reply_to_msg_id", None) if reply_to else None
+        legacy_reply = getattr(message, "reply_to_msg_id", None)
+        if topic_id not in {top_id, reply_msg_id, legacy_reply}:
+            continue
+
         kind = _artifact_kind(message)
         key = _episode_key_from_message(message)
         if not kind or not key:
