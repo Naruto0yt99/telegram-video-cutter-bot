@@ -1,16 +1,18 @@
 import base64
-import hashlib
+import html
 import logging
 import re
 import unicodedata
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from database import get_connection
 
 logger = logging.getLogger("anime-bot.library")
+
+BOT_USERNAME = "AnimeclipcutterBot"
 
 _CANONICAL = {
     "a gentle noble's vacation recommendation": "A Gentle Noble's Vacation Recommendation",
@@ -46,8 +48,7 @@ def _norm(value: str) -> str:
     value = value.casefold().replace("&", " and ")
     value = re.sub(r"[^\w\s]+", " ", value, flags=re.UNICODE)
     value = re.sub(r"_+", " ", value)
-    value = re.sub(r"\s+", " ", value).strip()
-    return value
+    return re.sub(r"\s+", " ", value).strip()
 
 def _compact(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", _norm(value))
@@ -63,15 +64,23 @@ def canonical_anime(value: str):
         if _compact(key) == compact:
             return canonical
     for key in sorted(_CANONICAL, key=len, reverse=True):
-        if key in norm:
+        if _norm(key) in norm:
             return _CANONICAL[key]
     return re.sub(r"\s+", " ", value or "").strip() or None
 
-def _callback_key(value: str) -> str:
-    return hashlib.sha1(value.encode("utf-8")).hexdigest()[:12]
+def _encode_route(route: str) -> str:
+    return base64.urlsafe_b64encode(route.encode("utf-8")).decode("ascii").rstrip("=")
 
-def _keyboard(rows):
-    return InlineKeyboardMarkup(rows)
+def _decode_route(payload: str) -> str:
+    raw = payload[4:] if payload.startswith("lib_") else payload
+    raw += "=" * (-len(raw) % 4)
+    return base64.urlsafe_b64decode(raw.encode("ascii")).decode("utf-8")
+
+def _link(bot_username: str, label: str, route: str) -> str:
+    return f'<a href="https://t.me/{bot_username}?start=lib_{_encode_route(route)}">{html.escape(label)}</a>'
+
+def _source_link(label: str, url: str) -> str:
+    return f'<a href="{html.escape(url, quote=True)}">{html.escape(label)}</a>'
 
 def _load_tree():
     tree = {}
@@ -90,9 +99,9 @@ def _load_tree():
         if not anime:
             continue
         series = canonical_anime(row["series"] or row["anime"]) or str(row["series"] or row["anime"])
-        # All Naruto variants intentionally live below one public Naruto node.
-        if series in {"Naruto Shippuden", "Naruto Movies"}:
-            anime = "Naruto"
+        # Keep OG Naruto, Shippuden and Movies as separate series under one Naruto node.
+        if series not in {"Naruto", "Naruto Shippuden", "Naruto Movies"} and anime == "Naruto":
+            series = "Naruto"
         season = str(row["season"])
         episode = str(row["episode"])
         tree.setdefault(anime, {}).setdefault(series, {}).setdefault(season, {}).setdefault(episode, {})[
@@ -119,177 +128,116 @@ def _content_label(season):
         return "Movies"
     return f"Season {season}"
 
-def _merged_series_seasons(tree, anime, series):
-    return tree.get(anime, {}).get(series, {})
+def _anime_page(tree, bot_username):
+    lines = ["📚 <b>ANIME LIBRARY</b>", "", ""] 
+    lines.extend(f"🎬 {_link(bot_username, anime, 'a|' + anime)}" for anime in sorted(tree, key=str.casefold))
+    return "\n".join(lines), None
 
-def _anime_page(tree):
-    rows = [
-        [InlineKeyboardButton(f"🎬 {anime}", callback_data=f"la:{_callback_key(anime)}")]
-        for anime in sorted(tree, key=str.casefold)
-    ]
-    return "📚 <b>ANIME LIBRARY</b>\n\nTap an anime:", _keyboard(rows)
-
-def _series_page(tree, anime):
+def _series_page(tree, anime, bot_username):
     series = tree.get(anime, {})
-    # If there is only one internal series, skip an unnecessary extra screen.
-    if len(series) == 1:
-        only = next(iter(series))
-        return _season_page(tree, anime, only)
-
-    rows = []
+    lines = [f"🎬 <b>{html.escape(anime)}</b>", ""]
     for name in sorted(series, key=str.casefold):
-        rows.append([
-            InlineKeyboardButton(
-                f"📺 {name}",
-                callback_data=f"ls:{_callback_key(anime + '|' + name)}",
-            )
-        ])
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="lb")])
-    return f"🎬 <b>{anime}</b>\n\nSelect series:", _keyboard(rows)
+        lines.append(f"📺 {_link(bot_username, name, 's|' + anime + '|' + name)}")
+    lines.extend(["", f"⬅️ {_link(bot_username, 'Back', 'home')}"])
+    return "\n".join(lines), None
 
-def _season_page(tree, anime, series):
-    seasons = _merged_series_seasons(tree, anime, series)
-    rows = []
-    for season in sorted(seasons, key=_season_sort_key):
-        rows.append([
-            InlineKeyboardButton(
-                f"📺 {_content_label(season)}",
-                callback_data=f"lt:{_callback_key(anime + '|' + series + '|' + season)}",
-            )
-        ])
-    rows.append([
-        InlineKeyboardButton("⬅️ Back", callback_data=f"la:{_callback_key(anime)}")
-    ])
-    return (
-        f"🎬 <b>{anime}</b>\n"
-        f"📺 <b>{series}</b>\n\n"
-        "Select season:",
-        _keyboard(rows),
-    )
-
-def _episode_page(tree, anime, series, season):
-    episodes = _merged_series_seasons(tree, anime, series).get(season, {})
+def _season_page(tree, anime, series, bot_username):
+    seasons = tree.get(anime, {}).get(series, {})
     lines = [
-        f"🎬 <b>{anime}</b>",
-        f"📺 <b>{series}</b>",
-        f"📁 <b>{_content_label(season)}</b>",
+        f"🎬 <b>{html.escape(anime)}</b>",
+        f"📺 <b>{html.escape(series)}</b>",
         "",
     ]
-    episode_lines = []
-    preferred = ["2160p", "1440p", "1080p", "720p", "480p", "360p", "auto"]
+    for season in sorted(seasons, key=_season_sort_key):
+        lines.append(
+            f"📁 {_link(bot_username, _content_label(season), 't|' + anime + '|' + series + '|' + season)}"
+        )
+    lines.extend(["", f"⬅️ {_link(bot_username, 'Back', 'a|' + anime)}"])
+    return "\n".join(lines), None
 
-    for episode in sorted(
-        episodes,
-        key=lambda x: int(x) if str(x).isdigit() else str(x),
-    ):
+def _episode_page(tree, anime, series, season, bot_username):
+    episodes = tree.get(anime, {}).get(series, {}).get(season, {})
+    lines = [
+        f"🎬 <b>{html.escape(anime)}</b>",
+        f"📺 <b>{html.escape(series)}</b>",
+        f"📁 <b>{html.escape(_content_label(season))}</b>",
+        "",
+    ]
+    preferred = ["2160p", "1440p", "1080p", "720p", "480p", "360p", "auto"]
+    for episode in sorted(episodes, key=lambda x: int(x) if str(x).isdigit() else str(x)):
         sources = episodes[episode]
         links = []
         for quality in preferred:
             url = sources.get(quality)
             if url:
-                label = "Source" if quality == "auto" else quality
-                links.append(f'<a href="{url}">{label}</a>')
+                links.append(_source_link("Source" if quality == "auto" else quality, url))
         if links:
-            episode_lines.append(
-                f"🎞️ <b>Episode {episode}</b> — " + " / ".join(links)
-            )
-
-    if episode_lines:
-        # Episodes are deliberately plain text links, not inline buttons.
-        # Telegram HTML blockquote renders the requested quoted episode list.
-        lines.append("<blockquote>" + "<br>".join(episode_lines) + "</blockquote>")
-    else:
+            lines.append(f"🎞️ <b>Episode {html.escape(episode)}</b> — " + " / ".join(links))
+    if len(lines) == 4:
         lines.append("No episodes found.")
+    lines.extend(["", f"⬅️ {_link(bot_username, 'Back', 's|' + anime + '|' + series)}"])
+    return "\n".join(lines), None
 
-    lines.append("")
-    lines.append("Tap 480p / 720p / 1080p etc. to open the exact Telegram video.")
-    markup = _keyboard([
-        [InlineKeyboardButton(
-            "⬅️ Back",
-            callback_data=f"ls:{_callback_key(anime + '|' + series)}",
-        )]
-    ])
-    return "\n".join(lines), markup
-
-def _resolve_series(tree, key):
-    for anime, series_map in tree.items():
-        for series in series_map:
-            if _callback_key(anime + "|" + series) == key:
-                return anime, series
-    return None
-
-def _resolve_season(tree, key):
-    for anime, series_map in tree.items():
-        for series, seasons in series_map.items():
-            for season in seasons:
-                if _callback_key(anime + "|" + series + "|" + season) == key:
-                    return anime, series, season
-    return None
+def _render_route(tree, route, bot_username):
+    parts = route.split("|")
+    if parts == ["home"]:
+        return _anime_page(tree, bot_username)
+    if parts and parts[0] == "a" and len(parts) == 2:
+        anime = parts[1]
+        return _series_page(tree, anime, bot_username)
+    if parts and parts[0] == "s" and len(parts) == 3:
+        return _season_page(tree, parts[1], parts[2], bot_username)
+    if parts and parts[0] == "t" and len(parts) == 4:
+        return _episode_page(tree, parts[1], parts[2], parts[3], bot_username)
+    return _anime_page(tree, bot_username)
 
 async def library_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tree = _load_tree()
     if not tree:
         await update.message.reply_text("📚 Library abhi empty hai.")
         return
-    text, markup = _anime_page(tree)
-    await update.message.reply_text(
+    bot_username = context.bot.username or BOT_USERNAME
+    text, _ = _anime_page(tree, bot_username)
+    sent = await update.message.reply_text(
         text,
         parse_mode=ParseMode.HTML,
-        reply_markup=markup,
         disable_web_page_preview=True,
     )
+    context.application.bot_data.setdefault("library_messages", {})[update.effective_user.id] = (
+        sent.chat_id,
+        sent.message_id,
+    )
 
-async def library_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    tree = _load_tree()
-    data = query.data or ""
+async def library_deeplink(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args or []
+    if not args or not args[0].startswith("lib_"):
+        return False
 
     try:
-        if data == "lb":
-            text, markup = _anime_page(tree)
-        elif data.startswith("la:"):
-            key = data[3:]
-            anime = next((a for a in tree if _callback_key(a) == key), None)
-            if not anime:
-                await query.answer("Anime library entry nahi mila.", show_alert=True)
-                return
-            text, markup = _series_page(tree, anime)
-        elif data.startswith("ls:"):
-            resolved = _resolve_series(tree, data[3:])
-            if not resolved:
-                await query.answer("Series library entry nahi mila.", show_alert=True)
-                return
-            anime, series = resolved
-            text, markup = _season_page(tree, anime, series)
-        elif data.startswith("lt:"):
-            resolved = _resolve_season(tree, data[3:])
-            if not resolved:
-                await query.answer("Season library entry nahi mila.", show_alert=True)
-                return
-            anime, series, season = resolved
-            text, markup = _episode_page(tree, anime, series, season)
-        else:
-            return
+        route = _decode_route(args[0])
+        tree = _load_tree()
+        bot_username = context.bot.username or BOT_USERNAME
+        text, _ = _render_route(tree, route, bot_username)
+        target = context.application.bot_data.get("library_messages", {}).get(update.effective_user.id)
 
-        try:
-            await query.edit_message_text(
-                text,
+        if target:
+            chat_id, message_id = target
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
                 parse_mode=ParseMode.HTML,
-                reply_markup=markup,
                 disable_web_page_preview=True,
             )
-        except Exception as edit_exc:
-            logger.warning("Library edit failed; sending fresh page: %s", edit_exc)
-            await query.message.reply_text(
-                text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=markup,
-                disable_web_page_preview=True,
-            )
+            context.application.bot_data["library_messages"][update.effective_user.id] = (chat_id, message_id)
+
+        # The deep-link /start message itself is only a navigation trigger.
+        if update.message:
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
+        return True
     except Exception:
-        logger.exception("Library navigation failed")
-        try:
-            await query.answer("Library load failed.", show_alert=True)
-        except Exception:
-            pass
+        logger.exception("Library deep-link navigation failed")
+        return False
