@@ -73,7 +73,7 @@ from source_sync import sync_source_library, render_library_html
 from utils import unique_path
 from clip_handler import clip_command as source_clip_command
 from library_nav import library_command as nav_library_command, library_deeplink as nav_library_deeplink
-from fingerprint_storage import fingerprint_storage_status, bind_fingerprint_topic, get_fingerprint_topic_id, save_fingerprint_json, save_fingerprint_pack, save_fingerprint_artifacts, clear_saved_fingerprint_artifacts
+from fingerprint_storage import fingerprint_storage_status, bind_fingerprint_topic, get_fingerprint_topic_id, save_fingerprint_json, save_fingerprint_pack, save_fingerprint_artifacts, clear_saved_fingerprint_artifacts, get_saved_fingerprint_keys
 from fingerprint_library import saves_command, saves_deeplink
 
 
@@ -90,6 +90,9 @@ bot_mtproto_lock = asyncio.Lock()
 source_sync_task = None
 job_lock = asyncio.Lock()
 active_videos = {}
+fingerprint_batch_task = None
+fingerprint_batch_stop = None
+fingerprint_batch_state = {"status": "idle", "total": 0, "done": 0, "current": None, "pending": [], "failed": []}
 _instance_lock_handle = None
 
 
@@ -577,14 +580,71 @@ async def _resolve_fingerprint_source(anime: str, season: int, episode: int):
     return f"https://t.me/{username}/{message.id}"
 
 
+async def _build_fingerprint_episode(bot, user_id, anime, season, episode, status_message):
+    """Build and save one fingerprint using the same 0.1s format as /fingerprint."""
+    source_url = get_best_source(anime, season, episode)
+    if not source_url:
+        source_url = await _resolve_fingerprint_source(anime, season, episode)
+    if not source_url:
+        raise LookupError(f"Telegram library me {anime} S{season} E{episode} ka episode message nahi mila.")
+    if telethon_client is None:
+        raise RuntimeError("Telegram USER_SESSION connected nahi hai.")
+
+    async def progress(done, total):
+        step = max(1, total // 20)
+        if done == 1 or done == total or done % step == 0:
+            pct = min(96, int(done / max(1, total) * 90))
+            await safe_edit_text(
+                status_message,
+                f"🧠 FINGERPRINT — {pct}%\\n\\n"
+                f"📚 {anime} S{season} E{episode}\\n"
+                f"🔎 Samples: {done}/{total}"
+            )
+
+    try:
+        fingerprint = await build_remote_fingerprint(
+            telethon_client, source_url, anime, season, episode,
+            sample_every=0.1, progress=progress, keep_temp=True,
+        )
+        temp_episode = Path(fingerprint.pop("_temp_episode_path"))
+        filename = re.sub(
+            r"[^A-Za-z0-9._-]+", "_",
+            f"{anime}_S{season:02d}_E{episode:03d}"
+        ) + ".json"
+        index_path = user_temp_dir(user_id) / f"{Path(filename).stem}_visual_index.pdf"
+        await safe_edit_text(
+            status_message,
+            f"🧠 FINGERPRINT — 96%\\n\\n📚 {anime} S{season} E{episode}\\n"
+            "🖼️ Real episode frames ka visual index ban raha hai..."
+        )
+        build_video_index_pdf(temp_episode, index_path, every_seconds=2.0)
+        await safe_edit_text(
+            status_message,
+            f"🧠 FINGERPRINT — 98%\\n\\n📚 {anime} S{season} E{episode}\\n"
+            "☁️ JSON + PDF + index Telegram me save ho rahe hain..."
+        )
+        artifacts = await save_fingerprint_artifacts(
+            bot, FINGERPRINT_CHAT, fingerprint, filename, index_path
+        )
+        return fingerprint, artifacts
+    finally:
+        try:
+            if 'temp_episode' in locals():
+                temp_episode.unlink(missing_ok=True)
+            if 'index_path' in locals():
+                Path(index_path).unlink(missing_ok=True)
+        except Exception:
+            logger.exception("Fingerprint temp cleanup failed")
+
+
 async def fingerprint_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
         await update.message.reply_text("❌ Owner only.")
         return
     raw = " ".join(context.args).strip()
-    match = re.match(r"^(.+?)\s+[Ss](\d+)\s+[Ee](\d+)$", raw, re.IGNORECASE)
+    match = re.match(r"^(.+?)\\s+[Ss](\\d+)\\s+[Ee](\\d+)$", raw, re.IGNORECASE)
     if not match:
-        await update.message.reply_text("Usage:\n/fingerprint Death Note S1 E1")
+        await update.message.reply_text("Usage:\\n/fingerprint Death Note S1 E1")
         return
 
     anime, season, episode = match.groups()
@@ -592,68 +652,243 @@ async def fingerprint_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if get_fingerprint_topic_id() is None:
         await update.message.reply_text("⚠️ Pehle FINGERPRINTS topic me /fingerprint_bind bhejo.")
         return
-    source_url = get_best_source(anime, season, episode)
-    if not source_url:
-        await update.message.reply_text(
-            f"🔎 Local catalog me {anime} S{season} E{episode} nahi mila.\\n"
-            "📡 Telegram library metadata se direct source dhoondh raha hoon..."
-        )
-        source_url = await _resolve_fingerprint_source(anime, season, episode)
-    if not source_url:
-        await update.message.reply_text(
-            f"❌ Telegram library me {anime} S{season} E{episode} ka episode message nahi mila."
-        )
-        return
-    if telethon_client is None:
-        await update.message.reply_text("❌ Telegram USER_SESSION connected nahi hai.")
-        return
-
     status = await update.message.reply_text(
-        f"🧠 FINGERPRINT STARTED\n\n📚 {anime} S{season} E{episode}\n"
-        "📡 Remote Telegram scan...\n💾 Full episode local storage me save nahi hoga."
+        f"🧠 FINGERPRINT STARTED\\n\\n📚 {anime} S{season} E{episode}\\n"
+        "📡 Remote Telegram scan...\\n💾 Full episode local storage me save nahi hoga."
     )
     try:
-        async def progress(done, total):
-            step = max(1, total // 20)
-            if done == 1 or done == total or done % step == 0:
-                pct = min(96, int(done / max(1, total) * 90))
-                await safe_edit_text(
-                    status,
-                    f"🧠 FINGERPRINT — {pct}%\n\n"
-                    f"📚 {anime} S{season} E{episode}\n"
-                    f"🔎 Samples: {done}/{total}"
-                )
-
-        fingerprint = await build_remote_fingerprint(
-            telethon_client, source_url, anime, season, episode,
-            sample_every=0.1, progress=progress, keep_temp=True,
+        fingerprint, artifacts = await _build_fingerprint_episode(
+            context.bot, update.effective_user.id, anime, season, episode, status
         )
-        temp_episode = Path(fingerprint.pop("_temp_episode_path"))
-        filename = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{anime}_S{season:02d}_E{episode:03d}") + ".json"
-        index_path = user_temp_dir(update.effective_user.id) / f"{Path(filename).stem}_visual_index.pdf"
-        await safe_edit_text(status, "🧠 FINGERPRINT — 96%\n\n🖼️ Real episode frames ka visual index ban raha hai...")
-        build_video_index_pdf(temp_episode, index_path, every_seconds=2.0)
-        await safe_edit_text(status, "🧠 FINGERPRINT — 98%\n\n☁️ JSON + PDF + index Telegram me save ho rahe hain...")
-        artifacts = await save_fingerprint_artifacts(
-            context.bot,
-            FINGERPRINT_CHAT,
-            fingerprint,
-            filename,
-            index_path,
-        )
-        temp_episode.unlink(missing_ok=True)
-        index_path.unlink(missing_ok=True)
         await safe_edit_text(
             status,
-            f"✅ FINGERPRINT + INDEX SAVED\n\n📚 {anime} S{season} E{episode}\n"
-            f"🧩 Samples: {len(fingerprint.get('times', []))}\n"
-            f"📄 PDF message: {artifacts['pdf'].message_id}\n"
-            f"🖼️ Index message: {artifacts['index'].message_id}\n\n"
+            f"✅ FINGERPRINT + INDEX SAVED\\n\\n📚 {anime} S{season} E{episode}\\n"
+            f"🧩 Samples: {len(fingerprint.get('times', []))}\\n"
+            f"📄 PDF message: {artifacts['pdf'].message_id}\\n"
+            f"🖼️ Index message: {artifacts['index'].message_id}\\n\\n"
             "📚 /saves se PDF ko page-by-page verify kar sakte ho."
         )
     except Exception as exc:
         logger.exception("Fingerprint build failed")
-        await safe_edit_text(status, f"❌ FINGERPRINT FAILED\n\n{exc}")
+        await safe_edit_text(status, f"❌ FINGERPRINT FAILED\\n\\n{exc}")
+    finally:
+        cleanup_user_temp(update.effective_user.id)
+
+
+def _resolve_batch_anime(name):
+    target = re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
+    for anime in get_animes():
+        normalized = re.sub(r"[^a-z0-9]+", " ", str(anime).lower()).strip()
+        if normalized == target:
+            return anime
+    return None
+
+
+def _parse_fingerprint_batch_specs(raw):
+    force = "--force" in raw.lower().split()
+    raw = re.sub(r"\\s*--force\\b", "", raw, flags=re.IGNORECASE).strip()
+    parts = [part.strip() for part in raw.split("|") if part.strip()]
+    specs = []
+    for part in parts:
+        match = re.match(r"^(.+?)\\s+[Ss](\\d+)$", part, re.IGNORECASE)
+        if not match:
+            raise ValueError(
+                f"Invalid item: {part}\\nFormat: Anime Name S1 | Other Anime S1"
+            )
+        specs.append((match.group(1).strip(), int(match.group(2))))
+    if not specs:
+        raise ValueError(
+            "Usage:\\n/fingerprint_all Death Note S1\\n"
+            "or\\n/fingerprint_all Death Note S1 | Re:Zero S1 | AOT S1"
+        )
+    return specs, force
+
+
+async def _run_fingerprint_batch(owner_id, chat_id, specs, force):
+    global fingerprint_batch_state
+    failed_final = []
+    retry_later = []
+    completed = []
+    skipped = []
+    fingerprint_batch_state.update({
+        "status": "running", "total": 0, "done": 0,
+        "current": None, "pending": [], "failed": []
+    })
+    try:
+        if get_fingerprint_topic_id() is None:
+            raise RuntimeError("Pehle FINGERPRINTS topic me /fingerprint_bind bhejo.")
+        if telethon_client is None:
+            raise RuntimeError("Telegram USER_SESSION connected nahi hai.")
+
+        saved = set() if force else await get_saved_fingerprint_keys(
+            telethon_client, FINGERPRINT_CHAT, get_fingerprint_topic_id()
+        )
+        queue = []
+        seen = set()
+        for requested_anime, season in specs:
+            anime = _resolve_batch_anime(requested_anime) or requested_anime
+            episodes = get_episodes(anime, season)
+            if not episodes:
+                failed_final.append((anime, season, "library me koi episode nahi mila"))
+                continue
+            for episode_raw in episodes:
+                try:
+                    episode = int(episode_raw)
+                except Exception:
+                    continue
+                key = (anime.lower(), season, episode)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if not force and key in saved:
+                    skipped.append((anime, season, episode))
+                else:
+                    queue.append((anime, season, episode))
+
+        fingerprint_batch_state["total"] = len(queue)
+        fingerprint_batch_state["pending"] = list(queue)
+
+        status = await application.bot.send_message(
+            chat_id,
+            "🚀 FINGERPRINT QUEUE STARTED\\n\\n"
+            f"📦 Queue: {len(queue)} episodes\\n"
+            f"⏭️ Already saved: {len(skipped)}\\n"
+            "🔁 Failed episodes end me retry honge.\\n"
+            "🛑 /fingerprint_all_stop se safe stop kar sakte ho."
+        )
+
+        async def process_one(item, retry_round=False):
+            anime, season, episode = item
+            fingerprint_batch_state["current"] = item
+            try:
+                await safe_edit_text(
+                    status,
+                    f"🧠 FINGERPRINT QUEUE\\n\\n"
+                    f"📚 {anime} S{season} E{episode}\\n"
+                    f"📊 Done: {fingerprint_batch_state['done']}/{fingerprint_batch_state['total']}\\n"
+                    f"{'🔁 Retry round' if retry_round else '▶️ Processing'}"
+                )
+                fingerprint, artifacts = await _build_fingerprint_episode(
+                    application.bot, owner_id, anime, season, episode, status
+                )
+                completed.append(item)
+                fingerprint_batch_state["done"] += 1
+                return True
+            except LookupError as exc:
+                failed_final.append((anime, season, episode, str(exc)))
+                return False
+            except Exception as exc:
+                logger.exception("Batch fingerprint failed %s S%s E%s", anime, season, episode)
+                return False
+            finally:
+                cleanup_user_temp(owner_id)
+
+        for item in list(queue):
+            if fingerprint_batch_stop is not None and fingerprint_batch_stop.is_set():
+                retry_later.extend([x for x in queue if x not in completed and x not in retry_later])
+                break
+            ok = False
+            for attempt in range(1, 3):
+                ok = await process_one(item)
+                if ok:
+                    break
+                if attempt == 1:
+                    await safe_edit_text(status, f"🔁 Retry 2/2: {item[0]} S{item[1]} E{item[2]}")
+            if not ok and item not in [x[:3] for x in failed_final]:
+                retry_later.append(item)
+            if item in fingerprint_batch_state["pending"]:
+                fingerprint_batch_state["pending"].remove(item)
+
+        # Network/temporary failures get one extra pass only after the main queue.
+        for item in list(retry_later):
+            if fingerprint_batch_stop is not None and fingerprint_batch_stop.is_set():
+                break
+            ok = await process_one(item, retry_round=True)
+            if not ok and item not in [x[:3] for x in failed_final]:
+                failed_final.append((*item, "2 retry rounds ke baad bhi fail"))
+
+        if fingerprint_batch_stop is not None and fingerprint_batch_stop.is_set():
+            fingerprint_batch_state["status"] = "stopped"
+        else:
+            fingerprint_batch_state["status"] = "complete"
+        fingerprint_batch_state["failed"] = failed_final
+        fingerprint_batch_state["pending"] = retry_later
+
+        lines = [
+            "🧾 FINGERPRINT QUEUE REPORT",
+            "",
+            f"✅ Completed: {len(completed)}",
+            f"⏭️ Already saved: {len(skipped)}",
+            f"❌ Failed: {len(failed_final)}",
+            f"⏸️ Pending: {len(fingerprint_batch_state['pending'])}",
+        ]
+        if completed:
+            lines.append("\\n✅ Done: " + ", ".join(f"{a} S{s} E{e}" for a,s,e in completed[:40]))
+        if fingerprint_batch_state["pending"]:
+            lines.append("\\n⏸️ Pending: " + ", ".join(f"{a} S{s} E{e}" for a,s,e in fingerprint_batch_state["pending"][:40]))
+        if failed_final:
+            lines.append("\\n❌ Failed: " + ", ".join(f"{x[0]} S{x[1]} E{x[2]}" for x in failed_final[:40]))
+        await application.bot.send_message(chat_id, "\\n".join(lines))
+    except Exception as exc:
+        logger.exception("Fingerprint batch crashed")
+        fingerprint_batch_state["status"] = "error"
+        await application.bot.send_message(chat_id, f"❌ FINGERPRINT QUEUE STOPPED\\n\\n{exc}")
+    finally:
+        fingerprint_batch_state["current"] = None
+
+
+async def fingerprint_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global fingerprint_batch_task, fingerprint_batch_stop
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("❌ Owner only.")
+        return
+    if fingerprint_batch_task is not None and not fingerprint_batch_task.done():
+        await update.message.reply_text("⏳ Fingerprint queue already running. /fingerprint_all_status se status dekho.")
+        return
+    try:
+        specs, force = _parse_fingerprint_batch_specs(" ".join(context.args).strip())
+    except Exception as exc:
+        await update.message.reply_text(f"❌ {exc}")
+        return
+    fingerprint_batch_stop = asyncio.Event()
+    fingerprint_batch_task = asyncio.create_task(
+        _run_fingerprint_batch(update.effective_user.id, update.effective_chat.id, specs, force)
+    )
+    await update.message.reply_text(
+        "✅ Fingerprint queue background me start kar di.\\n"
+        "Bot normal commands bhi handle karega.\\n"
+        f"Mode: {'FORCE rebuild' if force else 'existing skip'}"
+    )
+
+
+async def fingerprint_all_stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global fingerprint_batch_stop
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("❌ Owner only.")
+        return
+    if fingerprint_batch_task is None or fingerprint_batch_task.done():
+        await update.message.reply_text("ℹ️ Koi fingerprint queue running nahi hai.")
+        return
+    if fingerprint_batch_stop is not None:
+        fingerprint_batch_stop.set()
+    await update.message.reply_text("🛑 Stop requested. Current episode safe point par finish hoga, phir queue ruk jayegi.")
+
+
+async def fingerprint_all_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("❌ Owner only.")
+        return
+    state = fingerprint_batch_state
+    current = state.get("current")
+    current_text = f"{current[0]} S{current[1]} E{current[2]}" if current else "None"
+    await update.message.reply_text(
+        "🧠 FINGERPRINT QUEUE STATUS\\n\\n"
+        f"Status: {state.get('status')}\\n"
+        f"Current: {current_text}\\n"
+        f"Completed: {state.get('done', 0)}/{state.get('total', 0)}\\n"
+        f"Pending: {len(state.get('pending', []))}\\n"
+        f"Failed: {len(state.get('failed', []))}"
+    )
 
 
 async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1156,6 +1391,9 @@ def main():
     application.add_handler(CommandHandler("fingerprint_bind", fingerprint_bind_command))
     application.add_handler(CommandHandler("fingerprint_clear", fingerprint_clear_command))
     application.add_handler(CommandHandler("fingerprint", fingerprint_command))
+    application.add_handler(CommandHandler("fingerprint_all", fingerprint_all_command))
+    application.add_handler(CommandHandler("fingerprint_all_stop", fingerprint_all_stop_command))
+    application.add_handler(CommandHandler("fingerprint_all_status", fingerprint_all_status_command))
     application.add_handler(CommandHandler("clip", source_clip_command))
     application.add_handler(CommandHandler("clips", source_clip_command))
     application.add_handler(CommandHandler("episode", source_clip_command))
