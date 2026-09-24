@@ -8,7 +8,10 @@ from pathlib import Path
 
 import httpx
 
-from config import GEMINI_API_KEY, TEMP_DIR, FFMPEG_BIN
+from config import GEMINI_API_KEY, TEMP_DIR, FFMPEG_BIN, FINGERPRINT_CHAT
+from fingerprint_storage import get_fingerprint_topic_id
+from fingerprint_matcher import load_saved_fingerprints, target_fingerprint, match_fingerprint
+from visual_matcher import find_visual_match
 from database import get_all_sources_for_episode, get_animes, get_seasons, get_episodes
 from library_nav import canonical_anime
 from telegram_remote import get_telegram_video_info, open_telegram_range_server
@@ -144,6 +147,47 @@ async def _gemini_upload_telegram(client, source_url: str, display_name: str):
                 os.remove(proxy)
             except OSError:
                 pass
+
+
+async def _gemini_upload_telegram_window(client, source_url: str, start: float, end: float, display_name: str):
+    """Upload only a small candidate window to Gemini for final verification."""
+    import os
+    import tempfile
+
+    server = await open_telegram_range_server(client, source_url)
+    proxy = None
+    try:
+        fd, proxy = tempfile.mkstemp(prefix="gemini_window_", suffix=".mp4")
+        os.close(fd)
+        duration = max(1.0, float(end) - float(start))
+        cmd = [
+            FFMPEG_BIN, "-hide_banner", "-loglevel", "warning", "-y",
+            "-seekable", "1", "-multiple_requests", "1",
+            "-initial_request_size", str(2 * 1024 * 1024),
+            "-request_size", str(2 * 1024 * 1024),
+            "-short_seek_size", str(2 * 1024 * 1024),
+            "-ss", f"{max(0.0, float(start) - 2.0):.3f}",
+            "-i", server.url,
+            "-t", f"{min(duration + 4.0, 55.0):.3f}",
+            "-vf", "fps=2,scale=-2:240",
+            "-an", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "31",
+            "-movflags", "+faststart", proxy,
+        ]
+        await run_command(*cmd)
+        if not Path(proxy).exists() or Path(proxy).stat().st_size <= 0:
+            raise RuntimeError("Gemini candidate window empty bana.")
+        file_data = await _gemini_upload_path(Path(proxy))
+        if not file_data.get("name"):
+            raise RuntimeError("Gemini candidate window upload failed.")
+        return file_data, duration
+    finally:
+        await server.close()
+        if proxy:
+            try:
+                os.remove(proxy)
+            except OSError:
+                pass
+
 
 async def _wait_active(name: str):
     deadline = asyncio.get_running_loop().time() + 180
@@ -507,85 +551,216 @@ The important requirement is to describe what is visibly present, not to explain
     if not groups:
         raise RuntimeError("Gemini ke identified anime/episodes Telegram library me nahi mile. Anime title/episode ko library aliases ke saath resolve nahi kiya ja saka.")
 
-    episode_files = {}
-    for n, ((anime, season, episode), (low, high, _)) in enumerate(groups.items(), 1):
-        await progress(
-            f"🎯 FIND — {25 + int(30*n/max(1,len(groups)))}%\n\n"
-            f"📺 {anime} S{season} E{episode}\n"
-            "🎞️ 240p/2fps compact visual proxy → Gemini..."
-        )
-        file_data, duration, size = await _gemini_upload_telegram(
-            telegram_client,
-            low,
-            f"{safe_filename(anime)}_S{season:02d}E{episode:03d}_low.mp4",
-        )
-        await _wait_active(file_data["name"])
-        episode_files[(anime, season, episode)] = {
-            "gemini_name": file_data["name"],
-            "low": low,
-            "high": high,
-            "duration": duration,
-            "size": size,
-        }
+    # Fingerprint-first retrieval:
+    #   Short -> saved episode fingerprints -> timestamp candidates
+    #        -> bounded visual matcher -> tiny Gemini verification window.
+    # This completely removes the old "upload every full episode to Gemini" path.
+    fingerprint_topic = get_fingerprint_topic_id()
+    fingerprint_cache = {}
+    visual_candidates = []
 
-    await progress("🎯 FIND — 60%\n\n🧠 Gemini ab Short ko actual Telegram episodes se compare kar raha hai...")
+    unique_anime_seasons = sorted({
+        (key[0], key[1])
+        for key in groups
+    }, key=lambda x: (str(x[0]).casefold(), int(x[1]))
+    )
+
+    for anime_name, season_no in unique_anime_seasons:
+        if fingerprint_topic is None:
+            break
+        try:
+            fingerprint_cache[(anime_name, season_no)] = await load_saved_fingerprints(
+                telegram_client,
+                FINGERPRINT_CHAT,
+                fingerprint_topic,
+                anime=anime_name,
+                season=season_no,
+                max_items=80,
+            )
+        except Exception as exc:
+            logger.warning("Fingerprint load failed for %s S%s: %s", anime_name, season_no, exc)
+            fingerprint_cache[(anime_name, season_no)] = {}
+
+    await progress(
+        "🎯 FIND — 40%\\n\\n"
+        "🧠 Saved fingerprints se timestamp candidates nikale ja rahe hain...\\n"
+        "⚡ Full episode Gemini upload skip."
+    )
+
+    for idx, region in enumerate(regions, 1):
+        anime = _library_anime_match(region.get("anime"))
+        try:
+            season = int(region.get("season")) if region.get("season") is not None else None
+        except (TypeError, ValueError):
+            season = None
+        try:
+            episode = int(region.get("episode")) if region.get("episode") is not None else None
+        except (TypeError, ValueError):
+            episode = None
+        if not anime:
+            continue
+
+        possible_keys = [
+            key for key in groups
+            if key[0].casefold() == str(anime).casefold()
+            and (season is None or key[1] == season)
+            and (episode is None or key[2] == episode or abs(key[2] - episode) <= 2)
+        ]
+        if not possible_keys:
+            possible_keys = [
+                key for key in groups
+                if key[0].casefold() == str(anime).casefold()
+                and (season is None or key[1] == season)
+            ]
+
+        target = None
+        fingerprint_hits = []
+        for key in possible_keys:
+            fp = fingerprint_cache.get((key[0], key[1]), {}).get(key)
+            if not fp:
+                continue
+            if target is None:
+                try:
+                    target = await target_fingerprint(
+                        Path(input_video),
+                        float(region.get("start_time", 0) or 0),
+                        float(region.get("end_time", 0) or 0),
+                    )
+                except Exception as exc:
+                    logger.warning("Target fingerprint failed for scene %s: %s", idx, exc)
+                    break
+            for hit in match_fingerprint(target, fp, top_n=2):
+                fingerprint_hits.append({
+                    "key": key,
+                    "fp": fp,
+                    "center": float(hit["center"]),
+                    "fp_score": float(hit["score"]),
+                    "source_url": groups[key][0],
+                    "high": groups[key][1],
+                    "duration": float(fp.get("duration", 0) or 0),
+                })
+
+        fingerprint_hits.sort(key=lambda x: x["fp_score"])
+        fingerprint_hits = fingerprint_hits[:3]
+
+        if not fingerprint_hits:
+            logger.info("Scene %s: no saved fingerprint candidate; skipping rather than scanning full episodes.", idx)
+            continue
+
+        for hit in fingerprint_hits[:2]:
+            key = hit["key"]
+            candidate_region = dict(region)
+            candidate_region["source_start_hint"] = hit["center"]
+            try:
+                visual = await find_visual_match(
+                    telegram_client,
+                    {"source_url": hit["source_url"]},
+                    candidate_region,
+                    Path(input_video),
+                    job_dir / f"visual_{idx}_{key[2]}",
+                    hit["duration"],
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Scene %s visual refine failed for %s S%s E%s: %s",
+                    idx, key[0], key[1], key[2], exc
+                )
+                continue
+            if not visual:
+                continue
+            visual_candidates.append({
+                "index": idx,
+                "region": region,
+                "key": key,
+                "source_url": hit["source_url"],
+                "high": hit["high"],
+                "duration": hit["duration"],
+                "fingerprint_score": hit["fp_score"],
+                "visual": visual,
+            })
+
+        await progress(
+            f"🎯 FIND — {40 + int(30 * idx / max(1, len(regions)))}%\\n\\n"
+            f"🔎 Scene {idx}/{len(regions)}\\n"
+            "⚡ Fingerprint → visual refinement complete."
+        )
+
+    await progress(
+        "🎯 FIND — 72%\\n\\n"
+        "🧠 Sirf tiny candidate windows Gemini se final verify ho rahe hain..."
+    )
 
     results = []
-    for idx, region in enumerate(regions, 1):
-        anime = canonical_anime(str(region.get("anime") or "").strip()) or str(region.get("anime") or "").strip()
+    best_by_scene = {}
+    for candidate in sorted(
+        visual_candidates,
+        key=lambda x: (x["index"], x["fingerprint_score"], x["visual"].get("score", 99.0)),
+    ):
+        idx = candidate["index"]
+        if idx in best_by_scene:
+            continue
+
+        region = candidate["region"]
+        key = candidate["key"]
+        visual = candidate["visual"]
+        start = float(visual["start"])
+        end = float(visual["end"])
+        window_file = None
         try:
-            key = (anime, int(region.get("season")), int(region.get("episode")))
-        except (TypeError, ValueError):
-            continue
-        ep = episode_files.get(key)
-        if not ep:
-            continue
+            window_file, _ = await _gemini_upload_telegram_window(
+                telegram_client,
+                candidate["source_url"],
+                start,
+                end,
+                f"{safe_filename(key[0])}_S{key[1]:02d}E{key[2]:03d}_candidate.mp4",
+            )
+            await _wait_active(window_file["name"])
 
-        prompt = f"""VIDEO 1 is an edited anime shot from a YouTube Short.
-VIDEO 2 is the LOW-QUALITY ORIGINAL EPISODE from the user's Telegram library.
-Find the exact original interval in VIDEO 2 that visually corresponds to VIDEO 1.
+            prompt = f"""VIDEO 1 is one contiguous edited anime shot from a YouTube Short.
+VIDEO 2 is a SMALL candidate window extracted from the user's original Telegram episode.
+Verify whether VIDEO 2 contains the exact same visual action/continuity as VIDEO 1.
 
-Edited shot timing: {float(region.get('start_time', 0)):.3f} to {float(region.get('end_time', 0)):.3f}.
-Known anime/episode: {anime} S{key[1]} E{key[2]}.
-Visual description from the first pass: {region.get('description','')}
+Known candidate: {key[0]} S{key[1]} E{key[2]}.
+Short timing: {float(region.get("start_time", 0)):.3f}-{float(region.get("end_time", 0)):.3f}.
+Fingerprint candidate center: {candidate["fingerprint_score"]:.4f}.
+Visual matcher score: {float(visual.get("score", 99.0)):.4f}.
+Description: {region.get("description", "")}
 
 Return JSON only:
 {{"match":true,"start":0.0,"end":0.0,"confidence":0.0,"speed":1.0}}
-start/end are ORIGINAL EPISODE seconds, not Short seconds.
-Use exact visible action/continuity. Account for intro offsets, release timing,
-speed changes, crops, subtitles and transitions. Do not match merely because
-characters are similar. Confidence below 0.80 means match=false."""
-        try:
-            match = await _generate(prompt, [edit_file["name"], ep["gemini_name"]])
+start/end MUST be ORIGINAL EPISODE seconds.
+The candidate window is already near the match; refine within it.
+Account for intro/outro offsets, speed changes, crops, subtitles and transitions.
+Do not accept a merely similar character or background. Confidence below 0.80 means match=false."""
+            match = await _generate(prompt, [edit_file["name"], window_file["name"]])
+            if not isinstance(match, dict) or not match.get("match"):
+                continue
+            exact_start = float(match.get("start", start) or start)
+            exact_end = float(match.get("end", end) or end)
+            if exact_end <= exact_start:
+                continue
+            best_by_scene[idx] = True
+            results.append({
+                "index": idx,
+                "anime": key[0],
+                "season": key[1],
+                "episode": key[2],
+                "start": exact_start,
+                "end": exact_end,
+                "edit_start": float(region.get("start_time", 0) or 0),
+                "edit_end": float(region.get("end_time", 0) or 0),
+                "speed": float(match.get("speed", 1.0) or 1.0),
+                "confidence": float(match.get("confidence", 0) or 0),
+                "high": candidate["high"],
+            })
         except Exception as exc:
-            logger.warning("Scene %s exact-match step skipped; continuing remaining scenes: %s", idx, exc)
-            await progress("🎯 FIND — scene %s skip\n\n⚠️ Is scene ka exact timestamp verify nahi ho saka.\n➡️ Baaki scenes continue ho rahe hain..." % idx)
-            continue
-        if not isinstance(match, dict) or not match.get("match"):
-            logger.info("Scene %s had no reliable Gemini match; continuing.", idx)
-            continue
-        try:
-            start = float(match.get("start", 0) or 0)
-            end = float(match.get("end", 0) or 0)
-        except (TypeError, ValueError):
-            logger.warning("Scene %s returned invalid timestamps; continuing.", idx)
-            continue
-        if end <= start:
-            logger.warning("Scene %s returned empty interval; continuing.", idx)
-            continue
-        results.append({
-            "index": idx,
-            "anime": anime,
-            "season": key[1],
-            "episode": key[2],
-            "start": start,
-            "end": end,
-            "edit_start": float(region.get("start_time", 0) or 0),
-            "edit_end": float(region.get("end_time", 0) or 0),
-            "speed": float(match.get("speed", 1.0) or 1.0),
-            "confidence": float(match.get("confidence", 0) or 0),
-            "high": ep["high"],
-        })
+            logger.warning("Scene %s final candidate verification failed: %s", idx, exc)
+        finally:
+            if window_file:
+                try:
+                    await _delete_gemini_file(window_file["name"])
+                except Exception:
+                    pass
 
     if not results:
         raise RuntimeError("Gemini ne Telegram episode me koi reliable exact interval confirm nahi kiya.")
