@@ -96,7 +96,7 @@ async def _gemini_upload_telegram(client, source_url: str, display_name: str):
             "-request_size", str(2 * 1024 * 1024),
             "-short_seek_size", str(2 * 1024 * 1024),
             "-i", server.url,
-            "-vf", "fps=2,scale=-2:240",
+            "-vf", "fps=2.5,scale=-2:360",
             "-an",
             "-c:v", "libx264",
             "-preset", "ultrafast",
@@ -230,7 +230,7 @@ async def _resolve_file_uri(client, name):
         raise RuntimeError(f"Gemini file URI missing for {name}")
     return uri
 
-async def _generate(prompt, files):
+async def _generate(prompt, files, media_resolution="MEDIA_RESOLUTION_LOW"):
     last = None
     timeout = httpx.Timeout(60, read=600, write=120)
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -251,7 +251,7 @@ async def _generate(prompt, files):
                                 "file_uri": uri,
                             },
                             "media_processing": "STATIC",
-                            "media_resolution": {"level": "MEDIA_RESOLUTION_LOW"},
+                            "media_resolution": {"level": media_resolution},
                         }
                         for uri in uris
                     ],
@@ -791,11 +791,18 @@ The important requirement is to describe what is visibly present, not to explain
         visual_median = float(visual.get("median_distance", 99.0))
         visual_progression = float(visual.get("progression", 0.0))
         visual_coverage = float(visual.get("coverage", 0.0))
+        logger.info(
+            "Scene %s candidate %s S%s E%s: fp=%.4f visual=%.4f median=%.4f progression=%.3f coverage=%.3f center=%.3f",
+            idx, key[0], key[1], key[2], candidate["fingerprint_score"],
+            visual_score, visual_median, visual_progression, visual_coverage, center,
+        )
+        # Strong visual evidence may survive a Gemini verification miss, but
+        # keep this stricter than a generic similarity hit.
         strong_visual = (
-            visual_score <= 0.42
-            and visual_median <= 0.48
-            and visual_progression >= 0.65
-            and visual_coverage >= 0.55
+            visual_score <= 0.50
+            and visual_median <= 0.56
+            and visual_progression >= 0.58
+            and visual_coverage >= 0.50
         )
 
         window_file = None
@@ -825,7 +832,11 @@ start/end MUST be ORIGINAL EPISODE seconds.
 The candidate window is already near the match; refine within it.
 Account for intro/outro offsets, speed changes, crops, subtitles and transitions.
 Do not accept a merely similar character or background. Confidence below 0.80 means match=false."""
-            match = await _generate(prompt, [edit_file["name"], window_file["name"]])
+            match = await _generate(
+                prompt,
+                [edit_file["name"], window_file["name"]],
+                media_resolution="MEDIA_RESOLUTION_HIGH",
+            )
             if isinstance(match, dict) and match.get("match"):
                 exact_start = float(match.get("start", start) or start)
                 exact_end = float(match.get("end", end) or end)
