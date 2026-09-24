@@ -12,39 +12,53 @@ async def download_video_from_url(url, user_id):
 
     output_template = str(output_dir / "source.%(ext)s")
 
-    options = {
-        "outtmpl": output_template,
-        # Gemini does not need 1080p/4K to identify anime scenes. Capping the
-        # working copy at 720p saves download time, storage and Gemini upload
-        # time while preserving enough visual detail for matching.
-        "format": (
-            "bv*[ext=mp4][height<=360]+ba[ext=m4a]/"
-            "b[ext=mp4][height<=720]/"
-            "b[height<=720]/"
-            "b"
-        ),
-        "merge_output_format": "mp4",
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "retries": 3,
-        "fragment_retries": 3,
-        "socket_timeout": 30,
-    }
+    # Prefer one 360p stream to avoid a separate video+audio download.
+    # Fall back to the previous split-stream selector if needed.
+    format_candidates = (
+        "b[ext=mp4][height<=360]/b[height<=360]/b[ext=mp4][height<=720]/b[height<=720]/b",
+        "bv*[ext=mp4][height<=360]+ba[ext=m4a]/b[ext=mp4][height<=360]/b[height<=360]/b",
+    )
 
-    def download():
-        with yt_dlp.YoutubeDL(options) as ydl:
-            ydl.download([url])
+    last_error = None
 
-    await asyncio.to_thread(download)
+    for format_selector in format_candidates:
+        for old in output_dir.glob("*"):
+            try:
+                old.unlink()
+            except OSError:
+                pass
 
-    files = list(output_dir.glob("*"))
-    video_files = [
-        x for x in files
-        if x.suffix.lower() in (".mp4", ".mkv", ".webm", ".mov")
-    ]
+        options = {
+            "outtmpl": output_template,
+            "format": format_selector,
+            "merge_output_format": "mp4",
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+            "retries": 4,
+            "fragment_retries": 4,
+            "socket_timeout": 45,
+            "continuedl": False,
+        }
 
-    if not video_files:
-        raise RuntimeError("URL se video download nahi hua.")
+        def download():
+            with yt_dlp.YoutubeDL(options) as ydl:
+                ydl.download([url])
 
-    return video_files[0]
+        try:
+            await asyncio.to_thread(download)
+        except Exception as exc:
+            last_error = exc
+            continue
+
+        files = [
+            x for x in output_dir.glob("*")
+            if x.suffix.lower() in (".mp4", ".mkv", ".webm", ".mov")
+            and x.stat().st_size > 0
+        ]
+        if files:
+            return files[0]
+
+    if last_error:
+        raise RuntimeError(f"YouTube download failed: {last_error}") from last_error
+    raise RuntimeError("URL se video download nahi hua.")
