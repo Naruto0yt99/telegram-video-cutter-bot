@@ -756,11 +756,10 @@ Do not accept a merely similar character or background. Confidence below 0.80 me
         except Exception as exc:
             logger.warning("Scene %s final candidate verification failed: %s", idx, exc)
         finally:
-            if window_file:
-                try:
-                    await _delete_gemini_file(window_file["name"])
-                except Exception:
-                    pass
+            # Gemini candidate files are temporary; no local file is retained.
+            # Avoid an extra API round-trip here because the File API lifecycle
+            # already handles temporary uploads.
+            pass
 
     if not results:
         raise RuntimeError("Gemini ne Telegram episode me koi reliable exact interval confirm nahi kiya.")
