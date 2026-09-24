@@ -366,30 +366,90 @@ def _source_pair(anime, season, episode):
 
 
 def _library_anime_match(value):
+    """Resolve Gemini's title against the actual DB without brittle exact matching.
+
+    Gemini may return franchise subtitles, punctuation variants, romanization,
+    or extra words such as "TV Series". The library stores the canonical DB
+    title, so harmless naming differences must never kill FIND.
+    """
     raw = str(value or "").strip()
     if not raw:
         return None
+
     canonical = canonical_anime(raw)
     try:
-        available = [canonical_anime(x) or str(x).strip() for x in get_animes()]
+        db_names = [str(x).strip() for x in get_animes() if str(x).strip()]
     except Exception:
-        available = []
-    available = list(dict.fromkeys(x for x in available if x))
-    if canonical and any(str(x).casefold() == str(canonical).casefold() for x in available):
-        return next(x for x in available if str(x).casefold() == str(canonical).casefold())
-    if not available:
+        db_names = []
+
+    if not db_names:
         return canonical
-    norm = lambda x: re.sub(r"[^a-z0-9]+", "", str(x).casefold())
-    compact = norm(raw)
+
+    # Keep the real DB spelling as the value used by database.py.
+    candidates = []
+    for db_name in db_names:
+        canon = canonical_anime(db_name) or db_name
+        candidates.append((db_name, canon))
+    candidates = list(dict.fromkeys(candidates))
+
+    def norm(x):
+        return re.sub(r"[^a-z0-9]+", "", str(x).casefold())
+
+    def tokens(x):
+        return set(re.findall(r"[a-z0-9]+", str(x).casefold()))
+
+    raw_norm = norm(raw)
+    raw_tokens = tokens(raw)
+    canon_norm = norm(canonical) if canonical else ""
+
+    # 1) Canonical alias match.
+    if canon_norm:
+        for db_name, db_canon in candidates:
+            if norm(db_canon) == canon_norm:
+                return db_name
+
+    # 2) Exact normalized title.
+    for db_name, _ in candidates:
+        if norm(db_name) == raw_norm:
+            return db_name
+
+    # 3) Token/substring matching. This handles titles such as:
+    # "Re:ZERO -Starting Life in Another World-" -> "Re:Zero"
+    # "Death Note TV series" -> "Death Note"
     scored = []
-    for name in available:
-        n = norm(name)
-        score = difflib.SequenceMatcher(None, compact, n).ratio()
-        if compact and (compact in n or n in compact):
+    for db_name, db_canon in candidates:
+        db_norm = norm(db_name)
+        db_tokens = tokens(db_name)
+        score = difflib.SequenceMatcher(None, raw_norm, db_norm).ratio()
+
+        common = len(raw_tokens & db_tokens)
+        if common:
+            score += min(0.35, 0.12 * common)
+
+        if raw_norm and (raw_norm in db_norm or db_norm in raw_norm):
+            score += 0.35
+
+        if canon_norm and (canon_norm in db_norm or db_norm in canon_norm):
+            score += 0.25
+
+        # Strong protection against accidental matches on a single tiny word.
+        if raw_tokens and db_tokens and common >= min(2, len(raw_tokens)):
             score += 0.20
-        scored.append((score, name))
+
+        scored.append((score, db_name))
+
     scored.sort(reverse=True, key=lambda x: x[0])
-    return scored[0][1] if scored and scored[0][0] >= 0.55 else canonical
+    if scored:
+        best_score, best_name = scored[0]
+        # A short title needs less similarity when it is a clear substring;
+        # otherwise require meaningful overlap.
+        if best_score >= 0.62 or (raw_norm and norm(best_name) in raw_norm):
+            logger.info("Library anime resolver: %r -> %r (score %.3f)", raw, best_name, best_score)
+            return best_name
+
+    # Do not fabricate an anime name. Returning canonical is still useful when
+    # the DB is empty or another resolver adds the title later.
+    return canonical
 
 
 def _episode_candidates(anime, season, episode):
@@ -419,7 +479,10 @@ def _episode_candidates(anime, season, episode):
     if not episodes:
         return [(anime, selected_season, episode)]
     if episode is None:
-        return [(anime, selected_season, e) for e in sorted(episodes, key=lambda x: int(x) if x.isdigit() else 10**9)[:8]]
+        # No episode from Gemini is not an error. Give the fingerprint stage a
+        # broad but bounded candidate set instead of arbitrarily taking E1-E8.
+        ordered = sorted(episodes, key=lambda x: int(x) if x.isdigit() else 10**9)
+        return [(anime, selected_season, e) for e in ordered[:80]]
     wanted = str(episode)
     nums = sorted(episodes, key=lambda x: int(x) if x.isdigit() else 10**9)
     if wanted in nums:
@@ -549,7 +612,14 @@ The important requirement is to describe what is visibly present, not to explain
             if low and high:
                 groups.setdefault((cand_anime, cand_season_i, cand_episode_i), (low, high, sources))
     if not groups:
-        raise RuntimeError("Gemini ke identified anime/episodes Telegram library me nahi mile. Anime title/episode ko library aliases ke saath resolve nahi kiya ja saka.")
+        # Resolver/episode uncertainty is recoverable. Only report a hard
+        # failure after all normalized library candidates were exhausted.
+        seen = sorted({str(r.get("anime") or "").strip() for r in regions if r.get("anime")})
+        raise RuntimeError(
+            "FIND source candidates nahi mile. Gemini titles=%s; "
+            "library resolver ne available Telegram sources me koi usable episode nahi paya."
+            % (", ".join(seen[:8]) or "unknown")
+        )
 
     # Fingerprint-first retrieval:
     #   Short -> saved episode fingerprints -> timestamp candidates
