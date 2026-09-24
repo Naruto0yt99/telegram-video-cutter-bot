@@ -762,6 +762,8 @@ The important requirement is to describe what is visibly present, not to explain
 
     results = []
     best_by_scene = {}
+    fallback_by_scene = {}
+
     for candidate in sorted(
         visual_candidates,
         key=lambda x: (x["index"], x["fingerprint_score"], x["visual"].get("score", 99.0)),
@@ -775,6 +777,27 @@ The important requirement is to describe what is visibly present, not to explain
         visual = candidate["visual"]
         start = float(visual["start"])
         end = float(visual["end"])
+        center = float(visual.get("center", (start + end) / 2.0))
+        target_duration = max(
+            1.0,
+            float(region.get("end_time", 0) or 0) - float(region.get("start_time", 0) or 0),
+        )
+
+        # The visual matcher already combines frame similarity, temporal
+        # progression and coverage. Keep its strongest candidate as a safe
+        # fallback if Gemini's tiny-window verifier is unavailable/overly
+        # conservative. Gemini remains the preferred exact refiner.
+        visual_score = float(visual.get("score", 99.0))
+        visual_median = float(visual.get("median_distance", 99.0))
+        visual_progression = float(visual.get("progression", 0.0))
+        visual_coverage = float(visual.get("coverage", 0.0))
+        strong_visual = (
+            visual_score <= 0.42
+            and visual_median <= 0.48
+            and visual_progression >= 0.65
+            and visual_coverage >= 0.55
+        )
+
         window_file = None
         try:
             window_file, _ = await _gemini_upload_telegram_window(
@@ -793,7 +816,7 @@ Verify whether VIDEO 2 contains the exact same visual action/continuity as VIDEO
 Known candidate: {key[0]} S{key[1]} E{key[2]}.
 Short timing: {float(region.get("start_time", 0)):.3f}-{float(region.get("end_time", 0)):.3f}.
 Fingerprint candidate center: {candidate["fingerprint_score"]:.4f}.
-Visual matcher score: {float(visual.get("score", 99.0)):.4f}.
+Visual matcher score: {visual_score:.4f}.
 Description: {region.get("description", "")}
 
 Return JSON only:
@@ -803,36 +826,72 @@ The candidate window is already near the match; refine within it.
 Account for intro/outro offsets, speed changes, crops, subtitles and transitions.
 Do not accept a merely similar character or background. Confidence below 0.80 means match=false."""
             match = await _generate(prompt, [edit_file["name"], window_file["name"]])
-            if not isinstance(match, dict) or not match.get("match"):
-                continue
-            exact_start = float(match.get("start", start) or start)
-            exact_end = float(match.get("end", end) or end)
-            if exact_end <= exact_start:
-                continue
-            best_by_scene[idx] = True
-            results.append({
-                "index": idx,
-                "anime": key[0],
-                "season": key[1],
-                "episode": key[2],
-                "start": exact_start,
-                "end": exact_end,
-                "edit_start": float(region.get("start_time", 0) or 0),
-                "edit_end": float(region.get("end_time", 0) or 0),
-                "speed": float(match.get("speed", 1.0) or 1.0),
-                "confidence": float(match.get("confidence", 0) or 0),
-                "high": candidate["high"],
-            })
+            if isinstance(match, dict) and match.get("match"):
+                exact_start = float(match.get("start", start) or start)
+                exact_end = float(match.get("end", end) or end)
+                if exact_end > exact_start:
+                    best_by_scene[idx] = True
+                    results.append({
+                        "index": idx,
+                        "anime": key[0],
+                        "season": key[1],
+                        "episode": key[2],
+                        "start": exact_start,
+                        "end": exact_end,
+                        "edit_start": float(region.get("start_time", 0) or 0),
+                        "edit_end": float(region.get("end_time", 0) or 0),
+                        "speed": float(match.get("speed", 1.0) or 1.0),
+                        "confidence": float(match.get("confidence", 0) or 0),
+                        "high": candidate["high"],
+                    })
+                    continue
         except Exception as exc:
             logger.warning("Scene %s final candidate verification failed: %s", idx, exc)
         finally:
             # Gemini candidate files are temporary; no local file is retained.
-            # Avoid an extra API round-trip here because the File API lifecycle
-            # already handles temporary uploads.
             pass
 
+        if strong_visual and idx not in fallback_by_scene:
+            # Use the target scene duration around the visual-match center rather
+            # than the wider search window. This is only a fallback when Gemini
+            # cannot confirm the interval, and is explicitly marked as such.
+            fallback_start = max(0.0, center - target_duration / 2.0)
+            fallback_end = fallback_start + target_duration
+            if fallback_end <= float(candidate["duration"]):
+                fallback_confidence = max(
+                    0.80,
+                    min(
+                        0.91,
+                        0.84
+                        + min(0.04, max(0.0, 0.50 - visual_score) * 0.20)
+                        + min(0.03, max(0.0, visual_coverage - 0.55) * 0.10),
+                    ),
+                )
+                fallback_by_scene[idx] = {
+                    "index": idx,
+                    "anime": key[0],
+                    "season": key[1],
+                    "episode": key[2],
+                    "start": fallback_start,
+                    "end": fallback_end,
+                    "edit_start": float(region.get("start_time", 0) or 0),
+                    "edit_end": float(region.get("end_time", 0) or 0),
+                    "speed": 1.0,
+                    "confidence": fallback_confidence,
+                    "high": candidate["high"],
+                }
+
+    if not results and fallback_by_scene:
+        logger.warning(
+            "Gemini exact verification unavailable; using %d strong visual-match fallback(s).",
+            len(fallback_by_scene),
+        )
+        results = list(fallback_by_scene.values())
+
     if not results:
-        raise RuntimeError("Gemini ne Telegram episode me koi reliable exact interval confirm nahi kiya.")
+        raise RuntimeError(
+            "FIND me exact Gemini verification nahi mili aur visual match bhi strong enough nahi tha."
+        )
 
     results.sort(key=lambda x: x["edit_start"])
     clips = []
