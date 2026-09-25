@@ -15,6 +15,21 @@ log() {
   printf '%s | %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$MAIN_LOG"
 }
 
+# Extra guard: if another supervisor for this repo is already running,
+# do not start a second one even if the lock/PID files disappeared.
+SELF_PID="$"
+for EXISTING_SUPERVISOR in $(pgrep -f "start_bot.sh" 2>/dev/null || true); do
+  if [ "$EXISTING_SUPERVISOR" != "$SELF_PID" ] && [ -r "/proc/$EXISTING_SUPERVISOR/cmdline" ]; then
+    EXISTING_CMD="$(tr '\0' ' ' < "/proc/$EXISTING_SUPERVISOR/cmdline" 2>/dev/null || true)"
+    case "$EXISTING_CMD" in
+      *"$REPO_DIR/start_bot.sh"*)
+        log "Another supervisor already running (pid=$EXISTING_SUPERVISOR); exiting duplicate."
+        exit 0
+        ;;
+    esac
+  fi
+done
+
 if ! mkdir "$SUPERVISOR_LOCK" 2>/dev/null; then
   EXISTING_PID=""
   [ -f "$PID_FILE" ] && EXISTING_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
