@@ -59,55 +59,73 @@ trap cleanup EXIT INT TERM
 
 log "Supervisor starting (pid=$$)."
 
-if git fetch origin main >> "$MAIN_LOG" 2>&1; then
-  if git diff --quiet && git diff --cached --quiet; then
-    if git merge --ff-only origin/main >> "$MAIN_LOG" 2>&1; then
-      log "Repository updated from origin/main."
-    else
-      log "Repository update skipped: fast-forward merge failed."
-    fi
-  else
-    log "Repository update skipped: local changes are present."
+install_requirements() {
+  if ! command -v python >/dev/null 2>&1 || [ ! -f requirements.txt ]; then
+    return 0
   fi
-else
-  log "Repository update skipped: git fetch failed."
-fi
 
-if command -v python >/dev/null 2>&1 && [ -f requirements.txt ]; then
   NEW_HASH="$(sha256sum requirements.txt | awk '{print $1}')"
   OLD_HASH=""
-  [ -f "$REQ_HASH_FILE" ] && OLD_HASH="$(cat "$REQ_HASH_FILE")"
+  [ -f "$REQ_HASH_FILE" ] && OLD_HASH="$(cat "$REQ_HASH_FILE" 2>/dev/null || true)"
 
-  if [ "$NEW_HASH" != "$OLD_HASH" ]; then
-    log "Installing updated Python requirements."
-    PIP_OK=0
+  [ "$NEW_HASH" = "$OLD_HASH" ] && return 0
 
-    if command -v pkg >/dev/null 2>&1; then
-      log "Termux detected; installing native python-numpy/python-pillow packages."
-      if pkg install -y python-numpy python-pillow >> "$MAIN_LOG" 2>&1; then
-        log "Termux native NumPy/Pillow ready."
-        if python -m pip install -r <(grep -Ev '^(Pillow|numpy)([<>=!~]|$)' requirements.txt) >> "$MAIN_LOG" 2>&1; then
-          PIP_OK=1
-        fi
-      else
-        log "WARNING: Termux native NumPy/Pillow install failed; falling back to pip."
-      fi
-    fi
+  log "Installing updated Python requirements."
+  PIP_OK=0
 
-    if [ "$PIP_OK" -eq 0 ]; then
-      if python -m pip install -r requirements.txt >> "$MAIN_LOG" 2>&1; then
+  if command -v pkg >/dev/null 2>&1; then
+    if pkg install -y python-numpy python-pillow >> "$MAIN_LOG" 2>&1; then
+      if python -m pip install -r <(grep -Ev '^(Pillow|numpy)([<>=!~]|$)' requirements.txt) >> "$MAIN_LOG" 2>&1; then
         PIP_OK=1
       fi
-    fi
-
-    if [ "$PIP_OK" -eq 1 ]; then
-      printf '%s' "$NEW_HASH" > "$REQ_HASH_FILE"
-      log "Python requirements installed."
     else
-      log "WARNING: Python dependency installation failed; continuing with current environment."
+      log "WARNING: Termux native NumPy/Pillow install failed; falling back to pip."
     fi
   fi
-fi
+
+  if [ "$PIP_OK" -eq 0 ] && python -m pip install -r requirements.txt >> "$MAIN_LOG" 2>&1; then
+    PIP_OK=1
+  fi
+
+  if [ "$PIP_OK" -eq 1 ]; then
+    printf '%s' "$NEW_HASH" > "$REQ_HASH_FILE"
+    log "Python requirements installed."
+  else
+    log "WARNING: Python dependency installation failed; continuing with current environment."
+  fi
+}
+
+sync_repo() {
+  if ! git fetch origin main >> "$MAIN_LOG" 2>&1; then
+    log "GitHub sync skipped: git fetch failed."
+    return 1
+  fi
+
+  if ! git diff --quiet || ! git diff --cached --quiet; then
+    log "GitHub sync skipped: local changes are present."
+    return 1
+  fi
+
+  LOCAL_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
+  REMOTE_HEAD="$(git rev-parse origin/main 2>/dev/null || true)"
+
+  if [ -z "$REMOTE_HEAD" ] || [ "$LOCAL_HEAD" = "$REMOTE_HEAD" ]; then
+    return 0
+  fi
+
+  if git merge --ff-only origin/main >> "$MAIN_LOG" 2>&1; then
+    log "GitHub update applied: $LOCAL_HEAD -> $REMOTE_HEAD"
+    install_requirements
+    return 0
+  fi
+
+  log "GitHub update skipped: fast-forward merge failed."
+  return 1
+}
+
+sync_repo
+install_requirements
+
 
 OLD_BOT_PIDS="$(pgrep -f "^python .*$REPO_DIR/bot.py$" 2>/dev/null || true)"
 if [ -n "$OLD_BOT_PIDS" ]; then
@@ -132,9 +150,28 @@ if [ -n "$OLD_BOT_PIDS" ]; then
   fi
 fi
 
+LAST_SYNC=0
+SYNC_INTERVAL=60
+
 while true; do
+  NOW="$(date +%s)"
+
+  if [ $((NOW - LAST_SYNC)) -ge "$SYNC_INTERVAL" ]; then
+    LAST_SYNC="$NOW"
+    if sync_repo; then
+      CURRENT_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
+      if [ -n "$CURRENT_HEAD" ] && [ -n "${REMOTE_HEAD:-}" ] && [ "$CURRENT_HEAD" = "$REMOTE_HEAD" ]; then
+        RUNNING_BOT_PIDS="$(pgrep -f "^python .*$REPO_DIR/bot.py$" 2>/dev/null || true)"
+        if [ -n "$RUNNING_BOT_PIDS" ]; then
+          log "New GitHub code detected; restarting bot.py: $RUNNING_BOT_PIDS"
+          for pid in $RUNNING_BOT_PIDS; do kill "$pid" 2>/dev/null || true; done
+          sleep 2
+        fi
+      fi
+    fi
+  fi
+
   if pgrep -f "^python .*$REPO_DIR/bot.py$" >/dev/null 2>&1; then
-    log "bot.py already running; supervisor will monitor it."
     sleep 5
     continue
   fi
