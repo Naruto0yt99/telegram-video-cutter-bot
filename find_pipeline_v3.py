@@ -247,7 +247,7 @@ async def _generate(prompt, files, media_resolution="MEDIA_RESOLUTION_LOW"):
                                 "mime_type": "video/mp4",
                                 "file_uri": uri,
                             },
-                            "media_processing": "STATIC",
+                            "media_processing": "AGENTIC",
                             "media_resolution": {"level": media_resolution},
                         }
                         for uri in uris
@@ -397,6 +397,12 @@ IMPORTANT TIMESTAMP RULES:
 - Timestamps may contain milliseconds.
 - Do not round to whole seconds.
 - If the Short uses a speed change, compare the visual action itself rather than assuming equal duration.
+- Treat the Short scene description, characters, landmarks, pose/action sequence and chronological context
+  as evidence. A title/character match alone is NOT enough.
+- Never choose the first occurrence of a character, the opening, or a visually similar shot merely because
+  it looks plausible.
+- Prefer the occurrence whose complete action sequence matches the Short from beginning to end.
+- Source matches for different Short scenes must not all collapse onto the same unrelated opening shot.
 - Never guess from a source_start_hint when the episode video contradicts it.
 - If a scene is not actually present, omit it rather than inventing a timestamp.
 
@@ -409,40 +415,60 @@ Scenes to locate:
     return await _generate(prompt, [short_file_name, episode_file_name], media_resolution="MEDIA_RESOLUTION_MEDIUM")
 
 
-async def _gemini_refine_match(short_file_name, window_file_name, scene, window_start):
-    """Refine one coarse hit inside a small source window for sub-second boundaries."""
+async def _gemini_refine_match(short_file_name, window_file_name, scene, window_start, window_duration):
+    """Refine one coarse hit using timestamps relative to the uploaded window.
+
+    Gemini cannot reliably know the absolute episode clock from a freshly-created
+    clipped file. The previous implementation asked it to return full-episode
+    timestamps anyway, which allowed it to hallucinate values such as 19s or
+    1353s even when the actual window was around 3:45. We now force window-relative
+    timestamps and convert them to the episode clock in Python.
+    """
     short_start = float(scene.get("start_time", 0) or 0)
     short_end = float(scene.get("end_time", 0) or 0)
     duration = max(0.2, short_end - short_start)
-    prompt = f"""VIDEO 1 is the original edited Short scene and VIDEO 2 is a small window from the
-source episode. The source window begins at {window_start:.3f} seconds in the full episode.
+    prompt = f"""VIDEO 1 is the ORIGINAL EDITED SHORT. VIDEO 2 is ONLY a small source-episode
+window. VIDEO 2 starts at 0.000 seconds because it was clipped from the episode.
 
-Match VIDEO 1 to the exact continuous visual action in VIDEO 2. Ignore unrelated shots before/after
-it. Return the boundaries in FULL EPISODE time, not window-relative time.
+The original episode window corresponds to full-episode time {window_start:.3f}s through
+{window_start + window_duration:.3f}s.
 
-Target Short scene: {short_start:.3f}-{short_end:.3f}s (about {duration:.3f}s).
+Focus ONLY on the target Short scene {short_start:.3f}-{short_end:.3f}s from VIDEO 1.
+Find the SAME continuous visual event in VIDEO 2. Do not match a visually similar opening,
+ending, recap, title card, or unrelated shot.
+
+CRITICAL TIMESTAMP RULE:
+Return timestamps RELATIVE TO VIDEO 2, not the full episode clock.
+Example: if the matching action is 3.2 seconds after the beginning of VIDEO 2, return 3.200,
+not the absolute episode timestamp. Python will add the window offset afterward.
 
 Boundary requirements:
 - start at the first visible frame of the matching action
 - end at the last visible frame of the matching action
-- use decimal seconds with milliseconds when possible
-- do not round to whole seconds
-- do not use the opening/ending/recap unless it is genuinely the matching scene
-- preserve the same chronological visual action even if the edit changed speed
+- use decimal seconds/milliseconds
+- both values MUST be between 0.000 and {window_duration:.3f}
+- do not invent an absolute timestamp outside VIDEO 2
+- preserve the same chronological visual action even if the Short changed speed
+- if the exact matching action is not visible in VIDEO 2, return {{"match":false}}
 
 Return JSON only:
-{{"source_start":123.456,"source_end":130.789,"confidence":0.99,
-"reason":"why these frames are the exact match"}}"""
+{{"match":true,"window_start":3.200,"window_end":12.450,"confidence":0.99,
+"reason":"specific visual evidence proving this is the same action"}}
+"""
     data = await _generate(prompt, [short_file_name, window_file_name], media_resolution="MEDIA_RESOLUTION_MEDIUM")
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) or data.get("match") is False:
         return None
-    start = _to_seconds(data.get("source_start", data.get("start_time", data.get("start"))))
-    end = _to_seconds(data.get("source_end", data.get("end_time", data.get("end"))))
+    start = _to_seconds(data.get("window_start", data.get("source_start", data.get("start_time", data.get("start")))))
+    end = _to_seconds(data.get("window_end", data.get("source_end", data.get("end_time", data.get("end")))))
     if start is None or end is None or end <= start:
         return None
+    start = max(0.0, min(float(start), float(window_duration)))
+    end = max(0.0, min(float(end), float(window_duration)))
+    if end <= start:
+        return None
     return {
-        "source_start": float(start),
-        "source_end": float(end),
+        "source_start": float(window_start) + start,
+        "source_end": float(window_start) + end,
         "confidence": float(data.get("confidence", 0) or 0) if str(data.get("confidence", "")).replace(".", "", 1).isdigit() else 0.0,
         "reason": str(data.get("reason") or data.get("description") or "").strip(),
     }
@@ -841,7 +867,11 @@ The important requirement is to describe what is visibly present, not to explain
                 )
                 await _wait_active(window_file["name"])
                 refined = await _gemini_refine_match(
-                    edit_file["name"], window_file["name"], scene, window_start
+                    edit_file["name"],
+                    window_file["name"],
+                    scene,
+                    window_start,
+                    min(window_end - window_start, 55.0),
                 )
                 if refined:
                     match.update(refined)
