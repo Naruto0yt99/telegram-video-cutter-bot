@@ -57,7 +57,10 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-log "Supervisor starting (pid=$$)."
+log "Supervisor starting (pid=$)."
+
+SYNC_UPDATED=0
+SUPERVISOR_UPDATED=0
 
 install_requirements() {
   if ! command -v python >/dev/null 2>&1 || [ ! -f requirements.txt ]; then
@@ -96,12 +99,24 @@ install_requirements() {
 }
 
 sync_repo() {
+  SYNC_UPDATED=0
+  SUPERVISOR_UPDATED=0
+
   if ! git fetch origin main >> "$MAIN_LOG" 2>&1; then
     log "GitHub sync skipped: git fetch failed."
     return 1
   fi
 
-  # Ignore runtime-generated files; protect user library/database data.
+  # start_bot.sh is supervisor-managed code; GitHub is authoritative for it.
+  # Runtime data such as data/library.db is never touched here.
+  if ! git diff --quiet -- start_bot.sh 2>/dev/null || ! git diff --cached --quiet -- start_bot.sh 2>/dev/null; then
+    log "Replacing local supervisor script with GitHub version."
+    git restore --staged --worktree -- start_bot.sh >> "$MAIN_LOG" 2>&1 || {
+      log "GitHub sync skipped: could not reconcile local start_bot.sh."
+      return 1
+    }
+  fi
+
   DIRTY_FILES="$(git status --porcelain --untracked-files=normal | awk '{print substr($0,4)}' | grep -Ev '^(data/|__pycache__/|.*\.py[cod]$|logs/|\.bot_supervisor\.|\.requirements\.sha256$)' || true)"
   if [ -n "$DIRTY_FILES" ]; then
     log "GitHub sync skipped: source files have local changes: $DIRTY_FILES"
@@ -115,8 +130,12 @@ sync_repo() {
     return 0
   fi
 
+  OLD_SUPERVISOR_HASH="$(git hash-object start_bot.sh 2>/dev/null || true)"
   if git merge --ff-only origin/main >> "$MAIN_LOG" 2>&1; then
+    NEW_SUPERVISOR_HASH="$(git hash-object start_bot.sh 2>/dev/null || true)"
     log "GitHub update applied: $LOCAL_HEAD -> $REMOTE_HEAD"
+    SYNC_UPDATED=1
+    [ "$OLD_SUPERVISOR_HASH" != "$NEW_SUPERVISOR_HASH" ] && SUPERVISOR_UPDATED=1
     install_requirements
     return 0
   fi
@@ -161,16 +180,20 @@ while true; do
   if [ $((NOW - LAST_SYNC)) -ge "$SYNC_INTERVAL" ]; then
     LAST_SYNC="$NOW"
     if sync_repo; then
-      CURRENT_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
-      if [ -n "$CURRENT_HEAD" ] && [ -n "${REMOTE_HEAD:-}" ] && [ "$CURRENT_HEAD" = "$REMOTE_HEAD" ]; then
+      if [ "$SUPERVISOR_UPDATED" -eq 1 ]; then
+        log "New GitHub supervisor code detected; handing off to updated supervisor."
+        (sleep 1; nohup "$REPO_DIR/start_bot.sh" >/dev/null 2>&1 &) 
+        exit 0
+      fi
+      if [ "$SYNC_UPDATED" -eq 1 ]; then
         RUNNING_BOT_PIDS="$(pgrep -f "^python .*$REPO_DIR/bot.py$" 2>/dev/null || true)"
         if [ -n "$RUNNING_BOT_PIDS" ]; then
-          log "New GitHub code detected; restarting bot.py: $RUNNING_BOT_PIDS"
+          log "New GitHub bot code detected; restarting bot.py: $RUNNING_BOT_PIDS"
           for pid in $RUNNING_BOT_PIDS; do kill "$pid" 2>/dev/null || true; done
           sleep 2
         fi
       fi
-    fi
+    fii
   fi
 
   if pgrep -f "^python .*$REPO_DIR/bot.py$" >/dev/null 2>&1; then
