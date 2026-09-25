@@ -1,0 +1,19 @@
+name: Termux Sync
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: termux-sync
+  cancel-in-progress: true
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show deployment commit
+        run: |
+          echo "Termux sync requested for commit $GITHUB_SHA"
+          echo "The Termux supervisor will pull origin/main on its next startup/restart."
