@@ -193,7 +193,7 @@ while true; do
           sleep 2
         fi
       fi
-    fii
+    fi
   fi
 
   if pgrep -f "^python .*$REPO_DIR/bot.py$" >/dev/null 2>&1; then
