@@ -17,7 +17,7 @@ log() {
 
 # Extra guard: if another supervisor for this repo is already running,
 # do not start a second one even if the lock/PID files disappeared.
-SELF_PID="$"
+SELF_PID="$BASHPID"
 for EXISTING_SUPERVISOR in $(pgrep -f "start_bot.sh" 2>/dev/null || true); do
   if [ "$EXISTING_SUPERVISOR" != "$SELF_PID" ] && [ -r "/proc/$EXISTING_SUPERVISOR/cmdline" ]; then
     EXISTING_CMD="$(tr '\0' ' ' < "/proc/$EXISTING_SUPERVISOR/cmdline" 2>/dev/null || true)"
@@ -57,7 +57,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-log "Supervisor starting (pid=$)."
+log "Supervisor starting (pid=$BASHPID)."
 
 SYNC_UPDATED=0
 SUPERVISOR_UPDATED=0
