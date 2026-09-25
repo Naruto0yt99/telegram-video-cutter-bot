@@ -9,8 +9,6 @@ from pathlib import Path
 import httpx
 
 from config import GEMINI_API_KEY, TEMP_DIR, FFMPEG_BIN, FINGERPRINT_CHAT
-from fingerprint_storage import get_fingerprint_topic_id
-from fingerprint_matcher import load_saved_fingerprints, target_fingerprint, match_fingerprint
 from database import get_all_sources_for_episode, get_animes, get_seasons, get_episodes
 from library_nav import canonical_anime
 from telegram_remote import get_telegram_video_info, open_telegram_range_server
@@ -314,6 +312,140 @@ async def _generate(prompt, files, media_resolution="MEDIA_RESOLUTION_LOW"):
                     logger.warning("Gemini model failed: %s: %s", model, exc)
                     break
     raise last or RuntimeError("Gemini request failed.")
+
+
+def _to_seconds(value):
+    """Parse Gemini timestamps such as 12.345, 01:23.450 or 00:01:23."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    parts = text.split(":")
+    try:
+        if len(parts) == 2:
+            return float(parts[0]) * 60.0 + float(parts[1])
+        if len(parts) == 3:
+            return float(parts[0]) * 3600.0 + float(parts[1]) * 60.0 + float(parts[2])
+    except ValueError:
+        return None
+    return None
+
+
+def _normalize_exact_matches(data, expected_count=0):
+    """Normalize Gemini's source timestamp matches while preserving scene order."""
+    if not isinstance(data, dict):
+        return []
+    raw = data.get("matches") or data.get("regions") or data.get("scenes") or data.get("segments")
+    if isinstance(raw, dict):
+        raw = raw.get("matches") or raw.get("regions") or raw.get("scenes") or raw.get("segments")
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for pos, item in enumerate(raw):
+        if not isinstance(item, dict):
+            continue
+        start = _to_seconds(item.get("source_start", item.get("start_time", item.get("start"))))
+        end = _to_seconds(item.get("source_end", item.get("end_time", item.get("end"))))
+        if start is None or end is None or end <= start:
+            continue
+        scene_index = item.get("scene_index", item.get("index", pos + 1))
+        try:
+            scene_index = int(scene_index)
+        except (TypeError, ValueError):
+            scene_index = pos + 1
+        out.append({
+            "scene_index": scene_index,
+            "source_start": float(start),
+            "source_end": float(end),
+            "confidence": float(item.get("confidence", 0) or 0) if str(item.get("confidence", "")).replace(".", "", 1).isdigit() else 0.0,
+            "reason": str(item.get("reason") or item.get("description") or "").strip(),
+        })
+    out.sort(key=lambda x: x["scene_index"])
+    return out
+
+
+async def _gemini_exact_episode_match(episode_file_name, short_file_name, regions):
+    """Use the full episode + Short together for coarse-to-fine source timing."""
+    scene_lines = []
+    for i, r in enumerate(regions, 1):
+        desc = str(r.get("description") or "").strip()
+        chars = ", ".join(str(x) for x in (r.get("characters") or [])[:8])
+        landmarks = ", ".join(str(x) for x in (r.get("landmarks") or [])[:8])
+        scene_lines.append(
+            f"Scene {i}: Short {float(r.get('start_time', 0)):.3f}-{float(r.get('end_time', 0)):.3f}s; "
+            f"description={desc}; characters={chars}; landmarks={landmarks}"
+        )
+    prompt = """You are matching edited anime Short footage to the ORIGINAL EPISODE.
+VIDEO 1 is the Short. VIDEO 2 is the complete source episode.
+
+For every listed Short scene, find the SAME visual event in VIDEO 2. Do not use opening,
+ending, recap, preview, or unrelated visually similar shots unless the Short actually shows it.
+Use character identity, exact pose/action sequence, background, camera movement, cuts and
+chronological context. The scene must match the visual evidence, not merely the anime title.
+
+IMPORTANT TIMESTAMP RULES:
+- Return timestamps in VIDEO 2, not VIDEO 1.
+- Give the first frame/time where the matching continuous scene begins and the last frame/time
+  where it ends, including the full action visible in the Short.
+- Timestamps may contain milliseconds.
+- Do not round to whole seconds.
+- If the Short uses a speed change, compare the visual action itself rather than assuming equal duration.
+- Never guess from a source_start_hint when the episode video contradicts it.
+- If a scene is not actually present, omit it rather than inventing a timestamp.
+
+Return JSON only:
+{"matches":[{"scene_index":1,"source_start":123.456,"source_end":130.789,
+"confidence":0.98,"reason":"specific matching visual sequence"}]}
+
+Scenes to locate:
+""" + "\n".join(scene_lines)
+    return await _generate(prompt, [short_file_name, episode_file_name], media_resolution="MEDIA_RESOLUTION_MEDIUM")
+
+
+async def _gemini_refine_match(short_file_name, window_file_name, scene, window_start):
+    """Refine one coarse hit inside a small source window for sub-second boundaries."""
+    short_start = float(scene.get("start_time", 0) or 0)
+    short_end = float(scene.get("end_time", 0) or 0)
+    duration = max(0.2, short_end - short_start)
+    prompt = f"""VIDEO 1 is the original edited Short scene and VIDEO 2 is a small window from the
+source episode. The source window begins at {window_start:.3f} seconds in the full episode.
+
+Match VIDEO 1 to the exact continuous visual action in VIDEO 2. Ignore unrelated shots before/after
+it. Return the boundaries in FULL EPISODE time, not window-relative time.
+
+Target Short scene: {short_start:.3f}-{short_end:.3f}s (about {duration:.3f}s).
+
+Boundary requirements:
+- start at the first visible frame of the matching action
+- end at the last visible frame of the matching action
+- use decimal seconds with milliseconds when possible
+- do not round to whole seconds
+- do not use the opening/ending/recap unless it is genuinely the matching scene
+- preserve the same chronological visual action even if the edit changed speed
+
+Return JSON only:
+{{"source_start":123.456,"source_end":130.789,"confidence":0.99,
+"reason":"why these frames are the exact match"}}"""
+    data = await _generate(prompt, [short_file_name, window_file_name], media_resolution="MEDIA_RESOLUTION_MEDIUM")
+    if not isinstance(data, dict):
+        return None
+    start = _to_seconds(data.get("source_start", data.get("start_time", data.get("start"))))
+    end = _to_seconds(data.get("source_end", data.get("end_time", data.get("end"))))
+    if start is None or end is None or end <= start:
+        return None
+    return {
+        "source_start": float(start),
+        "source_end": float(end),
+        "confidence": float(data.get("confidence", 0) or 0) if str(data.get("confidence", "")).replace(".", "", 1).isdigit() else 0.0,
+        "reason": str(data.get("reason") or data.get("description") or "").strip(),
+    }
 
 
 def _normalize_regions(data):
@@ -620,149 +752,130 @@ The important requirement is to describe what is visibly present, not to explain
             % (", ".join(seen[:8]) or "unknown")
         )
 
-    # Fingerprint-only retrieval:
-    # Short -> saved episode fingerprints -> timestamp candidate.
-    # No visual matcher and no final Gemini verification.
-    fingerprint_topic = get_fingerprint_topic_id()
-    fingerprint_cache = {}
+    # Gemini episode matching: no fingerprint/index/visual matcher is used here.
+    # Upload each identified Telegram episode once as a temporary low-resolution proxy, then
+    # compare the Short against that complete episode. A second Gemini pass on a small source
+    # window refines each boundary before FFmpeg cuts the original high-quality Telegram source.
+    episode_files = {}
+    exact_matches = {}
 
-    unique_anime_seasons = sorted({
-        (key[0], key[1])
-        for key in groups
-    }, key=lambda x: (str(x[0]).casefold(), int(x[1])))
-
-    for anime_name, season_no in unique_anime_seasons:
-        if fingerprint_topic is None:
-            break
+    for group_key, (_low, high, _sources) in groups.items():
+        anime_name, season_no, episode_no = group_key
+        source_url = high
         try:
-            fingerprint_cache[(anime_name, season_no)] = await load_saved_fingerprints(
+            await progress(
+                f"🎯 FIND — 40%\\n\\n"
+                f"🧠 Gemini ko {anime_name} S{season_no} E{episode_no} ka episode video diya ja raha hai...\\n"
+                "⏳ Episode ko temporary analysis copy me prepare kiya ja raha hai."
+            )
+            file_data, episode_duration, proxy_size = await _gemini_upload_telegram(
                 telegram_client,
-                FINGERPRINT_CHAT,
-                fingerprint_topic,
-                anime=anime_name,
-                season=season_no,
-                max_items=80,
+                source_url,
+                f"{safe_filename(anime_name)}_S{season_no}_E{episode_no}.mp4",
+            )
+            await _wait_active(file_data["name"])
+            episode_files[group_key] = (file_data["name"], float(episode_duration), source_url)
+            logger.info(
+                "Gemini episode proxy ready %s S%s E%s duration=%.3fs size=%s",
+                anime_name, season_no, episode_no, episode_duration, proxy_size,
             )
         except Exception as exc:
-            logger.warning("Fingerprint load failed for %s S%s: %s", anime_name, season_no, exc)
-            fingerprint_cache[(anime_name, season_no)] = {}
+            logger.exception("Gemini episode upload failed for %s", group_key)
 
     await progress(
-        "🎯 FIND — 40%\n\n"
-        "🔎 Saved fingerprints se direct timestamp matching ho rahi hai...\n"
-        "⚡ Visual matcher aur final Gemini verification skip."
+        "🎯 FIND — 55%\\n\\n"
+        "🧠 Gemini complete-episode visual matching chal rahi hai...\\n"
+        "🎯 Fingerprint matching intentionally disabled."
     )
 
-    results = []
-    for idx, region in enumerate(regions, 1):
-        anime = _library_anime_match(region.get("anime"))
-        try:
-            season = int(region.get("season")) if region.get("season") is not None else None
-        except (TypeError, ValueError):
-            season = None
-        try:
-            episode = int(region.get("episode")) if region.get("episode") is not None else None
-        except (TypeError, ValueError):
-            episode = None
-        if not anime:
+    for group_key, (episode_file_name, episode_duration, source_url) in episode_files.items():
+        anime_name, season_no, episode_no = group_key
+        group_regions = []
+        for idx, region in enumerate(regions, 1):
+            resolved = _library_anime_match(region.get("anime"))
+            try:
+                r_season = int(region.get("season")) if region.get("season") is not None else None
+            except (TypeError, ValueError):
+                r_season = None
+            try:
+                r_episode = int(region.get("episode")) if region.get("episode") is not None else None
+            except (TypeError, ValueError):
+                r_episode = None
+            if (str(resolved).casefold() == str(anime_name).casefold()
+                    and (r_season is None or r_season == season_no)
+                    and (r_episode is None or r_episode == episode_no)):
+                copy = dict(region)
+                copy["scene_index"] = idx
+                group_regions.append(copy)
+
+        if not group_regions:
             continue
-
-        possible_keys = [
-            key for key in groups
-            if key[0].casefold() == str(anime).casefold()
-            and (season is None or key[1] == season)
-            and (episode is None or key[2] == episode)
-        ]
-        if not possible_keys:
-            possible_keys = [
-                key for key in groups
-                if key[0].casefold() == str(anime).casefold()
-                and (season is None or key[1] == season)
-            ]
-
-        target = None
-        fingerprint_hits = []
-        for key in possible_keys:
-            fp = fingerprint_cache.get((key[0], key[1]), {}).get(key)
-            if not fp:
-                continue
-            if target is None:
-                try:
-                    target = await target_fingerprint(
-                        Path(input_video),
-                        float(region.get("start_time", 0) or 0),
-                        float(region.get("end_time", 0) or 0),
-                    )
-                except Exception as exc:
-                    logger.warning("Target fingerprint failed for scene %s: %s", idx, exc)
-                    break
-            for hit in match_fingerprint(target, fp, top_n=3):
-                fingerprint_hits.append({
-                    "key": key,
-                    "fp": fp,
-                    "center": float(hit["center"]),
-                    "fp_score": float(hit["score"]),
-                    "high": groups[key][1],
-                    "duration": float(fp.get("duration", 0) or 0),
-                })
-
-        fingerprint_hits.sort(key=lambda x: x["fp_score"])
-        fingerprint_hits = fingerprint_hits[:3]
-
-        if not fingerprint_hits:
-            logger.info(
-                "Scene %s: no saved fingerprint candidate; skipping without visual/Gemini verification.",
-                idx,
+        try:
+            coarse = await _gemini_exact_episode_match(
+                episode_file_name, edit_file["name"], group_regions
             )
-            continue
+            matches = _normalize_exact_matches(coarse, len(group_regions))
+        except Exception as exc:
+            logger.exception("Gemini complete-episode match failed for %s", group_key)
+            matches = []
 
-        # Best fingerprint alignment is used directly. Derive the source
-        # interval from its center and the Short scene duration.
-        hit = fingerprint_hits[0]
-        target_duration = max(
-            0.20,
-            float(region.get("end_time", 0) or 0)
-            - float(region.get("start_time", 0) or 0),
-        )
-        center = hit["center"]
-        source_duration = hit["duration"]
-        start_time = max(0.0, center - target_duration / 2.0)
-        end_time = start_time + target_duration
-        if source_duration > 0:
-            end_time = min(end_time, source_duration)
-            start_time = max(0.0, end_time - target_duration)
+        for match in matches:
+            scene = next((r for r in group_regions if r["scene_index"] == match["scene_index"]), None)
+            if scene is None:
+                continue
+            # Refine in a narrow window around the coarse location. The window is temporary and
+            # is deleted immediately; the complete episode is never stored permanently on Termux.
+            coarse_start = max(0.0, min(float(match["source_start"]), episode_duration))
+            coarse_end = max(coarse_start + 0.2, min(float(match["source_end"]), episode_duration))
+            pad_before = 8.0
+            pad_after = 8.0
+            window_start = max(0.0, coarse_start - pad_before)
+            window_end = min(episode_duration, coarse_end + pad_after)
+            try:
+                window_file, _requested_duration = await _gemini_upload_telegram_window(
+                    telegram_client,
+                    source_url,
+                    window_start,
+                    window_end,
+                    f"refine_S{season_no}_E{episode_no}_{scene['scene_index']}.mp4",
+                )
+                await _wait_active(window_file["name"])
+                refined = await _gemini_refine_match(
+                    edit_file["name"], window_file["name"], scene, window_start
+                )
+                if refined:
+                    match.update(refined)
+                    # The refine prompt already requests full-episode timestamps.
+                    logger.info(
+                        "Gemini refined scene %s %s S%s E%s: %.3f-%.3f confidence=%.3f",
+                        scene["scene_index"], anime_name, season_no, episode_no,
+                        match["source_start"], match["source_end"], match.get("confidence", 0.0),
+                    )
+            except Exception as exc:
+                # Keep the coarse Gemini result if the narrow refinement fails.
+                logger.warning("Gemini narrow refinement failed for scene %s: %s", scene["scene_index"], exc)
 
-        fp_score = hit["fp_score"]
-        confidence = max(0.0, min(1.0, 1.0 - fp_score))
-
-        logger.info(
-            "Scene %s fingerprint-only match %s S%s E%s: fp=%.4f center=%.3f interval=%.3f-%.3f",
-            idx, hit["key"][0], hit["key"][1], hit["key"][2],
-            fp_score, center, start_time, end_time,
-        )
-
-        results.append({
-            "index": idx,
-            "anime": hit["key"][0],
-            "season": hit["key"][1],
-            "episode": hit["key"][2],
-            "start": start_time,
-            "end": end_time,
-            "edit_start": float(region.get("start_time", 0) or 0),
-            "edit_end": float(region.get("end_time", 0) or 0),
-            "speed": 1.0,
-            "confidence": confidence,
-            "fingerprint_score": fp_score,
-            "high": hit["high"],
-        })
-
-        await progress(
-            f"🎯 FIND — {40 + int(35 * idx / max(1, len(regions)))}%\n\n"
-            f"🔎 Scene {idx}/{len(regions)}\n"
-            "⚡ Fingerprint match complete."
-        )
+            start_time = max(0.0, min(float(match["source_start"]), episode_duration))
+            end_time = max(start_time + 0.05, min(float(match["source_end"]), episode_duration))
+            if end_time <= start_time:
+                continue
+            results.append({
+                "index": scene["scene_index"],
+                "anime": anime_name,
+                "season": season_no,
+                "episode": episode_no,
+                "start": start_time,
+                "end": end_time,
+                "edit_start": float(scene.get("start_time", 0) or 0),
+                "edit_end": float(scene.get("end_time", 0) or 0),
+                "speed": 1.0,
+                "confidence": max(0.0, min(1.0, float(match.get("confidence", 0) or 0))),
+                "high": source_url,
+                "match_reason": match.get("reason", ""),
+            })
 
     if not results:
+
         raise RuntimeError(
             "FIND me saved fingerprint match nahi mila. Visual matcher aur Gemini final verification intentionally skip kiye gaye hain."
         )
