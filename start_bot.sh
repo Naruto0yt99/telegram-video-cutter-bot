@@ -101,8 +101,10 @@ sync_repo() {
     return 1
   fi
 
-  if ! git diff --quiet || ! git diff --cached --quiet; then
-    log "GitHub sync skipped: local changes are present."
+  # Ignore runtime-generated files; protect user library/database data.
+  DIRTY_FILES="$(git status --porcelain --untracked-files=normal | awk '{print substr($0,4)}' | grep -Ev '^(data/|__pycache__/|.*\.py[cod]$|logs/|\.bot_supervisor\.|\.requirements\.sha256$)' || true)"
+  if [ -n "$DIRTY_FILES" ]; then
+    log "GitHub sync skipped: source files have local changes: $DIRTY_FILES"
     return 1
   fi
 
