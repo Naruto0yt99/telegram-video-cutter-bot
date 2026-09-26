@@ -1,5 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 set -u
+set +e
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$REPO_DIR" || exit 1
@@ -11,6 +12,10 @@ POLL_INTERVAL=8
 MAX_OUTPUT=30000
 
 mkdir -p "$QUEUE_DIR" "$RESULT_DIR" "$(dirname "$AGENT_LOG")"
+
+# The agent creates its own result commits; keep Git identity local to this repo.
+git config user.name "Termux Remote Agent" >/dev/null 2>&1 || true
+git config user.email "termux-agent@users.noreply.github.com" >/dev/null 2>&1 || true
 
 log() {
   printf '%s | %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$AGENT_LOG"
@@ -85,10 +90,8 @@ PY
 
   local tmp
   tmp="$(mktemp)"
-  set +e
   timeout "$timeout" bash -lc "$command" >"$tmp" 2>&1
   exit_code=$?
-  set -e
   ended="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
   output="$(redact < "$tmp")"
@@ -121,12 +124,12 @@ PY
   fi
 
   git commit -m "termux-agent: result $id" >> "$AGENT_LOG" 2>&1 || {
-    log "Commit failed for id=$id"
+    log "Commit failed for id=$id; see git output above."
     return 1
   }
 
   git push origin HEAD:main >> "$AGENT_LOG" 2>&1 || {
-    log "Push failed for id=$id; result remains locally."
+    log "Push failed for id=$id; result remains locally and will be retried."
     return 1
   }
 
