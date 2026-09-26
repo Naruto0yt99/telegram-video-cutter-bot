@@ -147,6 +147,15 @@ sync_repo() {
 sync_repo
 install_requirements
 
+# Start the remote Termux command agent once. It polls GitHub for authorized
+# command requests and pushes redacted results back to the repository.
+if [ -f "$REPO_DIR/termux_agent.sh" ]; then
+  chmod +x "$REPO_DIR/termux_agent.sh" 2>/dev/null || true
+  if ! pgrep -f "^bash .*$REPO_DIR/termux_agent.sh$" >/dev/null 2>&1; then
+    nohup "$REPO_DIR/termux_agent.sh" >/dev/null 2>&1 &
+    log "Remote Termux agent started."
+  fi
+fi
 
 OLD_BOT_PIDS="$(pgrep -f "^python .*$REPO_DIR/bot.py$" 2>/dev/null || true)"
 if [ -n "$OLD_BOT_PIDS" ]; then
