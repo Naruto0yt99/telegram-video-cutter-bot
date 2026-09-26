@@ -296,13 +296,34 @@ async def _generate(prompt, files, media_resolution="MEDIA_RESOLUTION_LOW"):
                                 text_parts.append(part["text"])
                     raw_text = "\n".join(text_parts).strip()
                     if not raw_text:
-                        logger.warning("Gemini returned empty text model=%s response=%s", model, str(data)[:4000])
-                        raise RuntimeError(f"Gemini returned empty text ({model})")
+                        candidates_meta = []
+                        for candidate in data.get("candidates", []):
+                            candidates_meta.append({
+                                "finishReason": candidate.get("finishReason"),
+                                "safetyRatings": candidate.get("safetyRatings"),
+                                "citationMetadata": candidate.get("citationMetadata"),
+                            })
+                        logger.warning(
+                            "Gemini returned empty text model=%s attempt=%s candidates=%s promptFeedback=%s",
+                            model, attempt + 1, candidates_meta, data.get("promptFeedback"),
+                        )
+                        if attempt < 1:
+                            await asyncio.sleep(1.5)
+                            continue
+                        last = RuntimeError(f"Gemini returned empty text ({model})")
+                        break
                     try:
                         return _json(raw_text)
                     except Exception as exc:
-                        logger.error("Gemini returned invalid JSON model=%s text=%s", model, raw_text[:4000])
-                        raise RuntimeError(f"Gemini returned invalid JSON ({model}): {raw_text[:1000]}") from exc
+                        logger.error(
+                            "Gemini returned invalid JSON model=%s attempt=%s text=%s",
+                            model, attempt + 1, raw_text[:4000],
+                        )
+                        if attempt < 1:
+                            await asyncio.sleep(1.5)
+                            continue
+                        last = RuntimeError(f"Gemini returned invalid JSON ({model}): {raw_text[:1000]}")
+                        break
                 except Exception as exc:
                     last = exc
                     status = getattr(getattr(exc, "response", None), "status_code", None)
