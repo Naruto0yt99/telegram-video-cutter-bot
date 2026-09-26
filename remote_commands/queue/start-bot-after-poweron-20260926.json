@@ -1,0 +1,5 @@
+{
+  "id": "start-bot-after-poweron-20260926",
+  "command": "cd ~/telegram-video-cutter-bot && git fetch origin main && git reset --hard origin/main && chmod +x termux_agent.sh start_bot.sh && nohup ./termux_agent.sh >/dev/null 2>&1 & nohup ./start_bot.sh >/dev/null 2>&1 & printf 'START_REQUESTED\\n'",
+  "timeout": 120
+}
