@@ -307,7 +307,47 @@ async def _generate(prompt, files, media_resolution="MEDIA_RESOLUTION_LOW"):
                             "Gemini returned empty text model=%s attempt=%s candidates=%s promptFeedback=%s",
                             model, attempt + 1, candidates_meta, data.get("promptFeedback"),
                         )
-                        if attempt < 1:
+                        # Some Gemini video calls return a valid HTTP response with no
+                        # text when structured-output/thinking settings are combined
+                        # with agentic video processing. Retry once with a plain text
+                        # generation config before abandoning this model.
+                        if attempt == 0:
+                            payload_plain = {
+                                "contents": payload["contents"],
+                                "generationConfig": {"maxOutputTokens": 4096},
+                            }
+                            try:
+                                fallback = await client.post(
+                                    f"{GEMINI_ROOT}/v1beta/models/{model}:generateContent",
+                                    headers={**_headers(), "Content-Type": "application/json"},
+                                    json=payload_plain,
+                                )
+                                if fallback.status_code < 400:
+                                    fallback_data = fallback.json()
+                                    fallback_parts = []
+                                    for candidate in fallback_data.get("candidates", []):
+                                        for part in candidate.get("content", {}).get("parts", []):
+                                            if part.get("text"):
+                                                fallback_parts.append(part["text"])
+                                    fallback_text = "\n".join(fallback_parts).strip()
+                                    if fallback_text:
+                                        try:
+                                            return _json(fallback_text)
+                                        except Exception:
+                                            logger.warning(
+                                                "Gemini plain fallback produced non-JSON text model=%s text=%s",
+                                                model, fallback_text[:2000],
+                                            )
+                                else:
+                                    logger.warning(
+                                        "Gemini plain fallback HTTP %s model=%s body=%s",
+                                        fallback.status_code, model, fallback.text[:2000],
+                                    )
+                            except Exception as fallback_exc:
+                                logger.warning(
+                                    "Gemini plain fallback failed model=%s: %s",
+                                    model, fallback_exc,
+                                )
                             await asyncio.sleep(1.5)
                             continue
                         last = RuntimeError(f"Gemini returned empty text ({model})")
