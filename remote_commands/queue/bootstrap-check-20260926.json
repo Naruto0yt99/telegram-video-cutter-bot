@@ -1,0 +1,5 @@
+{
+  "id": "bootstrap-check-20260926",
+  "command": "printf 'REMOTE_AGENT_OK\\n'; pwd; python --version; ffmpeg -version | head -n 1; ps -ef | grep -E 'start_bot|bot.py|termux_agent' | grep -v grep || true",
+  "timeout": 60
+}
