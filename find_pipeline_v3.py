@@ -283,15 +283,25 @@ async def _generate(prompt, files, media_resolution="MEDIA_RESOLUTION_LOW"):
                         headers={**_headers(), "Content-Type": "application/json"},
                         json=model_payload,
                     )
-                    if r.status_code in GEMINI_RETRYABLE_STATUS and attempt < 1:
-                        retry_after = r.headers.get("retry-after")
-                        try:
-                            delay = min(20.0, max(2.0, float(retry_after)))
-                        except (TypeError, ValueError):
-                            delay = 2.0 * (attempt + 1)
-                        logger.warning("Gemini retryable %s from %s; retrying in %.1fs", r.status_code, model, delay)
-                        await asyncio.sleep(delay)
-                        continue
+                    if r.status_code in GEMINI_RETRYABLE_STATUS:
+                        if attempt < 1:
+                            retry_after = r.headers.get("retry-after")
+                            try:
+                                delay = min(20.0, max(2.0, float(retry_after)))
+                            except (TypeError, ValueError):
+                                delay = 2.0 * (attempt + 1)
+                            logger.warning("Gemini retryable %s from %s; retrying in %.1fs", r.status_code, model, delay)
+                            await asyncio.sleep(delay)
+                            continue
+                        # A transient outage for one model must not abort the
+                        # entire fallback chain. Record it and try the next model.
+                        body = r.text[:4000]
+                        last = RuntimeError(f"Gemini HTTP {r.status_code} ({model}): {body}")
+                        logger.warning(
+                            "Gemini retries exhausted for %s (HTTP %s); moving to next fallback model",
+                            model, r.status_code,
+                        )
+                        break
                     if r.status_code >= 400:
                         body = r.text[:4000]
                         logger.error("Gemini HTTP %s model=%s body=%s", r.status_code, model, body)
@@ -301,9 +311,7 @@ async def _generate(prompt, files, media_resolution="MEDIA_RESOLUTION_LOW"):
                             # one unsupported model prevent trying the next fallback.
                             last = RuntimeError(f"Gemini HTTP {r.status_code} ({model}): {body}")
                             break
-                        if r.status_code not in GEMINI_RETRYABLE_STATUS:
-                            raise RuntimeError(f"Gemini HTTP {r.status_code} ({model}): {body}")
-                    r.raise_for_status()
+                        raise RuntimeError(f"Gemini HTTP {r.status_code} ({model}): {body}")
                     try:
                         data = r.json()
                     except Exception as exc:
