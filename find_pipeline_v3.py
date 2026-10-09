@@ -21,7 +21,7 @@ logger = logging.getLogger("find-pipeline-v3")
 GEMINI_ROOT = "https://generativelanguage.googleapis.com"
 # Requested model first; modern fallback keeps the pipeline usable if the legacy
 # model is unavailable for the account.
-GEMINI_MODELS = ("gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite")
+GEMINI_MODELS = ("gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3-flash-preview", "gemini-2.5-flash")
 GEMINI_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 CHUNK_BYTES = 512 * 1024
 QUALITY_LOW_TO_HIGH = ("240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "auto")
@@ -264,10 +264,23 @@ async def _generate(prompt, files, media_resolution="MEDIA_RESOLUTION_LOW"):
         for model in GEMINI_MODELS:
             for attempt in range(2):
                 try:
+                    model_payload = payload
+                    if model == "gemini-2.5-flash":
+                        # Older stable fallback supports standard video file_data,
+                        # but not the newer agentic media-processing part fields.
+                        model_contents = [dict(item) for item in payload["contents"]]
+                        model_contents[0]["parts"] = [
+                            ({k: v for k, v in part.items()
+                              if k not in ("media_processing", "media_resolution")}
+                             if "file_data" in part else part)
+                            for part in payload["contents"][0]["parts"]
+                        ]
+                        model_payload = dict(payload)
+                        model_payload["contents"] = model_contents
                     r = await client.post(
                         f"{GEMINI_ROOT}/v1beta/models/{model}:generateContent",
                         headers={**_headers(), "Content-Type": "application/json"},
-                        json=payload,
+                        json=model_payload,
                     )
                     if r.status_code in GEMINI_RETRYABLE_STATUS and attempt < 1:
                         retry_after = r.headers.get("retry-after")
