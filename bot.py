@@ -936,7 +936,7 @@ async def _run_visual_index_find(input_video: Path, user_id: int, status):
             )
             if not duplicate:
                 selected.append(item)
-            if len(selected) >= 5:
+            if len(selected) >= 4:
                 break
         selected.sort(key=lambda item: float(item.get("ref_start", 0)))
         if not selected:
@@ -967,17 +967,20 @@ async def _run_visual_index_find(input_video: Path, user_id: int, status):
                     "✂️ Highest-quality source se clip nikaal raha hai..."
                 )
                 server = await open_telegram_range_server(telethon_client, source_url)
-                await run_command(
-                    FFMPEG_BIN, "-hide_banner", "-loglevel", "warning", "-y",
-                    "-seekable", "1", "-multiple_requests", "1",
-                    "-initial_request_size", str(2 * 1024 * 1024),
-                    "-request_size", str(2 * 1024 * 1024),
-                    "-short_seek_size", str(2 * 1024 * 1024),
-                    "-ss", f"{start:.3f}", "-i", server.url,
-                    "-t", f"{end - start:.3f}",
-                    "-map", "0:v:0?", "-map", "0:a:0?",
-                    "-c", "copy", "-avoid_negative_ts", "make_zero",
-                    "-movflags", "+faststart", str(output),
+                await asyncio.wait_for(
+                    run_command(
+                        FFMPEG_BIN, "-hide_banner", "-loglevel", "warning", "-y",
+                        "-seekable", "1", "-multiple_requests", "1",
+                        "-initial_request_size", str(2 * 1024 * 1024),
+                        "-request_size", str(2 * 1024 * 1024),
+                        "-short_seek_size", str(2 * 1024 * 1024),
+                        "-ss", f"{start:.3f}", "-i", server.url,
+                        "-t", f"{end - start:.3f}",
+                        "-map", "0:v:0?", "-map", "0:a:0?",
+                        "-c", "copy", "-avoid_negative_ts", "make_zero",
+                        "-movflags", "+faststart", str(output),
+                    ),
+                    timeout=75,
                 )
                 if not output.exists() or output.stat().st_size == 0:
                     raise RuntimeError("Visual-index matched source produced an empty clip.")
