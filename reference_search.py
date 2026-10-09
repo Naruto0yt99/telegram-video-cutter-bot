@@ -172,9 +172,9 @@ async def reference_index_command(update: Update, context: ContextTypes.DEFAULT_
     args = [x for x in context.args if x.lower() != "--force"]
     force = "--force" in [x.lower() for x in context.args]
     only_match = None
+    query = " ".join(args).strip()
     if args:
-        query = " ".join(args).strip()
-        match = re.match(r"^(.+?)\\s+s(?:eason)?\\s*(\\d+)\\s*e(?:p(?:isode)?)?\\s*(\\d+)$", query, re.IGNORECASE)
+        match = re.match(r"^(.+?)\s+s(?:eason)?\s*(\d+)\s*e(?:p(?:isode)?)?\s*(\d+)$", query, re.IGNORECASE)
         if not match:
             await message.reply_text(
                 "Usage: /findindex Death Note S1 E1\n"
@@ -183,16 +183,16 @@ async def reference_index_command(update: Update, context: ContextTypes.DEFAULT_
             )
             return
         only_match = (
-            re.sub(r"\\s+", " ", match.group(1).strip()).casefold(),
+            re.sub(r"\s+", " ", match.group(1).strip()).casefold(),
             int(match.group(2)),
             int(match.group(3)),
         )
     status = await message.reply_text(
-        "🧠 VISUAL INDEX STARTED\\n\\n"
-        + (f"🎯 Single episode: {query}\\n" if only_match else "📚 Mode: full library\\n")
-        + "Har source video se 2-second interval par lightweight visual hashes banenge.\\n"
-        "Full source episode file permanently download nahi hogi; sirf visual hashes SQLite index mein save honge.\\n"
-        + ("⚠️ Existing index rebuild hoga.\\n" if force else "Already indexed sources skip honge.\\n")
+        "🧠 VISUAL INDEX STARTED\n\n"
+        + (f"🎯 Single episode: {query}\n" if only_match else "📚 Mode: full library\n")
+        + "Har source video se 2-second interval par lightweight visual hashes banenge.\n"
+        "Full source episode file permanently download nahi hogi; sirf visual hashes SQLite index mein save honge.\n"
+        + ("⚠️ Existing index rebuild hoga.\n" if force else "Already indexed sources skip honge.\n")
         + "⏳ Indexing ke dauran temporary cache/storage phir bhi use ho sakti hai."
     )
     try:
