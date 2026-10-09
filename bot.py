@@ -1087,11 +1087,11 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             merged = Path(result["output"])
             caption = (
                 "🎬 FIND RESULT\n\n"
-                f"🎞️ Verified scenes: {len(clips)}/{total}\n"
+                f"🎞️ {'Visual matches' if result.get('method') == 'visual_index' else 'Verified scenes'}: {len(clips)}/{total}\n"
                 f"⏱️ Duration: {format_time(sum(float(x.get('edit_duration', 0)) for x in clips))}\n"
-                "🧠 Gemini Short ↔ Telegram low-quality episode comparison\n"
-                "⚡ Highest-quality Telegram source → FFmpeg stream-copy\n\n"
-                "🤖 AnimeClipCutter"
+                + ("⚡ Free local visual-index match\n" if result.get("method") == "visual_index" else "🧠 Gemini Short ↔ Telegram episode comparison\n")
+                + "⚡ Highest-quality Telegram source → FFmpeg stream-copy\n\n"
+                + "🤖 AnimeClipCutter"
             )
             await safe_edit_text(
                 status,
@@ -1103,7 +1103,8 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(report[i:i+3500])
             await safe_edit_text(
                 status,
-                f"🎯 FIND COMPLETE ✅\n\nVerified: {len(clips)}/{total}\n"
+                f"🎯 FIND COMPLETE ✅\n\n"
+                f"{'Visual matches' if result.get('method') == 'visual_index' else 'Verified scenes'}: {len(clips)}/{total}\n"
                 "Final high-quality video + timestamps bhej diye."
             )
     except Exception as exc:
