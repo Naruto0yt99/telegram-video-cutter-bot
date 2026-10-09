@@ -75,6 +75,7 @@ from clip_handler import clip_command as source_clip_command
 from library_nav import library_command as nav_library_command, library_deeplink as nav_library_deeplink
 from fingerprint_storage import fingerprint_storage_status, bind_fingerprint_topic, get_fingerprint_topic_id, save_fingerprint_json, save_fingerprint_pack, save_fingerprint_artifacts, clear_saved_fingerprint_artifacts, get_saved_fingerprint_keys
 from fingerprint_library import saves_command, saves_deeplink
+from reference_search import reference_index_command, find_reference_command
 
 
 logging.basicConfig(
@@ -1401,6 +1402,8 @@ def main():
     application.add_handler(CommandHandler("save", save_command))
     application.add_handler(CommandHandler("edit", edit_handler))
     application.add_handler(CommandHandler("find", find_command))
+    application.add_handler(CommandHandler("findindex", reference_index_command))
+    application.add_handler(CommandHandler("findref", find_reference_command))
     application.add_handler(CommandHandler("fingerprint_status", fingerprint_status_command))
     application.add_handler(CommandHandler("fingerprint_bind", fingerprint_bind_command))
     application.add_handler(CommandHandler("fingerprint_clear", fingerprint_clear_command))
