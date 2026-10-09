@@ -93,7 +93,7 @@ async def _gemini_upload_telegram(client, source_url: str, display_name: str):
             "-request_size", str(2 * 1024 * 1024),
             "-short_seek_size", str(2 * 1024 * 1024),
             "-i", server.url,
-            "-vf", "fps=2.5,scale=-2:360",
+            "-vf", "fps=0.5,scale=-2:360",
             "-an",
             "-c:v", "libx264",
             "-preset", "ultrafast",
@@ -861,9 +861,13 @@ The important requirement is to describe what is visibly present, not to explain
     episode_files = {}
     exact_matches = {}
 
-    for group_key, (_low, high, _sources) in groups.items():
+    for group_key, (low, high, _sources) in groups.items():
         anime_name, season_no, episode_no = group_key
-        source_url = high
+        # Use the lowest available source for coarse Gemini analysis; the high-quality
+        # source is retained separately for final clip extraction. Sampling one frame
+        # every two seconds makes the full-episode proxy much smaller; the short
+        # candidate window is still refined later at 4 fps.
+        source_url = low
         try:
             await progress(
                 f"🎯 FIND — 40%\\n\\n"
@@ -876,7 +880,7 @@ The important requirement is to describe what is visibly present, not to explain
                 f"{safe_filename(anime_name)}_S{season_no}_E{episode_no}.mp4",
             )
             await _wait_active(file_data["name"])
-            episode_files[group_key] = (file_data["name"], float(episode_duration), source_url)
+            episode_files[group_key] = (file_data["name"], float(episode_duration), source_url, high)
             logger.info(
                 "Gemini episode proxy ready %s S%s E%s duration=%.3fs size=%s",
                 anime_name, season_no, episode_no, episode_duration, proxy_size,
@@ -890,7 +894,7 @@ The important requirement is to describe what is visibly present, not to explain
         "🎯 Fingerprint matching intentionally disabled."
     )
 
-    for group_key, (episode_file_name, episode_duration, source_url) in episode_files.items():
+    for group_key, (episode_file_name, episode_duration, source_url, high_source_url) in episode_files.items():
         anime_name, season_no, episode_no = group_key
         group_regions = []
         for idx, region in enumerate(regions, 1):
@@ -976,7 +980,7 @@ The important requirement is to describe what is visibly present, not to explain
                 "edit_end": float(scene.get("end_time", 0) or 0),
                 "speed": 1.0,
                 "confidence": max(0.0, min(1.0, float(match.get("confidence", 0) or 0))),
-                "high": source_url,
+                "high": high_source_url,
                 "match_reason": match.get("reason", ""),
             })
 
