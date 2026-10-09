@@ -346,14 +346,20 @@ async def find_index_matches(reference_path: Path):
     results = await asyncio.to_thread(
         _find_clusters, samples, source_info, source_ids, source_times, source_hashes
     )
-    # A couple of similar frames can be a coincidence. Keep only stronger
-    # temporal clusters; the normal Gemini pipeline remains the fallback.
-    return [
+    # _find_clusters already enforces a multi-frame temporal cluster. Keep its
+    # calibrated threshold here; aggressive extra filtering misses edited/cropped
+    # anime scenes, especially when the reference is only a few seconds long.
+    strong = [
         item for item in results
-        if int(item.get("hits", 0)) >= 3
-        and float(item.get("mean_distance", 64)) <= 10.0
+        if int(item.get("hits", 0)) >= 2
+        and float(item.get("mean_distance", 64)) <= MAX_HASH_DISTANCE
         and float(item.get("end", 0)) > float(item.get("start", 0))
     ]
+    logger.info(
+        "Visual index search sampled=%d indexed_sources=%d candidates=%d accepted=%d",
+        len(samples), indexed_count, len(results), len(strong),
+    )
+    return strong
 
 
 def _find_clusters(samples, source_info, source_ids, source_times, source_hashes):
