@@ -224,7 +224,7 @@ async def reference_index_command(update: Update, context: ContextTypes.DEFAULT_
             target_anime, target_season, target_episode, target_quality = only_match
             sources = [
                 item for item in sources
-                if re.sub(r"\\s+", " ", str(item.get("anime") or "").strip()).casefold() == target_anime
+                if re.sub(r"\s+", " ", str(item.get("anime") or "").strip()).casefold() == target_anime
                 and str(item.get("season") or "").strip().isdigit()
                 and str(item.get("episode") or "").strip().isdigit()
                 and int(str(item["season"]).strip()) == target_season
