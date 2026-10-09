@@ -75,6 +75,7 @@ from clip_handler import clip_command as source_clip_command
 from library_nav import library_command as nav_library_command, library_deeplink as nav_library_deeplink
 from fingerprint_storage import fingerprint_storage_status, bind_fingerprint_topic, get_fingerprint_topic_id, save_fingerprint_json, save_fingerprint_pack, save_fingerprint_artifacts, clear_saved_fingerprint_artifacts, get_saved_fingerprint_keys
 from fingerprint_library import saves_command, saves_deeplink
+from reference_search import reference_index_command, find_reference_command
 
 
 logging.basicConfig(
@@ -186,7 +187,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎬 ANIME VIDEO BOT\n\n"
         "📚 /library — clickable source library\n"
-        "🎯 /find <YouTube URL> — shot-by-shot exact clip finder\n"
+        "🎯 /find <YouTube URL> — existing AI-assisted finder\n"
+        "🧠 /findindex — build free visual index once\n"
+        "🔎 Reply to a reference video with /findref — search indexed episodes\n"
         "✂️ /clip 01:20 - 01:50 — active video se clip\n"
         "✂️ /clips Anime S1 E1 01:20 - 01:50 — source episode se clip\n"
         "✂️ /split 30 — active/original video ko parts me baanto\n"
@@ -202,6 +205,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 HELP\n\n"
         "🎯 FIND\n"
         "/find https://youtube.com/shorts/xxxxx\n"
+        "/findindex — one-time free visual index (may take a long time)\n"
+        "Reply to a video with /findref — match scenes against indexed Telegram sources\n"
         "→ YouTube edit download\n"
         "→ Gemini edit ko dekhega\n"
         "→ Gemini har cut/scene ka visual fingerprint banayega\n"
@@ -1401,6 +1406,8 @@ def main():
     application.add_handler(CommandHandler("save", save_command))
     application.add_handler(CommandHandler("edit", edit_handler))
     application.add_handler(CommandHandler("find", find_command))
+    application.add_handler(CommandHandler("findindex", reference_index_command))
+    application.add_handler(CommandHandler("findref", find_reference_command))
     application.add_handler(CommandHandler("fingerprint_status", fingerprint_status_command))
     application.add_handler(CommandHandler("fingerprint_bind", fingerprint_bind_command))
     application.add_handler(CommandHandler("fingerprint_clear", fingerprint_clear_command))
