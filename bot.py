@@ -947,7 +947,9 @@ async def _run_visual_index_find(input_video: Path, user_id: int, status):
             season = str(item["season"])
             episode = str(item["episode"])
             sources = get_all_sources_for_episode(anime, season, episode) or {}
-            available = [quality for quality in quality_order if quality in sources]
+            available = [quality for quality in quality_order if quality in sources and quality != "auto"]
+            if not available and "auto" in sources:
+                available = ["auto"]
             source_url = sources[available[-1]] if available else item["source_url"]
             start = max(0.0, float(item["start"]))
             end = max(start + 0.5, float(item["end"]))
