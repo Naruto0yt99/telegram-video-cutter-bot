@@ -126,7 +126,7 @@ async def _read_frame_hashes(input_url: str, *, remote: bool, interval: float):
         raise
 
 
-async def _index_source(client, source):
+async def _index_source(client, source, progress=None):
     source_url = source["source_url"]
     server = await open_telegram_range_server(client, source_url)
     rows = []
@@ -136,6 +136,8 @@ async def _index_source(client, source):
             server.url, remote=True, interval=INDEX_INTERVAL
         ):
             rows.append((timestamp, sqlite3.Binary(signature)))
+            if progress and len(rows) % 30 == 0:
+                await progress(len(rows), timestamp, duration)
         if not rows:
             raise RuntimeError("No frames decoded from source.")
         with _db() as conn:
@@ -158,7 +160,7 @@ async def _index_source(client, source):
         await server.close()
 
 
-async def reference_index_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def _reference_index_worker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     user = update.effective_user
     if user is None or OWNER_ID is None or int(user.id) != int(OWNER_ID):
@@ -242,7 +244,18 @@ async def reference_index_command(update: Update, context: ContextTypes.DEFAULT_
         failures = []
         for item in queue:
             try:
-                frames_total += await _index_source(source_client, item)
+                async def report_index_progress(frame_count, timestamp, duration):
+                    try:
+                        await status.edit_text(
+                            "🧠 VISUAL INDEX RUNNING\\n\\n"
+                            f"🎯 {item['anime']} S{item['season']} E{item['episode']} {item['quality']}\\n"
+                            f"🧩 Sampled frames: {frame_count:,}\\n"
+                            f"⏱️ Source position: {timestamp:.0f}s / {duration:.0f}s\\n"
+                            f"📚 Other source links completed: {done}/{len(queue)}"
+                        )
+                    except Exception:
+                        pass
+                frames_total += await _index_source(source_client, item, progress=report_index_progress)
                 done += 1
             except Exception as exc:
                 logger.exception("Reference index failed for %s", item["source_url"])
@@ -274,6 +287,15 @@ async def reference_index_command(update: Update, context: ContextTypes.DEFAULT_
         logger.exception("Reference visual indexing failed")
         await status.edit_text(f"❌ VISUAL INDEX FAILED\n\n{str(exc)[:1500]}")
 
+
+
+async def reference_index_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Run indexing in the background so long indexing cannot block /find updates."""
+    context.application.create_task(
+        _reference_index_worker(update, context),
+        update=update,
+        name="reference-visual-index",
+    )
 
 def _load_index_arrays():
     import numpy as np
