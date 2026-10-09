@@ -21,7 +21,7 @@ logger = logging.getLogger("find-pipeline-v3")
 GEMINI_ROOT = "https://generativelanguage.googleapis.com"
 # Requested model first; modern fallback keeps the pipeline usable if the legacy
 # model is unavailable for the account.
-GEMINI_MODELS = ("gemini-2.5-flash", "gemini-3.6-flash", "gemini-3-flash-preview")
+GEMINI_MODELS = ("gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite")
 GEMINI_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 CHUNK_BYTES = 512 * 1024
 QUALITY_LOW_TO_HIGH = ("240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "auto")
@@ -265,9 +265,9 @@ async def _generate(prompt, files, media_resolution="MEDIA_RESOLUTION_LOW"):
             for attempt in range(2):
                 try:
                     model_payload = payload
-                    if model == "gemini-2.5-flash":
-                        # Older stable fallback supports standard video file_data,
-                        # but not the newer agentic media-processing part fields.
+                    if model in {"gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"}:
+                        # Older stable models support standard video file_data but
+                        # may reject the newer agentic media-processing and thinking fields.
                         model_contents = [dict(item) for item in payload["contents"]]
                         model_contents[0]["parts"] = [
                             ({k: v for k, v in part.items()
@@ -277,6 +277,7 @@ async def _generate(prompt, files, media_resolution="MEDIA_RESOLUTION_LOW"):
                         ]
                         model_payload = dict(payload)
                         model_payload["contents"] = model_contents
+                        model_payload["generationConfig"] = {"responseMimeType": "application/json"}
                     r = await client.post(
                         f"{GEMINI_ROOT}/v1beta/models/{model}:generateContent",
                         headers={**_headers(), "Content-Type": "application/json"},
