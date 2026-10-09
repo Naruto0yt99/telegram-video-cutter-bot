@@ -4,6 +4,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Mess
 
 from library_nav import library_command, library_callback
 from clip_handler import clip_command as source_clip_command
+from reference_search import reference_index_command, find_reference_command
 
 
 # Keep every existing bot feature from bot.py, but replace the old flat
@@ -29,6 +30,8 @@ def main():
     application.add_handler(CommandHandler("save", legacy_bot.save_command))
     application.add_handler(CommandHandler("edit", legacy_bot.edit_handler))
     application.add_handler(CommandHandler("find", legacy_bot.find_command))
+    application.add_handler(CommandHandler("findindex", reference_index_command))
+    application.add_handler(CommandHandler("findref", find_reference_command))
     application.add_handler(CommandHandler("clip", source_clip_command))
     application.add_handler(CommandHandler("clips", source_clip_command))
     application.add_handler(CommandHandler("episode", source_clip_command))
