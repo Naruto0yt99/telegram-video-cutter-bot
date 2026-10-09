@@ -75,7 +75,7 @@ from clip_handler import clip_command as source_clip_command
 from library_nav import library_command as nav_library_command, library_deeplink as nav_library_deeplink
 from fingerprint_storage import fingerprint_storage_status, bind_fingerprint_topic, get_fingerprint_topic_id, save_fingerprint_json, save_fingerprint_pack, save_fingerprint_artifacts, clear_saved_fingerprint_artifacts, get_saved_fingerprint_keys
 from fingerprint_library import saves_command, saves_deeplink
-from reference_search import reference_index_command, find_reference_command
+from reference_search import reference_index_command, find_reference_command, find_index_matches
 
 
 logging.basicConfig(
@@ -910,6 +910,143 @@ async def fingerprint_all_status_command(update: Update, context: ContextTypes.D
     )
 
 
+async def _run_visual_index_find(input_video: Path, user_id: int, status):
+    """Try the free local visual index first; return None to use the Gemini fallback."""
+    work_dir = user_temp_dir(user_id) / "visual_find"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    created = []
+    try:
+        await safe_edit_text(status, "🎯 FIND — 15%\\n\\n⚡ Free visual index se matching scenes dhoondh raha hai...")
+        matches = await find_index_matches(input_video)
+        if not matches:
+            return None
+
+        # Collapse alternate-quality duplicates of the same episode/scene.
+        selected = []
+        for item in matches:
+            duplicate = any(
+                str(item.get("anime", "")).casefold() == str(old.get("anime", "")).casefold()
+                and str(item.get("season", "")) == str(old.get("season", ""))
+                and str(item.get("episode", "")) == str(old.get("episode", ""))
+                and abs(float(item.get("ref_start", 0)) - float(old.get("ref_start", 0))) < 5.0
+                for old in selected
+            )
+            if not duplicate:
+                selected.append(item)
+            if len(selected) >= 8:
+                break
+        selected.sort(key=lambda item: float(item.get("ref_start", 0)))
+        if not selected:
+            return None
+
+        from telegram_remote import open_telegram_range_server
+        quality_order = ("240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "auto")
+        clip_rows = []
+        for index, item in enumerate(selected, 1):
+            anime = str(item["anime"])
+            season = str(item["season"])
+            episode = str(item["episode"])
+            sources = get_all_sources_for_episode(anime, season, episode) or {}
+            available = [quality for quality in quality_order if quality in sources]
+            source_url = sources[available[-1]] if available else item["source_url"]
+            start = max(0.0, float(item["start"]))
+            end = max(start + 0.5, float(item["end"]))
+            output = work_dir / f"visual_match_{index:02d}.mp4"
+            server = None
+            try:
+                await safe_edit_text(
+                    status,
+                    f"🎯 FIND — {min(90, 30 + index * 7)}%\\n\\n"
+                    f"📚 {anime} S{season} E{episode}\\n"
+                    f"⏱️ Source: {start:.1f}s–{end:.1f}s\\n"
+                    "✂️ Highest-quality source se clip nikaal raha hai..."
+                )
+                server = await open_telegram_range_server(telethon_client, source_url)
+                await run_command(
+                    FFMPEG_BIN, "-hide_banner", "-loglevel", "warning", "-y",
+                    "-seekable", "1", "-multiple_requests", "1",
+                    "-initial_request_size", str(2 * 1024 * 1024),
+                    "-request_size", str(2 * 1024 * 1024),
+                    "-short_seek_size", str(2 * 1024 * 1024),
+                    "-ss", f"{start:.3f}", "-i", server.url,
+                    "-t", f"{end - start:.3f}",
+                    "-map", "0:v:0?", "-map", "0:a:0?",
+                    "-c", "copy", "-avoid_negative_ts", "make_zero",
+                    "-movflags", "+faststart", str(output),
+                )
+                if not output.exists() or output.stat().st_size == 0:
+                    raise RuntimeError("Visual-index matched source produced an empty clip.")
+                created.append(output)
+                clip_rows.append({
+                    "path": output,
+                    "index": index,
+                    "anime": anime,
+                    "season": int(season) if season.isdigit() else season,
+                    "episode": int(episode) if episode.isdigit() else episode,
+                    "start": start,
+                    "end": end,
+                    "edit_start": float(item.get("ref_start", 0)),
+                    "edit_end": float(item.get("ref_end", item.get("ref_start", 0))),
+                    "edit_duration": max(0.0, float(item.get("ref_end", 0)) - float(item.get("ref_start", 0))),
+                    "speed": 1.0,
+                    "confidence": float(item.get("confidence", 0)) / 100.0,
+                })
+            finally:
+                if server is not None:
+                    await server.close()
+
+        if not clip_rows:
+            return None
+
+        merged = work_dir / "final_visual_find.mp4"
+        concat = work_dir / "concat_visual_find.txt"
+        concat.write_text(
+            "\\n".join("file '" + str(row["path"]).replace("'", "'\\''") + "'" for row in clip_rows),
+            encoding="utf-8",
+        )
+        try:
+            await run_command(
+                FFMPEG_BIN, "-hide_banner", "-loglevel", "warning", "-y",
+                "-f", "concat", "-safe", "0", "-i", str(concat),
+                "-c", "copy", "-movflags", "+faststart", str(merged),
+            )
+        except Exception:
+            logger.warning("Visual-index candidates could not be merged; falling back to Gemini.", exc_info=True)
+            merged.unlink(missing_ok=True)
+            return None
+        finally:
+            concat.unlink(missing_ok=True)
+
+        if not merged.exists() or merged.stat().st_size == 0:
+            return None
+        report = "\\n".join(
+            f"{row['index']:02d} | {row['anime']} S{row['season']} E{row['episode']} | "
+            f"RAW {row['start']:.3f}s → {row['end']:.3f}s | "
+            f"visual confidence {row['confidence']:.0%}"
+            for row in clip_rows
+        )
+        return {
+            "output": merged,
+            "clips": clip_rows,
+            "total": len(clip_rows),
+            "qa": {"match": True, "confidence": min(row["confidence"] for row in clip_rows)},
+            "report": "📋 LOCAL VISUAL-INDEX TIMESTAMPS\\n\\n" + report,
+            "sources": {(str(row["anime"]).lower(), row["season"], row["episode"]) for row in clip_rows},
+            "method": "visual_index",
+        }
+    except Exception:
+        logger.warning("Local visual-index fast path failed; trying Gemini pipeline.", exc_info=True)
+        return None
+    finally:
+        # Keep the merged output until the caller sends it; remove only source
+        # clip fragments here. The standard user-temp cleanup removes the output.
+        for path in created:
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
 async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage:\n/find https://youtube.com/shorts/xxxxx")
@@ -931,12 +1068,14 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with job_lock:
             video_path = await download_video_from_url(url, user_id)
-            result = await run_find_v3(
-                input_video=video_path,
-                user_id=user_id,
-                telegram_client=telethon_client,
-                progress_message=status,
-            )
+            result = await _run_visual_index_find(video_path, user_id, status)
+            if result is None:
+                result = await run_find_v3(
+                    input_video=video_path,
+                    user_id=user_id,
+                    telegram_client=telethon_client,
+                    progress_message=status,
+                )
             clips = result.get("clips", [])
             total = int(result.get("total", len(clips)))
             if not clips or len(clips) != total:
