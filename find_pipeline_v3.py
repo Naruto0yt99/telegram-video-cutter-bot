@@ -294,6 +294,12 @@ async def _generate(prompt, files, media_resolution="MEDIA_RESOLUTION_LOW"):
                     if r.status_code >= 400:
                         body = r.text[:4000]
                         logger.error("Gemini HTTP %s model=%s body=%s", r.status_code, model, body)
+                        if r.status_code in (400, 404, 405):
+                            # Some model IDs are not enabled for every API key or
+                            # may reject the newer video request format. Do not let
+                            # one unsupported model prevent trying the next fallback.
+                            last = RuntimeError(f"Gemini HTTP {r.status_code} ({model}): {body}")
+                            break
                         if r.status_code not in GEMINI_RETRYABLE_STATUS:
                             raise RuntimeError(f"Gemini HTTP {r.status_code} ({model}): {body}")
                     r.raise_for_status()
@@ -326,7 +332,7 @@ async def _generate(prompt, files, media_resolution="MEDIA_RESOLUTION_LOW"):
                         # generation config before abandoning this model.
                         if attempt == 0:
                             payload_plain = {
-                                "contents": payload["contents"],
+                                "contents": model_payload["contents"],
                                 "generationConfig": {"maxOutputTokens": 4096},
                             }
                             try:
