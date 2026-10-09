@@ -175,8 +175,22 @@ async def send_file(update: Update, path: Path, caption: str):
         )
         return
 
-    with path.open("rb") as f:
-        await update.message.reply_video(video=f, caption=caption, supports_streaming=True)
+    try:
+        with path.open("rb") as video:
+            await update.message.reply_video(video=video, caption=caption, supports_streaming=True)
+    except NetworkError:
+        # Bot API uploads can time out on mobile networks even for files under
+        # its size limit. Fall back to the already-authenticated user session
+        # rather than losing a successfully generated FIND result.
+        logger.warning("Bot API video upload timed out; retrying through USER_SESSION.")
+        if telethon_client is None:
+            raise
+        await telethon_client.send_file(
+            update.effective_chat.id,
+            str(path),
+            caption=caption,
+            supports_streaming=True,
+        )
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
