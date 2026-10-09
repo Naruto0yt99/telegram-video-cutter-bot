@@ -5,6 +5,7 @@ reference-video frames against that index. No paid AI API and no full source
 episode downloads are required.
 """
 import asyncio
+from contextlib import contextmanager
 import logging
 import math
 import re
@@ -60,6 +61,16 @@ def _connect():
             ON frames(source_id, timestamp);
     """)
     return conn
+
+
+@contextmanager
+def _db():
+    conn = _connect()
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _dhash(raw_frame: bytes) -> bytes:
@@ -127,7 +138,7 @@ async def _index_source(client, source):
             rows.append((timestamp, sqlite3.Binary(signature)))
         if not rows:
             raise RuntimeError("No frames decoded from source.")
-        with _connect() as conn:
+        with _db() as conn:
             cur = conn.execute(
                 "INSERT INTO sources(source_url, anime, season, episode, quality, duration) "
                 "VALUES(?,?,?,?,?,?)",
@@ -168,7 +179,7 @@ async def reference_index_command(update: Update, context: ContextTypes.DEFAULT_
     )
     try:
         if force:
-            with _connect() as conn:
+            with _db() as conn:
                 conn.execute("DELETE FROM frames")
                 conn.execute("DELETE FROM sources")
                 conn.commit()
@@ -188,7 +199,7 @@ async def reference_index_command(update: Update, context: ContextTypes.DEFAULT_
                 sources.append(item)
                 seen.add(url)
 
-        with _connect() as conn:
+        with _db() as conn:
             indexed = {row[0] for row in conn.execute("SELECT source_url FROM sources")}
         queue = [item for item in sources if item["source_url"] not in indexed]
         done = 0
@@ -213,7 +224,7 @@ async def reference_index_command(update: Update, context: ContextTypes.DEFAULT_
                 except Exception:
                     pass
 
-        with _connect() as conn:
+        with _db() as conn:
             final_sources = conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0]
             final_frames = conn.execute("SELECT COUNT(*) FROM frames").fetchone()[0]
         await status.edit_text(
@@ -232,7 +243,7 @@ async def reference_index_command(update: Update, context: ContextTypes.DEFAULT_
 def _load_index_arrays():
     import numpy as np
 
-    with _connect() as conn:
+    with _db() as conn:
         source_rows = conn.execute(
             "SELECT id, source_url, anime, season, episode, quality, duration FROM sources"
         ).fetchall()
@@ -269,7 +280,7 @@ def _find_clusters(samples, source_info, source_ids, source_times, source_hashes
     for ref_time, raw_hash in samples:
         target = np.frombuffer(raw_hash, dtype=">u8")[0].astype(np.uint64)
         distances = np.bitwise_count(np.bitwise_xor(source_hashes, target))
-        k = min(MAX_MATCHES_PER_FRAME, len(distances))
+        k = min(MAX_MATCHES_PER_FRAME * 5, len(distances))
         nearest = np.argpartition(distances, k - 1)[:k]
         nearest = nearest[distances[nearest] <= MAX_HASH_DISTANCE]
         best_by_cluster = {}
@@ -361,7 +372,7 @@ async def find_reference_command(update: Update, context: ContextTypes.DEFAULT_T
         await message.reply_text("❌ Reference video 20 MB se badi hai. Isko 360p/low bitrate mein compress karke bhejo.")
         return
 
-    with _connect() as conn:
+    with _db() as conn:
         indexed_count = int(conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0])
         frame_count = int(conn.execute("SELECT COUNT(*) FROM frames").fetchone()[0])
     if indexed_count == 0 or frame_count == 0:
