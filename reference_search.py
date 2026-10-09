@@ -18,7 +18,7 @@ import numpy as np
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from config import DATA_DIR, FFMPEG_BIN, TEMP_DIR
+from config import DATA_DIR, FFMPEG_BIN, TEMP_DIR, OWNER_ID, TELEGRAM_MAX_BYTES
 from database import get_connection
 from ffmpeg_utils import run_command
 from telegram_remote import open_telegram_range_server
@@ -159,13 +159,13 @@ async def _index_source(client, source):
 
 
 async def reference_index_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    import bot as legacy_bot
-
     message = update.effective_message
-    if not legacy_bot.is_owner(update.effective_user.id):
+    user = update.effective_user
+    if user is None or OWNER_ID is None or int(user.id) != int(OWNER_ID):
         await message.reply_text("❌ Owner only. Indexing 500+ hours of video can be resource-intensive.")
         return
-    if legacy_bot.telethon_client is None:
+    source_client = context.application.bot_data.get("telethon_client")
+    if source_client is None:
         await message.reply_text("❌ Telegram USER_SESSION connected nahi hai.")
         return
 
@@ -242,7 +242,7 @@ async def reference_index_command(update: Update, context: ContextTypes.DEFAULT_
         failures = []
         for item in queue:
             try:
-                frames_total += await _index_source(legacy_bot.telethon_client, item)
+                frames_total += await _index_source(source_client, item)
                 done += 1
             except Exception as exc:
                 logger.exception("Reference index failed for %s", item["source_url"])
@@ -377,14 +377,33 @@ def _find_clusters(samples, source_info, source_ids, source_times, source_hashes
     return sorted(chosen, key=lambda x: x["ref_start"])
 
 
-async def find_reference_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    import bot as legacy_bot
 
+async def _send_result_file(update: Update, source_client, path: Path, caption: str):
+    """Send a matched clip through Bot API or the authenticated user session."""
+    if path.stat().st_size > int(TELEGRAM_MAX_BYTES):
+        await source_client.send_file(
+            update.effective_chat.id,
+            str(path),
+            caption=caption,
+            supports_streaming=True,
+        )
+        return
+    with path.open("rb") as video:
+        await update.effective_message.reply_video(
+            video=video,
+            caption=caption,
+            supports_streaming=True,
+        )
+
+
+async def find_reference_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
-    if not legacy_bot.is_owner(update.effective_user.id):
+    user = update.effective_user
+    if user is None or OWNER_ID is None or int(user.id) != int(OWNER_ID):
         await message.reply_text("❌ Owner only.")
         return
-    if legacy_bot.telethon_client is None:
+    source_client = context.application.bot_data.get("telethon_client")
+    if source_client is None:
         await message.reply_text("❌ Telegram USER_SESSION connected nahi hai.")
         return
     reply = message.reply_to_message
@@ -447,7 +466,7 @@ async def find_reference_command(update: Update, context: ContextTypes.DEFAULT_T
             output = job_dir / f"match_{index:02d}.mp4"
             server = None
             try:
-                server = await open_telegram_range_server(legacy_bot.telethon_client, item["source_url"])
+                server = await open_telegram_range_server(source_client, item["source_url"])
                 await run_command(
                     FFMPEG_BIN, "-hide_banner", "-loglevel", "warning", "-y",
                     "-ss", f"{item['start']:.3f}", "-i", server.url,
@@ -464,7 +483,7 @@ async def find_reference_command(update: Update, context: ContextTypes.DEFAULT_T
                     f"🎞 Reference: {item['ref_start']:.1f}s–{item['ref_end']:.1f}s\n"
                     f"🧩 Frame matches: {item['hits']} · avg dHash distance: {item['mean_distance']:.1f}/64"
                 )
-                await legacy_bot.send_file(update, output, caption)
+                await _send_result_file(update, source_client, output, caption)
                 sent_paths.append(output)
             except Exception:
                 logger.exception("Could not extract reference match %s", index)
