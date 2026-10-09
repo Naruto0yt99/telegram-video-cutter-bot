@@ -916,7 +916,7 @@ async def _run_visual_index_find(input_video: Path, user_id: int, status):
     work_dir.mkdir(parents=True, exist_ok=True)
     created = []
     try:
-        await safe_edit_text(status, "🎯 FIND — 15%\\n\\n⚡ Free visual index se matching scenes dhoondh raha hai...")
+        await safe_edit_text(status, "🎯 FIND — 15%\n\n⚡ Free visual index se matching scenes dhoondh raha hai...")
         matches = await find_index_matches(input_video)
         if not matches:
             return None
@@ -956,9 +956,9 @@ async def _run_visual_index_find(input_video: Path, user_id: int, status):
             try:
                 await safe_edit_text(
                     status,
-                    f"🎯 FIND — {min(90, 30 + index * 7)}%\\n\\n"
-                    f"📚 {anime} S{season} E{episode}\\n"
-                    f"⏱️ Source: {start:.1f}s–{end:.1f}s\\n"
+                    f"🎯 FIND — {min(90, 30 + index * 7)}%\n\n"
+                    f"📚 {anime} S{season} E{episode}\n"
+                    f"⏱️ Source: {start:.1f}s–{end:.1f}s\n"
                     "✂️ Highest-quality source se clip nikaal raha hai..."
                 )
                 server = await open_telegram_range_server(telethon_client, source_url)
@@ -1001,7 +1001,7 @@ async def _run_visual_index_find(input_video: Path, user_id: int, status):
         merged = work_dir / "final_visual_find.mp4"
         concat = work_dir / "concat_visual_find.txt"
         concat.write_text(
-            "\\n".join("file '" + str(row["path"]).replace("'", "'\\''") + "'" for row in clip_rows),
+            "\n".join("file '" + str(row["path"]).replace("'", "'\\''") + "'" for row in clip_rows),
             encoding="utf-8",
         )
         try:
@@ -1019,7 +1019,7 @@ async def _run_visual_index_find(input_video: Path, user_id: int, status):
 
         if not merged.exists() or merged.stat().st_size == 0:
             return None
-        report = "\\n".join(
+        report = "\n".join(
             f"{row['index']:02d} | {row['anime']} S{row['season']} E{row['episode']} | "
             f"RAW {row['start']:.3f}s → {row['end']:.3f}s | "
             f"visual confidence {row['confidence']:.0%}"
@@ -1030,7 +1030,7 @@ async def _run_visual_index_find(input_video: Path, user_id: int, status):
             "clips": clip_rows,
             "total": len(clip_rows),
             "qa": {"match": True, "confidence": min(row["confidence"] for row in clip_rows)},
-            "report": "📋 LOCAL VISUAL-INDEX TIMESTAMPS\\n\\n" + report,
+            "report": "📋 LOCAL VISUAL-INDEX TIMESTAMPS\n\n" + report,
             "sources": {(str(row["anime"]).lower(), row["season"], row["episode"]) for row in clip_rows},
             "method": "visual_index",
         }
