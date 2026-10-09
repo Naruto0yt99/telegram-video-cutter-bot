@@ -21,7 +21,7 @@ logger = logging.getLogger("find-pipeline-v3")
 GEMINI_ROOT = "https://generativelanguage.googleapis.com"
 # Requested model first; modern fallback keeps the pipeline usable if the legacy
 # model is unavailable for the account.
-GEMINI_MODELS = ("gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3-flash-preview", "gemini-2.5-flash")
+GEMINI_MODELS = ("gemini-2.5-flash", "gemini-3.6-flash", "gemini-3-flash-preview", "gemini-3.7-flash", "gemini-3.8-flash")
 GEMINI_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 CHUNK_BYTES = 512 * 1024
 QUALITY_LOW_TO_HIGH = ("240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "auto")
