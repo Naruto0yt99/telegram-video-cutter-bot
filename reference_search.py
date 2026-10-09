@@ -330,6 +330,32 @@ async def _sample_reference(path: Path):
     return [item async for item in _read_frame_hashes(str(path), remote=False, interval=1.0)]
 
 
+async def find_index_matches(reference_path: Path):
+    """Return local visual-index candidates for a video file, or [] if no usable index exists."""
+    with _db() as conn:
+        indexed_count = int(conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0])
+        frame_count = int(conn.execute("SELECT COUNT(*) FROM frames").fetchone()[0])
+    if indexed_count == 0 or frame_count == 0:
+        return []
+    samples = await _sample_reference(Path(reference_path))
+    if len(samples) < 2:
+        return []
+    source_info, source_ids, source_times, source_hashes = _load_index_arrays()
+    if not len(source_hashes):
+        return []
+    results = await asyncio.to_thread(
+        _find_clusters, samples, source_info, source_ids, source_times, source_hashes
+    )
+    # A couple of similar frames can be a coincidence. Keep only stronger
+    # temporal clusters; the normal Gemini pipeline remains the fallback.
+    return [
+        item for item in results
+        if int(item.get("hits", 0)) >= 3
+        and float(item.get("mean_distance", 64)) <= 10.0
+        and float(item.get("end", 0)) > float(item.get("start", 0))
+    ]
+
+
 def _find_clusters(samples, source_info, source_ids, source_times, source_hashes):
     if not len(source_hashes):
         return []
