@@ -935,6 +935,35 @@ async def _run_visual_index_find(input_video: Path, user_id: int, status):
         if not matches:
             return None
 
+        # A dHash-only match is a candidate, not proof. Weak hits previously
+        # produced false "FIND COMPLETE" results from unrelated scenes in the
+        # one indexed episode. Accept the fast path only when several frames
+        # agree strongly; otherwise use the Gemini episode-and-window verifier.
+        min_hits = 5
+        min_confidence = 72.0
+        strong_matches = [
+            item for item in matches
+            if int(item.get("hits", 0)) >= min_hits
+            and float(item.get("confidence", 0.0)) >= min_confidence
+        ]
+        if not strong_matches:
+            logger.info(
+                "Visual-index candidates rejected as weak; falling back to Gemini. "
+                "candidate_summary=%s",
+                [
+                    {
+                        "anime": item.get("anime"),
+                        "season": item.get("season"),
+                        "episode": item.get("episode"),
+                        "hits": item.get("hits"),
+                        "confidence": item.get("confidence"),
+                    }
+                    for item in matches[:5]
+                ],
+            )
+            return None
+        matches = strong_matches
+
         # Collapse alternate-quality duplicates of the same episode/scene.
         selected = []
         for item in matches:
