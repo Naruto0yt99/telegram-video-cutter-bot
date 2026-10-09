@@ -1070,11 +1070,18 @@ async def _run_visual_index_find(input_video: Path, user_id: int, status):
 
 
 async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Usage:\n/find https://youtube.com/shorts/xxxxx")
+    args = list(context.args)
+    force_gemini = bool(args and args[0].lower() in {"--gemini", "--ai-only"})
+    if force_gemini:
+        args = args[1:]
+    if not args:
+        await update.message.reply_text(
+            "Usage:\n/find https://youtube.com/shorts/xxxxx\n"
+            "Optional: /find --gemini https://youtube.com/shorts/xxxxx"
+        )
         return
 
-    url = context.args[0]
+    url = args[0]
     if not re.match(r"^https?://", url, re.I):
         await update.message.reply_text("❌ Valid URL bhejo.")
         return
@@ -1090,7 +1097,7 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with job_lock:
             video_path = await download_video_from_url(url, user_id)
-            result = await _run_visual_index_find(video_path, user_id, status)
+            result = None if force_gemini else await _run_visual_index_find(video_path, user_id, status)
             if result is None:
                 result = await run_find_v3(
                     input_video=video_path,
