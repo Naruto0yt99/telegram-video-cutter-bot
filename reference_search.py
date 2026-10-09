@@ -169,13 +169,32 @@ async def reference_index_command(update: Update, context: ContextTypes.DEFAULT_
         await message.reply_text("❌ Telegram USER_SESSION connected nahi hai.")
         return
 
+    args = [x for x in context.args if x.lower() != "--force"]
     force = "--force" in [x.lower() for x in context.args]
+    only_match = None
+    query = " ".join(args).strip()
+    if args:
+        match = re.match(r"^(.+?)\s+s(?:eason)?\s*(\d+)\s*e(?:p(?:isode)?)?\s*(\d+)(?:\s+(\d{3,4}p))?$", query, re.IGNORECASE)
+        if not match:
+            await message.reply_text(
+                "Usage: /findindex Death Note S1 E1 480p\n"
+                "Sirf ek episode test karne ke liye anime name + season + episode do.\n"
+                "Bina arguments ke /findindex poori library index karega."
+            )
+            return
+        only_match = (
+            re.sub(r"\s+", " ", match.group(1).strip()).casefold(),
+            int(match.group(2)),
+            int(match.group(3)),
+            (match.group(4) or "").casefold(),
+        )
     status = await message.reply_text(
         "🧠 VISUAL INDEX STARTED\n\n"
-        "Har source video se 2-second interval par lightweight visual hashes banenge.\n"
-        "Source episodes phone/server par permanently download nahi honge.\n"
+        + (f"🎯 Single episode: {query}\n" if only_match else "📚 Mode: full library\n")
+        + "Har source video se 2-second interval par lightweight visual hashes banenge.\n"
+        "Full source episode file permanently download nahi hogi; sirf visual hashes SQLite index mein save honge.\n"
         + ("⚠️ Existing index rebuild hoga.\n" if force else "Already indexed sources skip honge.\n")
-        + "⏳ Pehli indexing lambi ho sakti hai; baad mein /findref fast search karega."
+        + "⏳ Indexing ke dauran temporary cache/storage phir bhi use ho sakti hai."
     )
     try:
         if force:
@@ -201,6 +220,22 @@ async def reference_index_command(update: Update, context: ContextTypes.DEFAULT_
 
         with _db() as conn:
             indexed = {row[0] for row in conn.execute("SELECT source_url FROM sources")}
+        if only_match:
+            target_anime, target_season, target_episode, target_quality = only_match
+            sources = [
+                item for item in sources
+                if re.sub(r"\s+", " ", str(item.get("anime") or "").strip()).casefold() == target_anime
+                and str(item.get("season") or "").strip().isdigit()
+                and str(item.get("episode") or "").strip().isdigit()
+                and int(str(item["season"]).strip()) == target_season
+                and int(str(item["episode"]).strip()) == target_episode
+                and (not target_quality or str(item.get("quality") or "").strip().casefold() == target_quality)
+            ]
+            if not sources:
+                await status.edit_text(
+                    f"❌ Library mein {query} ka source nahi mila. /library se exact anime/episode check karo."
+                )
+                return
         queue = [item for item in sources if item["source_url"] not in indexed]
         done = 0
         frames_total = 0
