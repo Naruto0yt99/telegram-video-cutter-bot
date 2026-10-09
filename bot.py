@@ -928,12 +928,15 @@ async def _run_visual_index_find(input_video: Path, user_id: int, status):
                 str(item.get("anime", "")).casefold() == str(old.get("anime", "")).casefold()
                 and str(item.get("season", "")) == str(old.get("season", ""))
                 and str(item.get("episode", "")) == str(old.get("episode", ""))
-                and abs(float(item.get("ref_start", 0)) - float(old.get("ref_start", 0))) < 5.0
+                and (
+                    abs(float(item.get("ref_start", 0)) - float(old.get("ref_start", 0))) < 5.0
+                    or abs(float(item.get("start", 0)) - float(old.get("start", 0))) < 5.0
+                )
                 for old in selected
             )
             if not duplicate:
                 selected.append(item)
-            if len(selected) >= 8:
+            if len(selected) >= 5:
                 break
         selected.sort(key=lambda item: float(item.get("ref_start", 0)))
         if not selected:
