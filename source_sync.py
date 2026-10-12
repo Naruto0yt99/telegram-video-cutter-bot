@@ -462,9 +462,11 @@ async def _topic_text_for_message(client, entity, message, cache):
             if title and len(_clean_caption(title)) >= 2:
                 text = _clean_caption(title)
             else:
-                # Some older topic roots lack the action title; only then use
-                # the root text as a fallback, subject to the strict topic filter.
-                text = _clean_caption(getattr(root, "message", "") or "")
+                # Never treat a topic's starter message as its title. In
+                # forum groups the starter can be arbitrary chat text (e.g.
+                # "hi", welcome/feedback messages, or a forwarded transcript).
+                # Without Telegram's explicit topic title, skip the message.
+                text = ""
     except Exception:
         logger.debug("Could not read topic root id=%s", top_id, exc_info=True)
         text = ""
