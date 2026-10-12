@@ -1,0 +1,30 @@
+name: Autonomous Worker Scaffold Tests
+
+on:
+  push:
+    branches:
+      - autonomous-worker-lab
+    paths:
+      - "autonomous-worker/**"
+      - ".github/workflows/autonomous-worker-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout isolated worker branch
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run queue unit tests
+        working-directory: autonomous-worker
+        run: python -m unittest -v test_worker.py
+      - name: Verify syntax
+        working-directory: autonomous-worker
+        run: python -m py_compile worker.py test_worker.py
