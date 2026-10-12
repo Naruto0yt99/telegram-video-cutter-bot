@@ -116,11 +116,11 @@ def _is_non_anime_library_label(value: str) -> bool:
     # A forum topic title is a short label. These patterns identify copied
     # Telegram chat transcripts (timestamps, repeated sender labels, or links),
     # not actual anime titles; never expose them in /library.
-    if re.search(r"\\[?\\d{1,2}/\\d{1,2}/\\d{2,4},\\s*\\d{1,2}:\\d{2}", raw):
+    if re.search(r"\[?\d{1,2}/\d{1,2}/\d{2,4},\s*\d{1,2}:\d{2}", raw):
         return True
-    if re.search(r"\\bhttps?://t\\.me/", raw, re.I):
+    if re.search(r"\bhttps?://t\.me/", raw, re.I):
         return True
-    if raw.count("[") >= 2 and re.search(r"\\d{1,2}:\\d{2}", raw):
+    if raw.count("[") >= 2 and re.search(r"\d{1,2}:\d{2}", raw):
         return True
     if len(raw) > 120 or raw.count("]") >= 3:
         return True
