@@ -10,7 +10,7 @@ from telegram_media import is_video_message, get_message_video_name
 from library_nav import canonical_anime
 
 logger = logging.getLogger("anime-bot.source-sync")
-PARSER_VERSION = 31
+PARSER_VERSION = 32
 
 
 _QUALITY_PATTERNS = [
@@ -168,6 +168,12 @@ def _is_non_anime_topic(topic_text: str) -> bool:
         "edit", "edits", "amv", "short", "shorts", "meme", "memes",
         "random", "other", "others", "misc", "miscellaneous",
         "feedback", "feed back", "feedback chat", "feedback topic",
+        "chat", "chats", "general", "general chat", "welcome", "welcome chat",
+        "welcome topic", "welcome and feedback", "introduction", "introductions",
+        "intro", "friends", "friends chat", "bet game", "promotion", "python",
+        "rules", "announcements", "suggestions", "feedback and suggestions",
+        "admin", "staff", "welcome sulululu", "anime panel", "pfp and wallpaper",
+        "pfp wallpapers", "application", "phonks", "overlay", "group chat",
     }
     return text in blocked
 
@@ -447,12 +453,18 @@ async def _topic_text_for_message(client, entity, message, cache):
         return cache[top_id]
     try:
         root = await client.get_messages(entity, ids=top_id)
-        text = _clean_caption(getattr(root, "message", "") or "") if root else ""
+        # Forum topic title is authoritative; the starter message may be
+        # unrelated chat text and must never be appended to the title.
+        text = ""
         if root:
             action = getattr(root, "action", None)
             title = getattr(action, "title", None)
             if title and len(_clean_caption(title)) >= 2:
-                text = _clean_caption(title) if not text else f"{_clean_caption(title)} {text}"
+                text = _clean_caption(title)
+            else:
+                # Some older topic roots lack the action title; only then use
+                # the root text as a fallback, subject to the strict topic filter.
+                text = _clean_caption(getattr(root, "message", "") or "")
     except Exception:
         logger.debug("Could not read topic root id=%s", top_id, exc_info=True)
         text = ""
