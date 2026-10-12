@@ -98,8 +98,9 @@ def _source_link(label: str, url: str) -> str:
 
 
 def _is_non_anime_library_label(value: str) -> bool:
-    """Hide known group/admin topics that were accidentally stored as anime."""
-    normalized = _norm(value)
+    """Reject non-anime topics and malformed labels copied from group chats."""
+    raw = unicodedata.normalize("NFKC", value or "").strip()
+    normalized = _norm(raw)
     blocked = {
         "chat", "chats", "general", "general chat", "welcome", "welcome chat",
         "welcome topic", "welcome and feedback", "welcome sulululu",
@@ -110,7 +111,22 @@ def _is_non_anime_library_label(value: str) -> bool:
         "phonks", "overlay", "group chat", "normal video", "normal videos",
         "random", "other", "others", "misc", "miscellaneous",
     }
-    return normalized in blocked
+    if not raw or normalized in blocked:
+        return True
+    # A forum topic title is a short label. These patterns identify copied
+    # Telegram chat transcripts (timestamps, repeated sender labels, or links),
+    # not actual anime titles; never expose them in /library.
+    if re.search(r"\\[?\\d{1,2}/\\d{1,2}/\\d{2,4},\\s*\\d{1,2}:\\d{2}", raw):
+        return True
+    if re.search(r"\\bhttps?://t\\.me/", raw, re.I):
+        return True
+    if raw.count("[") >= 2 and re.search(r"\\d{1,2}:\\d{2}", raw):
+        return True
+    if len(raw) > 120 or raw.count("]") >= 3:
+        return True
+    if raw.count(",") >= 3 and len(raw) > 45:
+        return True
+    return False
 
 
 def _load_tree():
