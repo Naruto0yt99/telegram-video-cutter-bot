@@ -97,6 +97,22 @@ def _source_link(label: str, url: str) -> str:
     return f'<a href="{html.escape(url, quote=True)}">{html.escape(label)}</a>'
 
 
+def _is_non_anime_library_label(value: str) -> bool:
+    """Hide known group/admin topics that were accidentally stored as anime."""
+    normalized = _norm(value)
+    blocked = {
+        "chat", "chats", "general", "general chat", "welcome", "welcome chat",
+        "welcome topic", "welcome and feedback", "welcome sulululu",
+        "feedback", "feedback chat", "feedback topic", "bet game", "promotion",
+        "python", "rules", "announcements", "suggestions", "admin", "staff",
+        "introduction", "introductions", "intro", "friends", "friends chat",
+        "anime panel", "pfp and wallpaper", "pfp wallpapers", "application",
+        "phonks", "overlay", "group chat", "normal video", "normal videos",
+        "random", "other", "others", "misc", "miscellaneous",
+    }
+    return normalized in blocked
+
+
 def _load_tree():
     tree = {}
     with get_connection() as conn:
@@ -110,10 +126,14 @@ def _load_tree():
         ).fetchall()
 
     for row in rows:
+        if _is_non_anime_library_label(row["anime"]) or _is_non_anime_library_label(row["series"] or ""):
+            continue
         anime = canonical_anime(row["anime"])
-        if not anime:
+        if not anime or _is_non_anime_library_label(anime):
             continue
         series = canonical_anime(row["series"] or row["anime"]) or str(row["series"] or row["anime"])
+        if _is_non_anime_library_label(series):
+            continue
         if series not in {"Naruto", "Naruto Shippuden", "Naruto Movies"} and anime == "Naruto":
             series = "Naruto"
         raw_season = str(row["season"])
