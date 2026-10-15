@@ -8,13 +8,15 @@ from flask import Flask, jsonify, request, abort
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-DATABASE_URL = os.environ["DATABASE_URL"]
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 BRIDGE_SECRET = os.environ["BRIDGE_SECRET"]
 OWNER_ID = int(os.environ["OWNER_ID"])
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 app = Flask(__name__)
 
 def db():
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL is not configured")
     return psycopg.connect(DATABASE_URL, connect_timeout=10)
 
 def init_db():
@@ -152,10 +154,13 @@ def run_telegram():
     asyncio.run(runner())
 
 if __name__ == "__main__":
-    init_db()
-    if BOT_TOKEN:
+    if DATABASE_URL:
+        init_db()
+    else:
+        print("DATABASE_URL missing; configure Render Postgres connection URL.")
+    if BOT_TOKEN and DATABASE_URL and BRIDGE_SECRET:
         threading.Thread(target=run_telegram, daemon=True).start()
     else:
-        print("TELEGRAM_BOT_TOKEN missing; add it in Render environment variables.")
+        print("Cloud bot disabled until DATABASE_URL, BRIDGE_SECRET, and TELEGRAM_BOT_TOKEN are configured.")
     port = int(os.environ.get("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
