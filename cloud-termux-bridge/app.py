@@ -9,8 +9,8 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
-BRIDGE_SECRET = os.environ["BRIDGE_SECRET"]
-OWNER_ID = int(os.environ["OWNER_ID"])
+BRIDGE_SECRET = os.environ.get("BRIDGE_SECRET", "").strip()
+OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 app = Flask(__name__)
 
