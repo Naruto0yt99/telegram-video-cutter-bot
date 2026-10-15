@@ -133,14 +133,23 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text("\n\n".join(lines))
 
 def run_telegram():
-    if not BOT_TOKEN:
-        print("TELEGRAM_BOT_TOKEN missing: API starts, Telegram polling disabled.")
-        return
-    application = Application.builder().token(BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start_cmd))
-    application.add_handler(CommandHandler("run", run_cmd))
-    application.add_handler(CommandHandler("status", status_cmd))
-    application.run_polling(drop_pending_updates=False)
+    import asyncio
+    async def runner():
+        application = Application.builder().token(BOT_TOKEN).build()
+        application.add_handler(CommandHandler("start", start_cmd))
+        application.add_handler(CommandHandler("run", run_cmd))
+        application.add_handler(CommandHandler("status", status_cmd))
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling(drop_pending_updates=False)
+        try:
+            while True:
+                await asyncio.sleep(3600)
+        finally:
+            await application.updater.stop()
+            await application.stop()
+            await application.shutdown()
+    asyncio.run(runner())
 
 if __name__ == "__main__":
     init_db()
