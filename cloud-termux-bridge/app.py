@@ -84,6 +84,25 @@ def agent_result():
         )
         if not cur.fetchone():
             return jsonify(error="job not found or already completed"), 404
+    # Push completed job output to the owner. Previously results were only saved
+    # in Postgres, so a queued command could finish successfully with no visible
+    # Telegram reply until /status was manually requested.
+    if BOT_TOKEN and OWNER_ID:
+        try:
+            import urllib.request
+            message = f"☁️ Job #{job_id} {status.upper()}\\n\\n{result[:3200] or '(no output)'}"
+            payload = json.dumps({"chat_id": OWNER_ID, "text": message}).encode()
+            req = urllib.request.Request(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=8) as response:
+                response.read()
+        except Exception as exc:
+            # Result is already persisted; notification failure must not lose it.
+            print(f"Telegram result notification failed for job #{job_id}: {type(exc).__name__}")
     return jsonify(ok=True)
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
