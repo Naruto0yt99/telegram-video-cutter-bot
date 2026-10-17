@@ -1,4 +1,5 @@
 import os
+import json
 import threading
 import time
 from datetime import datetime, timezone
@@ -90,7 +91,7 @@ def agent_result():
     if BOT_TOKEN and OWNER_ID:
         try:
             import urllib.request
-            message = f"☁️ Job #{job_id} {status.upper()}\\n\\n{result[:3200] or '(no output)'}"
+            message = f"☁️ Job #{job_id} {status.upper()}\n\n{result[:3200] or '(no output)'}"
             payload = json.dumps({"chat_id": OWNER_ID, "text": message}).encode()
             req = urllib.request.Request(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
@@ -177,9 +178,10 @@ if __name__ == "__main__":
         init_db()
     else:
         print("DATABASE_URL missing; configure Render Postgres connection URL.")
-    if BOT_TOKEN and DATABASE_URL and BRIDGE_SECRET:
-        threading.Thread(target=run_telegram, daemon=True).start()
-    else:
-        print("Cloud bot disabled until DATABASE_URL, BRIDGE_SECRET, and TELEGRAM_BOT_TOKEN are configured.")
+    # Do not poll Telegram from Render. Termux owns getUpdates for this token;
+    # a second poller causes telegram.error.Conflict and disrupts command handling.
+    # This service only hosts the queue API and sends result notifications.
+    if not (BOT_TOKEN and DATABASE_URL and BRIDGE_SECRET):
+        print("Queue API/result notifications require DATABASE_URL, BRIDGE_SECRET, and TELEGRAM_BOT_TOKEN.")
     port = int(os.environ.get("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
