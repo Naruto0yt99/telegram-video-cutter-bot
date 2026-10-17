@@ -179,7 +179,7 @@ if __name__ == "__main__":
     else:
         print("DATABASE_URL missing; configure Render Postgres connection URL.")
     if BOT_TOKEN and DATABASE_URL and BRIDGE_SECRET:
-        threading.Thread(target=run_telegram, daemon=True).start()
+        print("Telegram polling disabled; Termux owns getUpdates. Outbound result notifications remain enabled.")
     else:
         print("Cloud bot disabled until DATABASE_URL, BRIDGE_SECRET, and TELEGRAM_BOT_TOKEN are configured.")
     port = int(os.environ.get("PORT", "10000"))
